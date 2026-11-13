@@ -29,6 +29,15 @@ fn main() {
             args.get(3),
             args.get(4),
         )),
+        Some("--mcp-proxy") => match (args.get(1), args.get(2)) {
+            (Some(app_id), Some(session)) => std::process::exit(
+                eco_platform_lib::proxy::serve(app_id, std::path::Path::new(session)),
+            ),
+            _ => {
+                eprintln!("usage: eco-platform --mcp-proxy <app-id> <session-dir>");
+                std::process::exit(2);
+            }
+        },
         _ => eco_platform_lib::run(),
     }
 }

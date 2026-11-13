@@ -1,16 +1,17 @@
 use crate::config;
 use crate::error::{msg, Error, Result};
 use crate::manifest;
-use crate::mcp;
+use crate::proxy;
 use crate::secrets::SecretStore;
 use base64::Engine as _;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const DISABLED_BUILTINS: &[&str] = &[
@@ -61,6 +62,158 @@ impl ChatItem {
             model: None,
         }
     }
+}
+
+#[derive(Default)]
+struct StreamPart {
+    id: String,
+    kind: String,
+    text: String,
+    tool: String,
+    status: String,
+}
+
+/// Live parts of the assistant message currently being generated. Built from
+/// `message.part.updated` / `message.part.delta` events on `/event`.
+#[derive(Default)]
+struct StreamState {
+    message_id: Option<String>,
+    parts: Vec<StreamPart>,
+    changed: bool,
+}
+
+impl StreamState {
+    fn part(&mut self, id: &str) -> &mut StreamPart {
+        if let Some(index) = self.parts.iter().position(|part| part.id == id) {
+            return &mut self.parts[index];
+        }
+        self.parts.push(StreamPart {
+            id: id.to_string(),
+            ..Default::default()
+        });
+        self.parts.last_mut().unwrap()
+    }
+
+    fn items(&self) -> Vec<ChatItem> {
+        let mut items = Vec::new();
+        let reasoning = self
+            .parts
+            .iter()
+            .filter(|part| part.kind == "reasoning")
+            .map(|part| part.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = self
+            .parts
+            .iter()
+            .filter(|part| part.kind == "text")
+            .map(|part| part.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if !reasoning.trim().is_empty() {
+            items.push(ChatItem::new("assistant", "reasoning", reasoning));
+        }
+        if !text.is_empty() {
+            items.push(ChatItem::new("assistant", "text", text));
+        }
+        for part in self.parts.iter().filter(|part| part.kind == "tool") {
+            let status = if part.status.is_empty() {
+                "called"
+            } else {
+                part.status.as_str()
+            };
+            items.push(ChatItem::new(
+                "tool",
+                "tool",
+                format!("{} -> {}", part.tool, status),
+            ));
+        }
+        items
+    }
+}
+
+/// Applies one bus event to the live state. Returns true when the turn is
+/// finished.
+fn apply_stream_event(state: &mut StreamState, event: &Value) -> bool {
+    let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+    let props = event.get("properties").unwrap_or(&Value::Null);
+
+    match kind {
+        "message.updated" => {
+            let info = props.get("info").unwrap_or(&Value::Null);
+            if info.get("role").and_then(Value::as_str) != Some("assistant") {
+                return false;
+            }
+            if let Some(id) = info.get("id").and_then(Value::as_str) {
+                if state.message_id.as_deref() != Some(id) {
+                    state.message_id = Some(id.to_string());
+                    state.parts.clear();
+                }
+            }
+        }
+        "message.part.updated" => {
+            let Some(part) = props.get("part") else {
+                return false;
+            };
+            if part.get("messageID").and_then(Value::as_str)
+                != state.message_id.as_deref()
+            {
+                return false;
+            }
+            let Some(id) = part.get("id").and_then(Value::as_str) else {
+                return false;
+            };
+            let part_kind = part.get("type").and_then(Value::as_str).unwrap_or("");
+            if !matches!(part_kind, "text" | "reasoning" | "tool") {
+                return false;
+            }
+            let entry = state.part(id);
+            entry.kind = part_kind.to_string();
+            match part_kind {
+                "text" | "reasoning" => {
+                    entry.text = part
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                }
+                "tool" => {
+                    entry.tool = part
+                        .get("tool")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool")
+                        .to_string();
+                    entry.status = part
+                        .pointer("/state/status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("called")
+                        .to_string();
+                }
+                _ => {}
+            }
+            state.changed = true;
+        }
+        "message.part.delta" => {
+            if props.get("messageID").and_then(Value::as_str)
+                != state.message_id.as_deref()
+            {
+                return false;
+            }
+            let Some(id) = props.get("partID").and_then(Value::as_str) else {
+                return false;
+            };
+            let delta = props.get("delta").and_then(Value::as_str).unwrap_or("");
+            if delta.is_empty() {
+                return false;
+            }
+            let entry = state.part(id);
+            entry.text.push_str(delta);
+            state.changed = true;
+        }
+        _ => {}
+    }
+    false
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -142,6 +295,16 @@ fn agent() -> ureq::Agent {
     let mut builder = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(5))
         .timeout(Duration::from_secs(300));
+    if let Ok(tls) = ureq::native_tls::TlsConnector::new() {
+        builder = builder.tls_connector(std::sync::Arc::new(tls));
+    }
+    builder.build()
+}
+
+/// The event stream stays open for the whole turn, so it must not inherit the
+/// 300 s request timeout used for regular calls.
+fn stream_agent() -> ureq::Agent {
+    let mut builder = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(5));
     if let Ok(tls) = ureq::native_tls::TlsConnector::new() {
         builder = builder.tls_connector(std::sync::Arc::new(tls));
     }
@@ -248,49 +411,52 @@ fn provider_config(
     Ok((provider, "gw".to_string(), model_name, envs))
 }
 
+/// Everything the gateway process needs. Paths are absolute because opencode
+/// starts the proxy with its own working directory and a replaced HOME.
+pub struct GatewayConfig {
+    pub exe: PathBuf,
+    pub home: PathBuf,
+    pub session_dir: PathBuf,
+}
+
 fn build_config(
     app: &manifest::Manifest,
     cfg: &config::UserConfig,
     secrets: &SecretStore,
+    gateway: &GatewayConfig,
 ) -> Result<(Value, String, String, Vec<(String, String)>)> {
-    let (provider, provider_id, model_id, mut envs) = provider_config(cfg, secrets)?;
+    let (provider, provider_id, model_id, envs) = provider_config(cfg, secrets)?;
 
-    let mut servers = serde_json::Map::new();
+    let names = proxy::gateway_tool_names(app);
     let mut permissions = serde_json::Map::new();
     permissions.insert("*".to_string(), json!("deny"));
+    for name in &names {
+        permissions.insert(
+            format!("{}_{}", proxy::SERVER_NAME, name),
+            json!("allow"),
+        );
+    }
 
-    for connection in &app.connections {
-        if connection.kind != "http-mcp" {
-            continue;
-        }
-        let def = mcp::get(secrets, &connection.id)?;
-        let mut headers = serde_json::Map::new();
-        if let Some(token) = &def.token {
-            let var = format!(
-                "ECO_MCP_{}_TOKEN",
-                connection.id.to_uppercase().replace('-', "_")
-            );
-            headers.insert(
-                "Authorization".to_string(),
-                json!(format!("Bearer {{env:{var}}}")),
-            );
-            envs.push((var, token.clone()));
-        }
+    let mut servers = serde_json::Map::new();
+    if !names.is_empty() {
         servers.insert(
-            connection.id.clone(),
+            proxy::SERVER_NAME.to_string(),
             json!({
-                "type": "remote",
-                "url": def.url,
-                "headers": Value::Object(headers),
-                "timeout": 30000
+                "type": "local",
+                "command": [
+                    gateway.exe.to_string_lossy(),
+                    "--mcp-proxy",
+                    app.app_id,
+                    gateway.session_dir.to_string_lossy()
+                ],
+                "environment": {
+                    "ECO_PLATFORM_HOME": gateway.home.to_string_lossy()
+                },
+                // Keep tools on the provider's native list: the platform owns
+                // naming, permissions and audit.
+                "codemode": false
             }),
         );
-        for tool in &app.tools {
-            permissions.insert(
-                format!("{}_{}", connection.id, tool.tool),
-                json!("allow"),
-            );
-        }
     }
 
     let mut tools = serde_json::Map::new();
@@ -366,8 +532,16 @@ impl Engine {
         let cfg = config::load(home);
         let secrets = SecretStore::new(home);
 
+        let gateway = GatewayConfig {
+            exe: std::env::current_exe()
+                .map_err(|e| Error::Msg(format!("cannot resolve platform binary: {e}")))?,
+            home: std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()),
+            session_dir: std::fs::canonicalize(workdir)
+                .unwrap_or_else(|_| workdir.to_path_buf()),
+        };
+
         let (engine_config, provider_id, model_id, engine_envs) =
-            build_config(&app, &cfg, &secrets)?;
+            build_config(&app, &cfg, &secrets, &gateway)?;
 
         let engine_home = home.join("apps").join(app_id).join("engine");
         std::fs::create_dir_all(&engine_home)?;
@@ -574,6 +748,111 @@ impl ChatSession {
             &format!("/session/{}/message", self.session_id),
             Some(&payload),
         )?;
+        Ok(())
+    }
+
+    /// Opens the server-sent event stream. Connect before sending the prompt,
+    /// otherwise the first deltas (reasoning start) are lost.
+    pub fn event_stream(&self) -> Result<ureq::Response> {
+        let agent = stream_agent();
+        let url = format!("{}/global/event", self.base);
+        match agent
+            .get(&url)
+            .set("Authorization", &self.auth)
+            .set("Accept", "text/event-stream")
+            .call()
+        {
+            Ok(response) => Ok(response),
+            Err(ureq::Error::Status(code, response)) => {
+                let body = response.into_string().unwrap_or_default();
+                msg(format!(
+                    "event stream HTTP {code}: {}",
+                    body.chars().take(200).collect::<String>()
+                ))
+            }
+            Err(e) => msg(format!("event stream transport error: {e}")),
+        }
+    }
+
+    /// Consumes `/event` until the session turns idle. Only the assistant
+    /// message of this session is tracked; other sessions and bus metadata are
+    /// ignored. Emits a live snapshot at most every 80 ms.
+    pub fn consume_events<F>(
+        &self,
+        response: ureq::Response,
+        stop: &AtomicBool,
+        mut emit: F,
+    ) -> Result<()>
+    where
+        F: FnMut(Vec<ChatItem>),
+    {
+        let mut reader = BufReader::new(response.into_reader());
+        let mut state = StreamState::default();
+        let mut data = String::new();
+        let mut line = String::new();
+        let mut last_emit = Instant::now() - Duration::from_secs(1);
+
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            line.clear();
+            let read = reader
+                .read_line(&mut line)
+                .map_err(|e| Error::Msg(format!("event stream read failed: {e}")))?;
+            if read == 0 {
+                break;
+            }
+            let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
+            if !trimmed.is_empty() {
+                if let Some(rest) = trimmed.strip_prefix("data:") {
+                    data.push_str(rest.trim_start());
+                }
+                continue;
+            }
+            if data.is_empty() {
+                continue;
+            }
+            let envelope: Value = match serde_json::from_str(&data) {
+                Ok(value) => value,
+                Err(_) => {
+                    data.clear();
+                    continue;
+                }
+            };
+            data.clear();
+
+            // `/global/event` wraps the bus event in
+            // `{ directory, project, payload: { type, properties } }`.
+            let event = envelope.get("payload").unwrap_or(&envelope);
+            let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+            let props = event.get("properties").unwrap_or(&Value::Null);
+            if props.get("sessionID").and_then(Value::as_str)
+                != Some(self.session_id.as_str())
+            {
+                continue;
+            }
+
+            let finished = match kind {
+                "session.idle" => true,
+                "session.status" => {
+                    props.pointer("/status/type").and_then(Value::as_str) == Some("idle")
+                }
+                "session.error" => true,
+                _ => apply_stream_event(&mut state, event),
+            };
+
+            if state.changed
+                && (finished || last_emit.elapsed() >= Duration::from_millis(80))
+            {
+                emit(state.items());
+                state.changed = false;
+                last_emit = Instant::now();
+            }
+            if finished {
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -809,4 +1088,89 @@ pub fn parse_sessions(raw: &Value) -> Vec<ChatSummary> {
     out
 }
 pub type EngineMap = HashMap<String, Engine>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn stream_state_accumulates_parts() {
+        let mut state = StreamState::default();
+        let mut feed = |value: Value| apply_stream_event(&mut state, &value);
+
+        feed(json!({
+            "type": "message.updated",
+            "properties": { "sessionID": "s", "info": { "id": "m", "role": "assistant" } }
+        }));
+        feed(json!({
+            "type": "message.part.updated",
+            "properties": { "sessionID": "s", "part": {
+                "id": "r", "messageID": "m", "type": "reasoning", "text": "think"
+            }}
+        }));
+        feed(json!({
+            "type": "message.part.updated",
+            "properties": { "sessionID": "s", "part": {
+                "id": "t", "messageID": "m", "type": "text", "text": ""
+            }}
+        }));
+        feed(json!({
+            "type": "message.part.delta",
+            "properties": { "sessionID": "s", "messageID": "m", "partID": "t", "field": "text", "delta": "hel" }
+        }));
+        feed(json!({
+            "type": "message.part.delta",
+            "properties": { "sessionID": "s", "messageID": "m", "partID": "t", "field": "text", "delta": "lo" }
+        }));
+        feed(json!({
+            "type": "message.part.updated",
+            "properties": { "sessionID": "s", "part": {
+                "id": "x", "messageID": "m", "type": "tool", "tool": "doc_read",
+                "state": { "status": "running" }
+            }}
+        }));
+
+        let items = state.items();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].kind, "reasoning");
+        assert_eq!(items[0].text, "think");
+        assert_eq!(items[1].kind, "text");
+        assert_eq!(items[1].text, "hello");
+        assert_eq!(items[2].text, "doc_read -> running");
+    }
+
+    #[test]
+    fn parts_of_other_messages_are_ignored() {
+        let mut state = StreamState::default();
+        apply_stream_event(
+            &mut state,
+            &json!({
+                "type": "message.updated",
+                "properties": { "info": { "id": "m1", "role": "assistant" } }
+            }),
+        );
+        apply_stream_event(
+            &mut state,
+            &json!({
+                "type": "message.part.updated",
+                "properties": { "part": {
+                    "id": "p", "messageID": "m1", "type": "text", "text": "mine"
+                }}
+            }),
+        );
+        apply_stream_event(
+            &mut state,
+            &json!({
+                "type": "message.part.updated",
+                "properties": { "part": {
+                    "id": "q", "messageID": "other", "type": "text", "text": "not mine"
+                }}
+            }),
+        );
+        let items = state.items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "mine");
+    }
+}
 

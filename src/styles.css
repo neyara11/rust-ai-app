@@ -1394,7 +1394,6 @@ button:focus-visible,
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   line-height: 1.6;
-  animation: fade-in 0.18s var(--ease);
 }
 
 .msg.user {

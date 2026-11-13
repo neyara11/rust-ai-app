@@ -6,6 +6,7 @@ pub mod engine;
 pub mod error;
 pub mod manifest;
 pub mod mcp;
+pub mod proxy;
 pub mod registry;
 pub mod secrets;
 pub mod state;
@@ -496,7 +497,8 @@ pub fn cli_import_auth(
     }
 }
 
-/// `--chat-async <app-id> <message>`: verifies async prompting and polling.
+/// `--chat-async <app-id> <message>`: verifies live streaming through `/event`
+/// and the final history handoff.
 pub fn cli_chat_async(app_id: Option<&String>, message: Option<&String>) -> i32 {
     let (Some(app_id), Some(message)) = (app_id, message) else {
         eprintln!("usage: eco-platform --chat-async <app-id> <message>");
@@ -521,42 +523,76 @@ pub fn cli_chat_async(app_id: Option<&String>, message: Option<&String>) -> i32 
         }
     };
     let session = engine.snapshot();
-    let started = std::time::Instant::now();
-    if let Err(e) = session.prompt(message, None) {
-        println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
-        drop(engine);
-        artifacts::close_session(&dir);
-        return 1;
-    }
-    println!("prompt accepted in {} ms", started.elapsed().as_millis());
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
-    let mut ticks = 0;
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        let Ok(raw) = session.history_raw() else { break };
-        let busy = session.busy(&raw);
-        let items = engine::parse_history(&raw);
-        ticks += 1;
-        println!(
-            "tick {ticks} t={}ms items={} busy={busy}",
-            started.elapsed().as_millis(),
-            items.len()
-        );
-        if !busy {
-            for item in items {
-                println!("[{}] {}", item.role, item.text);
-            }
-            break;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = match session.event_stream() {
+        Ok(stream) => {
+            let stop = stop.clone();
+            let reader = session.clone();
+            Some(std::thread::spawn(move || {
+                let mut last_text = 0usize;
+                let result = reader.consume_events(stream, &stop, |items| {
+                    let text = items
+                        .iter()
+                        .filter(|item| item.kind == "text")
+                        .map(|item| item.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("");
+                    let reasoning = items
+                        .iter()
+                        .filter(|item| item.kind == "reasoning")
+                        .map(|item| item.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if text.len() != last_text {
+                        last_text = text.len();
+                        println!(
+                            "[stream] reasoning={} text={} chars: {}",
+                            reasoning.chars().count(),
+                            text.chars().count(),
+                            text.chars().take(100).collect::<String>()
+                        );
+                    }
+                });
+                if let Err(e) = result {
+                    println!("[stream] error: {e}");
+                }
+            }))
         }
-        if std::time::Instant::now() > deadline {
-            println!("timed out waiting for completion");
-            break;
+        Err(e) => {
+            println!("[stream] unavailable: {e}");
+            None
         }
+    };
+
+    let started = std::time::Instant::now();
+    let result = session
+        .prompt(message, None)
+        .and_then(|_| session.history());
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(watcher) = watcher {
+        let _ = watcher.join();
     }
+    println!("prompt finished in {} ms", started.elapsed().as_millis());
+
     drop(engine);
     artifacts::close_session(&dir);
-    0
+    match result {
+        Ok(items) => {
+            for item in items {
+                if item.kind == "reasoning" {
+                    println!("[reasoning] {} chars", item.text.chars().count());
+                } else {
+                    println!("[{}] {}", item.role, item.text);
+                }
+            }
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
 }
 
 /// `--chat-sessions <app-id>`: lists chats and creates one new chat, proving

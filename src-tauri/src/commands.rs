@@ -618,35 +618,40 @@ pub fn chat_send(
         }),
     );
 
-    let stop_poll = Arc::new(AtomicBool::new(false));
-    let poll_stop = stop_poll.clone();
-    let poll_app = app.clone();
-    let poll_app_id = app_id.clone();
-    let poll_session = session.clone();
-    std::thread::spawn(move || {
-        while !poll_stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(700));
-            if poll_stop.load(Ordering::Relaxed) {
-                break;
-            }
-            if let Ok(raw) = poll_session.history_raw() {
-                let items = crate::engine::parse_history(&raw);
-                let _ = poll_app.emit(
-                    "chat://update",
+    let stop_stream = Arc::new(AtomicBool::new(false));
+
+    // Subscribe to the engine bus before sending the prompt so reasoning and
+    // the first text deltas are not lost. The final authoritative history is
+    // still fetched when the prompt call returns.
+    if let Ok(stream) = session.event_stream() {
+        let stream_stop = stop_stream.clone();
+        let stream_app = app.clone();
+        let stream_app_id = app_id.clone();
+        let stream_session = session.clone();
+        let stream_id = session.session_id.clone();
+        std::thread::spawn(move || {
+            let result = stream_session.consume_events(stream, &stream_stop, |items| {
+                let _ = stream_app.emit(
+                    "chat://stream",
                     serde_json::json!({
-                        "app_id": poll_app_id,
-                        "session": poll_session.session_id,
+                        "app_id": stream_app_id,
+                        "session": stream_id,
                         "items": items
                     }),
                 );
+            });
+            if let Err(e) = result {
+                eprintln!("chat event stream failed: {e}");
             }
-        }
-    });
+        });
+    } else {
+        eprintln!("chat event stream unavailable: live deltas disabled");
+    }
 
     std::thread::spawn(move || {
         session.title_from_first_message(&text);
         let result = session.prompt(&text, variant.as_deref());
-        stop_poll.store(true, Ordering::Relaxed);
+        stop_stream.store(true, Ordering::Relaxed);
         match result {
             Ok(()) => {
                 if let Ok(raw) = session.history_raw() {

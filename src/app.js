@@ -793,10 +793,89 @@ function getStartersForApp(appId) {
   ];
 }
 
+function chatItemKey(item) {
+  return [
+    item.role,
+    item.kind,
+    item.text || "",
+    item.tokens_in ?? "",
+    item.tokens_out ?? "",
+    item.reasoning_tokens ?? "",
+    item.ms ?? "",
+    item.tok_s ?? "",
+    item.model || "",
+  ].join("\u0001");
+}
+
+function buildChatNode(item) {
+  if (item.role === "tool") {
+    const div = document.createElement("div");
+    div.className = "msg tool";
+    div.textContent = `⚙ tool: ${item.text}`;
+    return div;
+  }
+
+  if (item.kind === "reasoning") {
+    const details = document.createElement("details");
+    details.className = "msg reasoning";
+    const summary = document.createElement("summary");
+    summary.textContent = "Ход размышлений модели";
+    const body = document.createElement("div");
+    body.className = "msg-body";
+    body.innerHTML = renderMarkdown(item.text);
+    details.appendChild(summary);
+    details.appendChild(body);
+    return details;
+  }
+
+  const div = document.createElement("div");
+  div.className = "msg " + (item.role === "user" ? "user" : "assistant");
+  const body = document.createElement("div");
+  body.className = "msg-body";
+  if (item.role === "user") {
+    body.textContent = item.text;
+  } else {
+    body.innerHTML = renderMarkdown(item.text);
+  }
+  div.appendChild(body);
+
+  if (item.role === "assistant") {
+    const footer = document.createElement("div");
+    footer.className = "msg-foot";
+    const stats = [];
+    if (item.tokens_in != null) stats.push(`↑${fmtNum(item.tokens_in)}`);
+    if (item.tokens_out != null) stats.push(`↓${fmtNum(item.tokens_out)}`);
+    if (item.reasoning_tokens) stats.push(`reasoning ${fmtNum(item.reasoning_tokens)}`);
+    if (item.tok_s) stats.push(`${Math.round(item.tok_s)} tok/s`);
+    if (item.ms) stats.push(`${(item.ms / 1000).toFixed(1)} с`);
+    if (item.model) stats.push(item.model);
+    const meta = document.createElement("span");
+    meta.className = "muted small mono";
+    meta.textContent = stats.join(" · ");
+    const copy = document.createElement("button");
+    copy.className = "ghost small";
+    copy.textContent = "Копировать";
+    copy.dataset.copy = "1";
+    copy.dataset.text = item.text;
+    footer.appendChild(meta);
+    footer.appendChild(copy);
+    div.appendChild(footer);
+  }
+
+  return div;
+}
+
+// Incremental rendering: polling fires every 700 ms and most items do not
+// change. Rebuilding the whole log made messages blink and reset the scroll.
 function renderChat(items) {
   const log = $("chat-log");
-  log.innerHTML = "";
+  const rendered = ctx.rendered || (ctx.rendered = []);
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+
   if (!items || !items.length) {
+    if (log.querySelector(".chat-empty")) return;
+    log.innerHTML = "";
+    rendered.length = 0;
     const starters = getStartersForApp(ctx.appId)
       .map((s) => `<button type="button" class="starter-chip" data-starter="${esc(s)}">${esc(s)}</button>`)
       .join("");
@@ -816,66 +895,38 @@ function renderChat(items) {
     return;
   }
 
-  for (const item of items) {
-    if (item.role === "tool") {
-      const div = document.createElement("div");
-      div.className = "msg tool";
-      div.textContent = `⚙ tool: ${item.text}`;
-      log.appendChild(div);
-      continue;
-    }
-
-    if (item.kind === "reasoning") {
-      const details = document.createElement("details");
-      details.className = "msg reasoning";
-      const summary = document.createElement("summary");
-      summary.textContent = "Ход размышлений модели";
-      const body = document.createElement("div");
-      body.className = "msg-body";
-      body.innerHTML = renderMarkdown(item.text);
-      details.appendChild(summary);
-      details.appendChild(body);
-      log.appendChild(details);
-      continue;
-    }
-
-    const div = document.createElement("div");
-    div.className = "msg " + (item.role === "user" ? "user" : "assistant");
-    const body = document.createElement("div");
-    body.className = "msg-body";
-    if (item.role === "user") {
-      body.textContent = item.text;
-    } else {
-      body.innerHTML = renderMarkdown(item.text);
-    }
-    div.appendChild(body);
-
-    if (item.role === "assistant") {
-      const footer = document.createElement("div");
-      footer.className = "msg-foot";
-      const stats = [];
-      if (item.tokens_in != null) stats.push(`↑${fmtNum(item.tokens_in)}`);
-      if (item.tokens_out != null) stats.push(`↓${fmtNum(item.tokens_out)}`);
-      if (item.reasoning_tokens) stats.push(`reasoning ${fmtNum(item.reasoning_tokens)}`);
-      if (item.tok_s) stats.push(`${Math.round(item.tok_s)} tok/s`);
-      if (item.ms) stats.push(`${(item.ms / 1000).toFixed(1)} с`);
-      if (item.model) stats.push(item.model);
-      const meta = document.createElement("span");
-      meta.className = "muted small mono";
-      meta.textContent = stats.join(" · ");
-      const copy = document.createElement("button");
-      copy.className = "ghost small";
-      copy.textContent = "Копировать";
-      copy.dataset.copy = "1";
-      copy.dataset.text = item.text;
-      footer.appendChild(meta);
-      footer.appendChild(copy);
-      div.appendChild(footer);
-    }
-
-    log.appendChild(div);
+  if (log.querySelector(".chat-empty")) {
+    log.innerHTML = "";
+    rendered.length = 0;
   }
-  log.scrollTop = log.scrollHeight;
+
+  for (let i = 0; i < items.length; i++) {
+    const fingerprint = chatItemKey(items[i]);
+    const entry = rendered[i];
+    const current = log.children[i];
+    if (entry && entry.fingerprint === fingerprint && entry.node === current) continue;
+
+    const node = buildChatNode(items[i]);
+    if (entry && entry.node && entry.node.tagName === "DETAILS" && entry.node.open) {
+      node.open = true;
+    }
+    if (current) {
+      log.replaceChild(node, current);
+    } else {
+      log.appendChild(node);
+    }
+    rendered[i] = { fingerprint, node };
+  }
+
+  while (rendered.length > items.length) {
+    const entry = rendered.pop();
+    if (entry.node.parentNode === log) log.removeChild(entry.node);
+  }
+  while (log.children.length > items.length) {
+    log.removeChild(log.lastElementChild);
+  }
+
+  if (atBottom) log.scrollTop = log.scrollHeight;
 }
 
 function fmtNum(value) {
@@ -984,6 +1035,10 @@ async function refreshChats() {
 async function loadHistory() {
   const items = await invoke("chat_history", { app_id: ctx.appId });
   ctx.chatItems = items;
+  ctx.acceptStream = false;
+  ctx.streamingItems = [];
+  $("chat-log").innerHTML = "";
+  ctx.rendered = [];
   renderChat(items);
   await syncBusy();
 }
@@ -1015,6 +1070,8 @@ async function newChat() {
     const info = await invoke("chat_new", { app_id: ctx.appId });
     ctx.chatId = info.session;
     ctx.chatItems = [];
+    ctx.acceptStream = false;
+    ctx.streamingItems = [];
     setBusy(false);
     renderChat([]);
     await refreshChats();
@@ -1050,16 +1107,21 @@ async function sendChat() {
   const variant = $("chat-reasoning").value || null;
   const optimistic = [...(ctx.chatItems || []), { role: "user", kind: "text", text }];
   ctx.chatItems = optimistic;
+  ctx.streamingItems = [];
+  ctx.acceptStream = true;
   renderChat(optimistic);
   try {
     await ensureChat();
     await invoke("chat_send", { app_id: ctx.appId, text, variant });
     if (!(window.__TAURI__ && window.__TAURI__.event)) {
+      ctx.acceptStream = false;
       await refreshChats();
       await loadHistory();
       setBusy(false);
     }
   } catch (e) {
+    ctx.acceptStream = false;
+    ctx.streamingItems = [];
     chatError(String(e));
     setBusy(false);
   }
@@ -1075,10 +1137,20 @@ async function stopChat() {
 function bindChatEvents() {
   const listen = window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
   if (!listen) return;
+  listen("chat://stream", (event) => {
+    const payload = event.payload || {};
+    if (payload.app_id !== ctx.appId) return;
+    if (payload.session && payload.session !== ctx.chatId) return;
+    if (!ctx.acceptStream) return;
+    ctx.streamingItems = payload.items || [];
+    renderChat([...(ctx.chatItems || []), ...ctx.streamingItems]);
+  });
   listen("chat://update", (event) => {
     const payload = event.payload || {};
     if (payload.app_id !== ctx.appId) return;
     if (payload.session && payload.session !== ctx.chatId) return;
+    ctx.acceptStream = false;
+    ctx.streamingItems = [];
     ctx.chatItems = payload.items || [];
     renderChat(ctx.chatItems);
   });
@@ -1087,12 +1159,18 @@ function bindChatEvents() {
     if (payload.app_id !== ctx.appId) return;
     if (payload.session && payload.session !== ctx.chatId) return;
     setBusy(payload.busy);
-    if (!payload.busy) refreshChats();
+    if (!payload.busy) {
+      ctx.acceptStream = false;
+      ctx.streamingItems = [];
+      refreshChats();
+    }
   });
   listen("chat://error", (event) => {
     const payload = event.payload || {};
     if (payload.app_id !== ctx.appId) return;
     if (payload.session && payload.session !== ctx.chatId) return;
+    ctx.acceptStream = false;
+    ctx.streamingItems = [];
     chatError(payload.message || "ошибка движка");
     setBusy(false);
   });
