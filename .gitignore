@@ -4,6 +4,10 @@
 /.data
 /dev/keys
 node_modules/
+tools/docx-export/.venv/
+tools/docx-export/build/
+tools/docx-export/dist/
+tools/docx-export/*.spec
 *.log
 .DS_Store
 Thumbs.db

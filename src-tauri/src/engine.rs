@@ -416,7 +416,7 @@ fn provider_config(
 pub struct GatewayConfig {
     pub exe: PathBuf,
     pub home: PathBuf,
-    pub session_dir: PathBuf,
+    pub workspace: PathBuf,
 }
 
 fn build_config(
@@ -447,7 +447,7 @@ fn build_config(
                     gateway.exe.to_string_lossy(),
                     "--mcp-proxy",
                     app.app_id,
-                    gateway.session_dir.to_string_lossy()
+                    gateway.workspace.to_string_lossy()
                 ],
                 "environment": {
                     "ECO_PLATFORM_HOME": gateway.home.to_string_lossy()
@@ -536,7 +536,7 @@ impl Engine {
             exe: std::env::current_exe()
                 .map_err(|e| Error::Msg(format!("cannot resolve platform binary: {e}")))?,
             home: std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()),
-            session_dir: std::fs::canonicalize(workdir)
+            workspace: std::fs::canonicalize(workdir)
                 .unwrap_or_else(|_| workdir.to_path_buf()),
         };
 

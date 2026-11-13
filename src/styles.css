@@ -1033,6 +1033,22 @@ button:focus-visible,
   min-width: 0;
 }
 
+.ws-workspace {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 320px;
+  justify-content: flex-end;
+}
+
+.ws-folder {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .icon-back {
   padding: 6px 10px;
   font-size: 12px;

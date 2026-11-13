@@ -1,19 +1,19 @@
 const browserMock = (() => {
   const mockDocs = {
-    "eco-logs": [
+    "doc-writer": [
       {
-        id: "report",
+        id: "document",
         revision: "a4f912c0",
         finalized: false,
         markdown:
-          "# Отчёт по инциденту INC-2026-1142\n\n## Сводка\nПик ошибок `502 Bad Gateway` в сервисе `bo-web` с **14:05** по **14:20 MSK** (12 340 событий).\n\n## Таймлайн\n- **14:04** — деплой релиза `bo-web:2.18.4`\n- **14:05** — исчерпание пула соединений к `eco-auth`\n- **14:20** — автоматический откат пула\n\n## Корневая причина\nТаймаут чтения увеличен до `30s` без пропорционального расширения лимита воркеров.\n",
+          "# План проверки гипотезы\n\n<!-- id: summary -->\n## Кратко\nПроверяем деградацию БД после релиза.\n\n<!-- id: body -->\n## Шаги\n- Снять метрики за окно всплеска\n- Сверить таймауты пула соединений\n\n<!-- id: conclusion -->\n## Вывод\nПока не сформулирован.\n",
       },
       {
-        id: "defect",
+        id: "notes",
         revision: "7b3e01d8",
-        finalized: true,
+        finalized: false,
         markdown:
-          "# Дефект: исчерпание connection pool в bo-web\n\n- **Компонент:** `bo-web`\n- **Приоритет:** High\n- **Воспроизведение:** нагрузка > 450 RPS при деградации `eco-auth`\n",
+          "# Заметки\n\n- Черновик вопросов к дежурному\n- Ссылки на дашборды\n",
       },
     ],
     "doc-lookup": [
@@ -29,33 +29,17 @@ const browserMock = (() => {
 
   const mockApps = [
     {
-      app_id: "eco-logs",
-      name: "Разбор алертов и логов",
-      version: "1.4.0",
-      publisher: "CN=ECO AIOps Security",
-      path: "D:\\git\\rust-ai-app\\.data\\apps\\eco-logs",
+      app_id: "doc-writer",
+      name: "Документы и Word",
+      version: "0.1.0",
+      publisher: "CN=ECO AIOps Dev",
+      path: "D:\\git\\rust-ai-app\\.data\\apps\\doc-writer",
       trusted: true,
       problems: [],
-      docs: [
-        { id: "report", label: "Отчёт по инциденту", export: ["md", "docx"] },
-        { id: "defect", label: "Дефект", export: ["md"] },
-      ],
-      tools: [
-        { tool: "search", argv: ["--tool", "search"], stream: "read" },
-        { tool: "top", argv: ["--tool", "top"], stream: "read" },
-        { tool: "hist", argv: ["--tool", "hist"], stream: "read" },
-        { tool: "trace", argv: ["--tool", "trace"], stream: "read" },
-        { tool: "impact", argv: ["--tool", "impact"], stream: "read" },
-        { tool: "analyze", argv: ["--tool", "analyze"], stream: "read" },
-        { tool: "verify", argv: ["--tool", "verify"], stream: "read" },
-        { tool: "dump", argv: ["--tool", "dump"], stream: "write" },
-        { tool: "artifact", argv: ["--tool", "artifact"], stream: "read" },
-      ],
-      connections: [
-        { id: "llm", type: "llm", required: true },
-        { id: "opensearch", type: "opensearch", required: true },
-        { id: "sentry", type: "sentry", required: false },
-      ],
+      docs: [],
+      tools: [{ tool: "docx_export", bin: "bin/docx-export.exe", stream: "write" }],
+      capabilities: { file_scopes: ["workspace"] },
+      connections: [{ id: "llm", type: "llm", required: true }],
     },
     {
       app_id: "doc-lookup",
@@ -90,43 +74,38 @@ const browserMock = (() => {
   ];
 
   const mockChats = {
-    "eco-logs": [
+    "doc-writer": [
       {
-        id: "ses-101",
-        title: "Пик 502 в bo-web (14:05–14:20)",
+        id: "ses-301",
+        title: "Документ: план проверки",
         items: [
           {
             role: "user",
             kind: "text",
-            text: "Проверь всплеск 502 ошибок в индексе bo-* за последний час и выдели корневую причину.",
+            text: "Создай документ с планом проверки гипотезы о деградации БД и заполни раздел «Кратко».",
           },
           {
             role: "assistant",
             kind: "reasoning",
-            text: "Запрашиваю агрегацию по индексу `bo-*` через инструмент `analyze`, затем сверяю пиковый интервал 14:05–14:20 и трассирую `trace_id`.",
+            text: "Сначала читаю `document`, затем заполняю пустой документ через `doc_create` и правлю разделы по якорям.",
           },
           {
             role: "tool",
             kind: "tool",
-            text: 'analyze {"index":"bo-*","window":"1h"} → 12 340 hits, peak 14:05–14:20 (682 ms)',
+            text: "platform_doc_read -> completed",
           },
           {
             role: "assistant",
             kind: "text",
-            text: "### Результаты триажа `bo-*`\n\nЗафиксировано **12 340** событий с кодом `502` в интервале `14:05–14:20 MSK`.\n\n- Основной источник: `bo-web` (8 123 ошибки, **65.8%**)\n- Причина деградации: таймаут обращения к `eco-auth` (`upstream prematurely closed connection`)\n- Рекомендация: зафиксировать черновик в документе `report.md` и выгрузить сэмпл трейсов в артефакт сессии.",
-            tokens_in: 1420,
-            tokens_out: 385,
-            reasoning_tokens: 210,
-            tok_s: 64.2,
-            ms: 4820,
+            text: "### Документ обновлён\n\nСоздал `document` с разделами «Кратко», «Шаги» и «Вывод». Ревизия: `a4f912c0`.\n\nДальше можно дополнить шаги и экспортировать документ в Word.",
+            tokens_in: 980,
+            tokens_out: 210,
+            reasoning_tokens: 120,
+            tok_s: 58.4,
+            ms: 3400,
             model: "~deepseek/deepseek-v4-flash-latest",
           },
         ],
-      },
-      {
-        id: "ses-102",
-        title: "Анализ таймаутов Sentry eco-auth",
-        items: [],
       },
     ],
     "doc-lookup": [
@@ -138,8 +117,8 @@ const browserMock = (() => {
     ],
   };
 
-  let activeSession = { "eco-logs": "ses-101", "doc-lookup": "ses-201" };
-  let secrets = ["llm_api_key", "opensearch_ro_token"];
+  let activeSession = { "doc-writer": "ses-301", "doc-lookup": "ses-201" };
+  let secrets = ["llm_api_key"];
   let mcpServers = ["context7"];
   let config = {
     llm_endpoint: "https://routerai.ru/api/v1",
@@ -209,8 +188,11 @@ const browserMock = (() => {
         return {
           app_id: args.app_id,
           dir: `D:\\git\\rust-ai-app\\.data\\apps\\${args.app_id}\\sessions\\9f81c2`,
+          workspace: `D:\\work\\${args.app_id}`,
           docs: mockDocs[args.app_id] || [],
         };
+      case "choose_workspace":
+        return `D:\\work\\${args.app_id}`;
       case "close_app":
       case "chat_stop":
       case "chat_abort":
@@ -324,9 +306,6 @@ const ctx = {
   installed: null,
   appId: null,
   appMeta: null,
-  docId: null,
-  doc: null,
-  docPreviewMode: false,
   config: null,
 };
 
@@ -415,12 +394,6 @@ async function guard(fn) {
   }
 }
 
-function labelFor(docId) {
-  const defs = (ctx.appMeta && ctx.appMeta.docs) || [];
-  const found = defs.find((d) => d.id === docId);
-  return found ? found.label : docId;
-}
-
 /* ---------- apps ---------- */
 
 async function refreshApps() {
@@ -438,7 +411,7 @@ function renderApps() {
     box.innerHTML = `
       <div class="empty-catalog">
         <div class="title">Ни одного подписанного пакета пока не установлено</div>
-        <p class="muted small">Укажите путь к папке пакета (например, <code class="mono">dev-apps/eco-logs</code>) или нажмите кнопку быстрой установки выше.</p>
+        <p class="muted small">Укажите путь к папке пакета (например, <code class="mono">dev-apps/doc-writer</code>) или нажмите кнопку быстрой установки выше.</p>
       </div>`;
     return;
   }
@@ -513,8 +486,6 @@ async function openApp(appId) {
     } catch (_) {
       $("chat-reasoning").value = "";
     }
-    ctx.doc = null;
-    ctx.docId = null;
     ctx.chat = null;
     ctx.chatItems = [];
     ctx.chats = [];
@@ -535,12 +506,9 @@ async function openApp(appId) {
     if (secTools) secTools.textContent = String((ctx.appMeta.tools || []).length);
     const wsToolsCount = $("ws-tools-count");
     if (wsToolsCount) wsToolsCount.textContent = String((ctx.appMeta.tools || []).length);
-    const wsDocsCount = $("ws-docs-count");
-    if (wsDocsCount) wsDocsCount.textContent = String((ctx.appMeta.docs || []).length);
 
     document.querySelectorAll(".ws-tab").forEach((t) => t.classList.toggle("active", t.dataset.ws === "chat"));
     $("ws-chat").hidden = false;
-    $("ws-docs").hidden = true;
     $("ws-tools").hidden = true;
     $("chat-log").innerHTML = "";
     renderChatList();
@@ -551,11 +519,9 @@ async function openApp(appId) {
     $("ws-title").textContent = ctx.appMeta.name || appId;
     $("ws-title").hidden = true;
     $("ws-dir").textContent = info.dir;
-    $("doc-text").value = "";
-    $("doc-meta").textContent = "документ не выбран";
+    const wsFolder = $("ws-folder");
+    if (wsFolder) wsFolder.textContent = info.workspace || "—";
 
-    await refreshDocs();
-    await refreshArtifacts();
     renderToolSelectors();
   });
 }
@@ -570,10 +536,23 @@ async function closeApp() {
     ctx.appMeta = null;
     $("apps-panel").hidden = false;
     $("app-switch").hidden = true;
-    ctx.doc = null;
-    ctx.docId = null;
     $("workspace").hidden = true;
   });
+}
+
+async function pickWorkspace() {
+  if (!ctx.appId) return;
+  let path;
+  try {
+    path = await invoke("choose_workspace", { app_id: ctx.appId });
+  } catch (e) {
+    return toast(String(e), true);
+  }
+  if (!path) return;
+  const appId = ctx.appId;
+  await closeApp();
+  await openApp(appId);
+  toast(`Рабочая папка: ${path}`);
 }
 
 async function removeApp(appId) {
@@ -583,111 +562,6 @@ async function removeApp(appId) {
     await invoke("remove_app", { app_id: appId });
     toast("Удалено");
     await refreshApps();
-  });
-}
-
-/* ---------- documents ---------- */
-
-async function refreshDocs() {
-  const docs = await invoke("list_docs", { app_id: ctx.appId });
-  const box = $("docs");
-  box.innerHTML = "";
-  const wsDocsCount = $("ws-docs-count");
-  if (wsDocsCount) wsDocsCount.textContent = String(docs.length);
-
-  if (!docs.length) {
-    box.innerHTML = '<p class="muted small">Пакет не объявляет типизированных документов.</p>';
-    return;
-  }
-  for (const d of docs) {
-    const btn = document.createElement("button");
-    btn.className = "doc-item" + (d.id === ctx.docId ? " active" : "");
-    btn.dataset.doc = d.id;
-    btn.innerHTML = `<span>${esc(labelFor(d.id))}</span><span class="doc-rev">${esc(d.revision)}${d.finalized ? " ✓" : ""}</span>`;
-    box.appendChild(btn);
-  }
-  if (!ctx.docId && docs.length) {
-    await selectDoc(docs[0].id);
-  }
-}
-
-function updateDocPreview() {
-  const preview = $("doc-preview");
-  const editor = $("doc-text");
-  if (!preview || !editor) return;
-  if (ctx.docPreviewMode) {
-    preview.innerHTML = renderMarkdown(editor.value || "*Документ пуст*");
-    preview.hidden = false;
-    editor.hidden = true;
-  } else {
-    preview.hidden = true;
-    editor.hidden = false;
-  }
-}
-
-async function selectDoc(docId) {
-  await guard(async () => {
-    const doc = await invoke("read_doc", { app_id: ctx.appId, doc_id: docId });
-    ctx.docId = docId;
-    ctx.doc = doc;
-    $("doc-text").value = doc.markdown;
-    $("doc-text").disabled = false;
-    $("doc-meta").textContent = `${doc.id}.md · rev ${doc.revision}${doc.finalized ? " · ГОТОВ" : ""} · ${doc.markdown.length} симв.`;
-    $("append-row").hidden = true;
-    updateDocPreview();
-    const docs = await invoke("list_docs", { app_id: ctx.appId });
-    const box = $("docs");
-    box.querySelectorAll(".doc-item").forEach((b) => {
-      b.classList.toggle("active", b.dataset.doc === docId);
-    });
-  });
-}
-
-async function saveDoc() {
-  if (!ctx.docId) return toast("Выберите документ", true);
-  await guard(async () => {
-    const doc = await invoke("write_doc", {
-      app_id: ctx.appId,
-      doc_id: ctx.docId,
-      markdown: $("doc-text").value,
-      expected_revision: ctx.doc ? ctx.doc.revision : null,
-    });
-    ctx.doc = doc;
-    $("doc-meta").textContent = `${doc.id}.md · rev ${doc.revision}${doc.finalized ? " · ГОТОВ" : ""} · ${doc.markdown.length} симв.`;
-    updateDocPreview();
-    toast("Ревизия документа сохранена");
-    await refreshDocs();
-  });
-}
-
-async function applyAppend() {
-  const fragment = $("append-text").value;
-  if (!fragment.trim()) return toast("Пустой фрагмент", true);
-  await guard(async () => {
-    const doc = await invoke("append_doc", {
-      app_id: ctx.appId,
-      doc_id: ctx.docId,
-      markdown: fragment,
-      expected_revision: ctx.doc ? ctx.doc.revision : null,
-    });
-    ctx.doc = doc;
-    $("doc-text").value = doc.markdown;
-    $("append-text").value = "";
-    $("append-row").hidden = true;
-    updateDocPreview();
-    toast("Фрагмент добавлен в документ");
-    await refreshDocs();
-  });
-}
-
-async function finalizeDoc() {
-  if (!ctx.docId) return toast("Выберите документ", true);
-  await guard(async () => {
-    const doc = await invoke("finalize_doc", { app_id: ctx.appId, doc_id: ctx.docId });
-    ctx.doc = doc;
-    $("doc-meta").textContent = `${doc.id}.md · rev ${doc.revision} · ГОТОВ`;
-    toast("Документ помечен готовым к экспорту");
-    await refreshDocs();
   });
 }
 
@@ -774,11 +648,11 @@ function renderMarkdown(source) {
 }
 
 function getStartersForApp(appId) {
-  if (appId === "eco-logs") {
+  if (appId === "doc-writer") {
     return [
-      "Проанализируй всплеск ошибок в индексе bo-* за последний час",
-      "Собери таймлайн деградации и подготовь структуру отчёта",
-      "Покажи топ-5 сервисов по числу исключений",
+      "Создай в рабочей папке report.md с планом проверки гипотезы",
+      "Прочитай report.md и сократи раздел «Вывод»",
+      "Сконвертируй report.md в report.docx через docx_export",
     ];
   }
   if (appId === "doc-lookup") {
@@ -1176,26 +1050,6 @@ function bindChatEvents() {
   });
 }
 
-/* ---------- artifacts ---------- */
-
-async function refreshArtifacts() {
-  const usage = await invoke("artifacts_usage", { app_id: ctx.appId });
-  $("artifacts").textContent = `${usage.sessions} сесс. · ${fmtBytes(usage.bytes)} · ${usage.files} файлов`;
-}
-
-function fmtBytes(bytes) {
-  const mb = bytes / (1024 * 1024);
-  return mb >= 1024 ? (mb / 1024).toFixed(2) + " ГБ" : mb.toFixed(1) + " МБ";
-}
-
-async function cleanupArtifacts() {
-  await guard(async () => {
-    const report = await invoke("cleanup_artifacts", { app_id: ctx.appId });
-    toast(`Удалено сессий: ${report.removed}, освобождено ${fmtBytes(report.bytes_freed)}`);
-    await refreshArtifacts();
-  });
-}
-
 /* ---------- mcp ---------- */
 
 async function refreshMcpServers() {
@@ -1443,11 +1297,6 @@ function bind() {
     if (remove) return removeApp(remove.dataset.remove);
   });
 
-  $("docs").addEventListener("click", (e) => {
-    const item = e.target.closest("[data-doc]");
-    if (item) selectDoc(item.dataset.doc);
-  });
-
   const wsBack = $("ws-back");
   if (wsBack) wsBack.addEventListener("click", closeApp);
   $("ws-close").addEventListener("click", closeApp);
@@ -1455,32 +1304,8 @@ function bind() {
   $("app-switch").addEventListener("change", (e) => {
     if (e.target.value && e.target.value !== ctx.appId) openApp(e.target.value);
   });
+  $("ws-folder-pick").addEventListener("click", pickWorkspace);
 
-  const modeEdit = $("doc-mode-edit");
-  const modePreview = $("doc-mode-preview");
-  if (modeEdit && modePreview) {
-    modeEdit.addEventListener("click", () => {
-      ctx.docPreviewMode = false;
-      modeEdit.classList.add("active");
-      modePreview.classList.remove("active");
-      updateDocPreview();
-    });
-    modePreview.addEventListener("click", () => {
-      ctx.docPreviewMode = true;
-      modePreview.classList.add("active");
-      modeEdit.classList.remove("active");
-      updateDocPreview();
-    });
-  }
-
-  $("save-btn").addEventListener("click", saveDoc);
-  $("finalize-btn").addEventListener("click", finalizeDoc);
-  $("append-btn").addEventListener("click", () => {
-    $("append-row").hidden = !$("append-row").hidden;
-    if (!$("append-row").hidden) $("append-text").focus();
-  });
-  $("append-apply").addEventListener("click", applyAppend);
-  $("cleanup-btn").addEventListener("click", cleanupArtifacts);
   $("settings-save").addEventListener("click", saveConfig);
   $("probe-btn").addEventListener("click", probe);
   $("secret-save").addEventListener("click", saveSecret);
@@ -1498,8 +1323,6 @@ function bind() {
       const samples = {
         "resolve-library-id": { libraryName: "tauri", query: "capabilities permissions" },
         "query-docs": { libraryId: "/tauri-apps/tauri-docs", query: "command permissions allowlist" },
-        search: { index: "bo-*", query: "status:502", limit: 20 },
-        analyze: { index: "bo-*", window: "1h", group_by: "service" },
       };
       $("tool-args").value = JSON.stringify(samples[tool] || { query: "test" }, null, 2);
     });

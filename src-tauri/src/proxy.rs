@@ -1,36 +1,31 @@
-use crate::docs::DocStore;
 use crate::error::{msg, Error, Result};
-use crate::manifest::{self, DocDef, Manifest};
+use crate::manifest::{self, Manifest, ToolDef};
 use crate::mcp::{self, McpSession};
 use crate::registry;
 use crate::secrets::SecretStore;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 /// Name of the single local MCP server that opencode sees. Every tool the
 /// model can call is exposed by the platform gateway under this name.
 pub const SERVER_NAME: &str = "platform";
 
-const MAX_DOC_BYTES: usize = 256 * 1024;
+const MAX_READ_BYTES: usize = 64 * 1024;
+const MAX_WRITE_BYTES: usize = 1024 * 1024;
+const MAX_LIST_ENTRIES: usize = 200;
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
-const DOC_TOOLS: &[&str] = &[
-    "doc_list",
-    "doc_read",
-    "doc_create",
-    "doc_append",
-    "doc_insert_after",
-    "doc_replace_block",
-    "doc_finalize",
-];
+const FILE_TOOLS: &[&str] = &["list_files", "read_file", "write_file", "append_file"];
 
 const INSTRUCTIONS: &str = "Все инструменты проходят через шлюз платформы: вне allow-list \
-приложения вызов невозможен. Файловых путей нет. Документы адресуются только id из \
-манифеста. Перед изменением документа прочитайте его через doc_read и передавайте \
-полученную ревизию в expected_revision: вызов с устаревшей ревизией будет отклонён.";
+приложения вызов невозможен. Файловые инструменты работают только в рабочей папке \
+приложения; абсолютные пути и выход за неё запрещены. Для Word используйте инструмент \
+docx_export с относительными путями input и output.";
 
 /// opencode normalizes tool names to letters, numbers, `_` and `-`. Do the same
 /// so permission entries in the generated config match exactly.
@@ -46,12 +41,17 @@ pub fn normalize_tool_name(raw: &str) -> String {
         .collect()
 }
 
+fn has_file_scope(app: &Manifest) -> bool {
+    app.capabilities
+        .file_scopes
+        .iter()
+        .any(|scope| scope == "workspace")
+}
+
 /// Names (without the `platform_` prefix) that the gateway exposes for an app.
-/// This is the single source of truth shared by the engine config (permission
-/// entries) and the proxy (tools/list). It is pure and never touches the
-/// network, so config generation stays fast.
+/// Shared by the engine config (permission entries) and the proxy.
 pub fn gateway_tool_names(app: &Manifest) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
     let writes_allowed = manifest::external_writes_allowed(app);
 
     for connection in &app.connections {
@@ -59,6 +59,9 @@ pub fn gateway_tool_names(app: &Manifest) -> Vec<String> {
             continue;
         }
         for tool in &app.tools {
+            if tool.bin.is_some() {
+                continue;
+            }
             if tool.stream == "write" && !writes_allowed {
                 continue;
             }
@@ -69,9 +72,15 @@ pub fn gateway_tool_names(app: &Manifest) -> Vec<String> {
         }
     }
 
-    if !app.docs.is_empty() {
-        for name in DOC_TOOLS {
+    if has_file_scope(app) {
+        for name in FILE_TOOLS {
             out.push((*name).to_string());
+        }
+    }
+
+    for tool in &app.tools {
+        if tool.bin.is_some() {
+            out.push(normalize_tool_name(&tool.tool));
         }
     }
 
@@ -80,16 +89,18 @@ pub fn gateway_tool_names(app: &Manifest) -> Vec<String> {
     out
 }
 
-struct Route {
-    /// Empty for platform-owned document tools.
-    server: String,
-    tool: String,
+#[derive(Clone)]
+enum Route {
+    Files,
+    Remote { server: String, tool: String },
+    Package { tool: String, bin: String },
 }
 
 pub struct Proxy {
     home: PathBuf,
     app: Manifest,
-    docs: DocStore,
+    package_dir: PathBuf,
+    workspace: PathBuf,
     servers: HashMap<String, McpSession>,
     routes: HashMap<String, Route>,
     tools: Vec<Value>,
@@ -97,14 +108,19 @@ pub struct Proxy {
 }
 
 impl Proxy {
-    pub fn new(app_id: &str, session_dir: &Path) -> Result<Self> {
+    pub fn new(app_id: &str, workspace: &Path) -> Result<Self> {
         let home = registry::home();
         let app = registry::verified_manifest(&home, app_id)?;
-        let docs = DocStore::new(session_dir.to_path_buf())?;
+        let package_dir = registry::apps_dir(&home).join(app_id);
+        if !workspace.is_dir() {
+            fs::create_dir_all(workspace)?;
+        }
+        let workspace = fs::canonicalize(workspace)?;
         Ok(Self {
             home,
             app,
-            docs,
+            package_dir,
+            workspace,
             servers: HashMap::new(),
             routes: HashMap::new(),
             tools: Vec::new(),
@@ -121,31 +137,47 @@ impl Proxy {
         }
         self.built = true;
 
-        let secrets = SecretStore::new(&self.home);
-        let writes_allowed = manifest::external_writes_allowed(&self.app);
         let mut tools = Vec::new();
 
-        // Platform document tools are reserved first: a remote tool must never
-        // shadow doc_read/doc_append and friends.
-        if !self.app.docs.is_empty() {
-            for name in DOC_TOOLS {
-                self.routes.insert(
-                    (*name).to_string(),
-                    Route {
-                        server: String::new(),
-                        tool: (*name).to_string(),
-                    },
-                );
+        // Platform-owned file tools are reserved first.
+        if has_file_scope(&self.app) {
+            for name in FILE_TOOLS {
+                self.routes.insert((*name).to_string(), Route::Files);
             }
-            tools.extend(doc_specs(&self.app.docs));
+            tools.extend(file_specs());
         }
 
+        // App-provided executables (the package owns them).
+        for tool in self.app.tools.clone() {
+            let Some(bin) = tool.bin.clone() else {
+                continue;
+            };
+            let exposed = normalize_tool_name(&tool.tool);
+            if self.routes.contains_key(&exposed) {
+                eprintln!("eco-platform mcp proxy: duplicate tool {exposed}, skipped");
+                continue;
+            }
+            self.routes.insert(
+                exposed,
+                Route::Package {
+                    tool: tool.tool.clone(),
+                    bin,
+                },
+            );
+            tools.push(package_spec(&tool));
+        }
+
+        let secrets = SecretStore::new(&self.home);
+        let writes_allowed = manifest::external_writes_allowed(&self.app);
         for connection in self.app.connections.clone() {
             if connection.kind != "http-mcp" {
                 continue;
             }
             let schemas = self.load_schemas(&secrets, &connection.id);
             for tool in self.app.tools.clone() {
+                if tool.bin.is_some() {
+                    continue;
+                }
                 if tool.stream == "write" && !writes_allowed {
                     continue;
                 }
@@ -171,7 +203,7 @@ impl Proxy {
                 };
                 self.routes.insert(
                     exposed,
-                    Route {
+                    Route::Remote {
                         server: connection.id.clone(),
                         tool: tool.tool.clone(),
                     },
@@ -233,21 +265,62 @@ impl Proxy {
             None => return msg(format!("mcp server {server} is not connected")),
         };
         if result.is_err() {
-            // Drop the cached session so a transient transport failure does not
-            // poison every later call.
             self.servers.remove(server);
         }
         result
     }
 
+    fn package_call(&self, tool: &str, bin: &str, arguments: &Value) -> Result<Value> {
+        if tool != "docx_export" {
+            return msg(format!("package tool {tool} is not supported"));
+        }
+        let input = text_arg(arguments, "input")?;
+        let output = text_arg(arguments, "output")?;
+        let input = resolve_path(&self.workspace, input, false)?;
+        let output = resolve_path(&self.workspace, output, true)?;
+        if !input.is_file() {
+            return msg(format!("input file does not exist: {}", input.display()));
+        }
+
+        let converter = package_bin(&self.package_dir, bin)?;
+        let mut command = Command::new(&converter);
+        command
+            .arg("--input")
+            .arg(&input)
+            .arg("--output")
+            .arg(&output)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+
+        let result = command
+            .output()
+            .map_err(|e| Error::Msg(format!("cannot run docx converter: {e}")))?;
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            let snippet: String = stderr.chars().take(400).collect();
+            return msg(format!("docx converter failed: {snippet}"));
+        }
+        if !output.is_file() {
+            return msg("docx converter finished without creating the output file");
+        }
+        Ok(json!({
+            "input": input.display().to_string(),
+            "output": output.display().to_string(),
+            "bytes": fs::metadata(&output).map(|m| m.len()).unwrap_or(0)
+        }))
+    }
+
     /// Returns the MCP `tools/call` result object and the audit metadata.
     fn call(&mut self, name: &str, arguments: Value) -> Result<(Value, usize, bool)> {
         self.ensure_tools();
-        let route = match self.routes.get(name) {
-            Some(route) => Route {
-                server: route.server.clone(),
-                tool: route.tool.clone(),
-            },
+        let route = match self.routes.get(name).cloned() {
+            Some(route) => route,
             None => {
                 return msg(format!(
                     "tool {name} is not allowed for {}",
@@ -257,21 +330,24 @@ impl Proxy {
         };
 
         let started = Instant::now();
-        let raw = if route.server.is_empty() {
-            doc_call(&self.docs, &self.app.docs, &route.tool, &arguments)
-        } else {
-            self.remote_call(&route.server, &route.tool, arguments)
+        let raw = match &route {
+            Route::Files => file_call(&self.workspace, name, &arguments),
+            Route::Remote { server, tool } => {
+                self.remote_call(server, tool, arguments.clone())
+            }
+            Route::Package { tool, bin } => self.package_call(tool, bin, &arguments),
         };
 
         let (value, bytes, truncated) = match raw {
             Ok(value) => wrap_result(value),
             Err(e) => {
-                self.audit(&route, 0, false, started.elapsed().as_millis() as u64, true);
+                self.audit(&route, name, 0, false, started.elapsed().as_millis() as u64, true);
                 return Err(e);
             }
         };
         self.audit(
             &route,
+            name,
             bytes,
             truncated,
             started.elapsed().as_millis() as u64,
@@ -280,11 +356,19 @@ impl Proxy {
         Ok((value, bytes, truncated))
     }
 
-    fn audit(&self, route: &Route, bytes: usize, truncated: bool, took_ms: u64, failed: bool) {
-        let (server, tool) = if route.server.is_empty() {
-            ("docs".to_string(), route.tool.clone())
-        } else {
-            (route.server.clone(), route.tool.clone())
+    fn audit(
+        &self,
+        route: &Route,
+        name: &str,
+        bytes: usize,
+        truncated: bool,
+        took_ms: u64,
+        failed: bool,
+    ) {
+        let (server, tool) = match route {
+            Route::Files => ("files".to_string(), name.to_string()),
+            Route::Package { tool, .. } => ("package".to_string(), tool.clone()),
+            Route::Remote { server, tool } => (server.clone(), tool.clone()),
         };
         crate::commands::audit(
             &self.home,
@@ -304,194 +388,259 @@ impl Proxy {
     }
 }
 
-fn doc_specs(docs: &[DocDef]) -> Vec<Value> {
-    let ids = docs
-        .iter()
-        .map(|d| d.id.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
+fn text_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Msg(format!("missing string argument {key}")))
+}
+
+fn file_specs() -> Vec<Value> {
     vec![
         json!({
-            "name": "doc_list",
-            "description": format!("Список документов сессии с ревизиями. Допустимые id: {ids}."),
-            "inputSchema": schema(json!({}), &[])
+            "name": "list_files",
+            "description": "Список файлов и папок в рабочей папке. path — относительный путь, по умолчанию корень.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "additionalProperties": false
+            }
         }),
         json!({
-            "name": "doc_read",
-            "description": "Прочитать документ: markdown и текущая ревизия. Всегда читайте перед изменением.",
-            "inputSchema": schema(json!({ "id": string_prop() }), &["id"])
+            "name": "read_file",
+            "description": "Прочитать текстовый файл из рабочей папки. Абсолютные пути и выход за папку запрещены.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+                "additionalProperties": false
+            }
         }),
         json!({
-            "name": "doc_create",
-            "description": "Создать документ с начальным markdown. Пустой документ, созданный платформой, будет заполнен.",
-            "inputSchema": schema(json!({ "id": string_prop(), "markdown": string_prop() }), &["id", "markdown"])
+            "name": "write_file",
+            "description": "Создать или перезаписать текстовый файл в рабочей папке. Путь относительный.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"],
+                "additionalProperties": false
+            }
         }),
         json!({
-            "name": "doc_append",
-            "description": "Дописать markdown в конец документа. Передайте expected_revision из doc_read, чтобы не потерять ручные правки.",
-            "inputSchema": schema(json!({
-                "id": string_prop(),
-                "markdown": string_prop(),
-                "expected_revision": string_prop()
-            }), &["id", "markdown"])
-        }),
-        json!({
-            "name": "doc_insert_after",
-            "description": "Вставить markdown после якоря <!-- id: anchor -->, до следующего якоря.",
-            "inputSchema": schema(json!({
-                "id": string_prop(),
-                "anchor": string_prop(),
-                "markdown": string_prop(),
-                "expected_revision": string_prop()
-            }), &["id", "anchor", "markdown"])
-        }),
-        json!({
-            "name": "doc_replace_block",
-            "description": "Заменить блок между якорем <!-- id: anchor --> и следующим якорем.",
-            "inputSchema": schema(json!({
-                "id": string_prop(),
-                "anchor": string_prop(),
-                "markdown": string_prop(),
-                "expected_revision": string_prop()
-            }), &["id", "anchor", "markdown"])
-        }),
-        json!({
-            "name": "doc_finalize",
-            "description": "Пометить документ готовым. Пользователь сам решит, куда его сохранить.",
-            "inputSchema": schema(json!({ "id": string_prop() }), &["id"])
+            "name": "append_file",
+            "description": "Дописать текст в конец файла в рабочей папке; создаёт файл, если его нет.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"],
+                "additionalProperties": false
+            }
         }),
     ]
 }
 
-fn string_prop() -> Value {
-    json!({ "type": "string" })
-}
-
-fn schema(properties: Value, required: &[&str]) -> Value {
+fn package_spec(tool: &ToolDef) -> Value {
+    if tool.tool == "docx_export" {
+        return json!({
+            "name": normalize_tool_name(&tool.tool),
+            "description": "Конвертировать markdown-файл из рабочей папки в Word .docx. Пути input и output относительные, вне рабочей папки запрещены.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "input": { "type": "string" },
+                    "output": { "type": "string" }
+                },
+                "required": ["input", "output"],
+                "additionalProperties": false
+            }
+        });
+    }
     json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false
+        "name": normalize_tool_name(&tool.tool),
+        "description": format!("Инструмент приложения {}.", tool.tool),
+        "inputSchema": { "type": "object" }
     })
 }
 
-fn check_doc_size(markdown: &str) -> Result<()> {
-    if markdown.len() > MAX_DOC_BYTES {
-        return msg(format!(
-            "document fragment is too large: {} bytes (limit {})",
-            markdown.len(),
-            MAX_DOC_BYTES
-        ));
+/// Resolves a model-supplied path against the workspace. Absolute paths,
+/// parent components and symlink escapes are rejected.
+fn resolve_path(workspace: &Path, raw: &str, for_write: bool) -> Result<PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return msg("path is empty");
     }
-    Ok(())
-}
+    let rel = Path::new(raw);
+    if rel.is_absolute() {
+        return msg("absolute paths are not allowed");
+    }
+    for component in rel.components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            _ => return msg("path must stay inside the workspace"),
+        }
+    }
 
-fn check_declared(declared: &[DocDef], id: &str) -> Result<()> {
-    manifest::parse_id(id, "document")?;
-    if declared.iter().any(|d| d.id == id) {
-        Ok(())
+    let root = fs::canonicalize(workspace)?;
+    let candidate = root.join(rel);
+    if for_write {
+        if let Some(parent) = candidate.parent() {
+            fs::create_dir_all(parent)?;
+            let parent = fs::canonicalize(parent)?;
+            if !inside(&root, &parent) {
+                return msg("path must stay inside the workspace");
+            }
+        }
+        if candidate.exists() {
+            let canon = fs::canonicalize(&candidate)?;
+            if !inside(&root, &canon) {
+                return msg("path must stay inside the workspace");
+            }
+        }
+        Ok(candidate)
     } else {
-        msg(format!("document {id} is not declared by this app"))
+        let canon = fs::canonicalize(&candidate)?;
+        if !inside(&root, &canon) {
+            return msg("path must stay inside the workspace");
+        }
+        Ok(canon)
     }
 }
 
-fn json_string(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+fn inside(root: &Path, path: &Path) -> bool {
+    if path.starts_with(root) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let root = root.to_string_lossy().to_lowercase();
+        let path = path.to_string_lossy().to_lowercase();
+        path == root || path.starts_with(&format!("{root}\\"))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
-/// Document results are returned as a text item with an explicit field order:
-/// the revision must survive the 64 KiB response cap, which may cut the
-/// markdown tail.
-fn doc_content(view: crate::docs::DocView) -> Value {
-    let text = format!(
-        "{{\"id\":{},\"revision\":{},\"finalized\":{},\"markdown\":{}}}",
-        json_string(&view.id),
-        json_string(&view.revision),
-        view.finalized,
-        json_string(&view.markdown)
-    );
-    json!({ "content": [{ "type": "text", "text": text }] })
+/// Resolves an executable inside the signed package.
+fn package_bin(package_dir: &Path, raw: &str) -> Result<PathBuf> {
+    let rel = Path::new(raw);
+    if rel.is_absolute() {
+        return msg("package binary path must be relative");
+    }
+    for component in rel.components() {
+        match component {
+            Component::Normal(_) => {}
+            _ => return msg("package binary path escapes the package"),
+        }
+    }
+    let root = fs::canonicalize(package_dir)?;
+    let path = fs::canonicalize(root.join(rel))?;
+    if !inside(&root, &path) {
+        return msg("package binary path escapes the package");
+    }
+    if !path.is_file() {
+        return msg(format!("package binary not found: {raw}"));
+    }
+    Ok(path)
 }
 
-/// Dispatches the platform-owned document tools. Kept free of `Proxy` state so
-/// it can be unit-tested without a package registry.
-pub fn doc_call(docs: &DocStore, declared: &[DocDef], name: &str, args: &Value) -> Result<Value> {
-    let text = |key: &str| -> Result<&str> {
-        args.get(key)
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Msg(format!("missing string argument {key}")))
-    };
-    let revision = || args.get("expected_revision").and_then(Value::as_str);
-
+fn file_call(workspace: &Path, name: &str, args: &Value) -> Result<Value> {
     match name {
-        "doc_list" => Ok(serde_json::to_value(docs.list()?)?),
-        "doc_read" => {
-            let id = text("id")?;
-            check_declared(declared, id)?;
-            Ok(doc_content(docs.read(id)?))
+        "list_files" => {
+            let raw = args
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or(".");
+            let dir = resolve_path(workspace, raw, false)?;
+            if !dir.is_dir() {
+                return msg(format!("not a directory: {}", dir.display()));
+            }
+            let mut entries = Vec::new();
+            for entry in fs::read_dir(&dir)?.flatten().take(MAX_LIST_ENTRIES) {
+                let file_type = entry.file_type()?;
+                let kind = if file_type.is_dir() {
+                    "dir"
+                } else if file_type.is_file() {
+                    "file"
+                } else {
+                    "other"
+                };
+                entries.push(json!({
+                    "name": entry.file_name().to_string_lossy(),
+                    "type": kind,
+                    "bytes": entry.metadata().map(|m| m.len()).unwrap_or(0)
+                }));
+            }
+            entries.sort_by(|a, b| {
+                a["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(b["name"].as_str().unwrap_or(""))
+            });
+            Ok(json!({ "path": raw, "entries": entries }))
         }
-        "doc_create" => {
-            let id = text("id")?;
-            check_declared(declared, id)?;
-            let markdown = text("markdown")?;
-            check_doc_size(markdown)?;
-            // The UI pre-creates declared documents as empty files, so create
-            // must also initialize an empty document instead of failing.
-            let view = match docs.create(id, markdown) {
-                Ok(view) => view,
-                Err(original) => {
-                    let current = match docs.read(id) {
-                        Ok(current) => current,
-                        Err(_) => return Err(original),
-                    };
-                    if !current.markdown.trim().is_empty() {
-                        return Err(original);
-                    }
-                    docs.write(id, markdown, Some(&current.revision))?
-                }
+        "read_file" => {
+            let raw = text_arg(args, "path")?;
+            let path = resolve_path(workspace, raw, false)?;
+            if !path.is_file() {
+                return msg(format!("not a file: {}", path.display()));
+            }
+            let bytes = fs::read(&path)?;
+            let total = bytes.len();
+            let bytes = if total > MAX_READ_BYTES {
+                &bytes[..MAX_READ_BYTES]
+            } else {
+                &bytes[..]
             };
-            Ok(doc_content(view))
+            let text = String::from_utf8(bytes.to_vec())
+                .map_err(|_| Error::Msg("file is not UTF-8 text".to_string()))?;
+            Ok(json!({
+                "path": raw,
+                "text": text,
+                "truncated": total > MAX_READ_BYTES,
+                "bytes": total
+            }))
         }
-        "doc_append" => {
-            let id = text("id")?;
-            check_declared(declared, id)?;
-            let markdown = text("markdown")?;
-            check_doc_size(markdown)?;
-            Ok(doc_content(docs.append(id, markdown, revision())?))
+        "write_file" => {
+            let raw = text_arg(args, "path")?;
+            let content = text_arg(args, "content")?;
+            if content.len() > MAX_WRITE_BYTES {
+                return msg(format!(
+                    "content is too large: {} bytes (limit {})",
+                    content.len(),
+                    MAX_WRITE_BYTES
+                ));
+            }
+            let path = resolve_path(workspace, raw, true)?;
+            fs::write(&path, content)?;
+            Ok(json!({ "path": raw, "bytes": content.len() }))
         }
-        "doc_insert_after" => {
-            let id = text("id")?;
-            check_declared(declared, id)?;
-            let anchor = text("anchor")?;
-            let markdown = text("markdown")?;
-            check_doc_size(markdown)?;
-            Ok(doc_content(docs.insert_after(
-                id,
-                anchor,
-                markdown,
-                revision(),
-            )?))
+        "append_file" => {
+            let raw = text_arg(args, "path")?;
+            let content = text_arg(args, "content")?;
+            if content.len() > MAX_WRITE_BYTES {
+                return msg(format!(
+                    "content is too large: {} bytes (limit {})",
+                    content.len(),
+                    MAX_WRITE_BYTES
+                ));
+            }
+            let path = resolve_path(workspace, raw, true)?;
+            use std::io::Write as _;
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
+            file.write_all(content.as_bytes())?;
+            Ok(json!({ "path": raw, "bytes": content.len() }))
         }
-        "doc_replace_block" => {
-            let id = text("id")?;
-            check_declared(declared, id)?;
-            let anchor = text("anchor")?;
-            let markdown = text("markdown")?;
-            check_doc_size(markdown)?;
-            Ok(doc_content(docs.replace_block(
-                id,
-                anchor,
-                markdown,
-                revision(),
-            )?))
-        }
-        "doc_finalize" => {
-            let id = text("id")?;
-            check_declared(declared, id)?;
-            Ok(doc_content(docs.finalize(id)?))
-        }
-        _ => msg(format!("unknown document tool {name}")),
+        _ => msg(format!("unknown file tool {name}")),
     }
 }
 
@@ -588,8 +737,8 @@ fn handle(proxy: &mut Proxy, request: &Value) -> Option<Value> {
 
 /// Runs the stdio MCP gateway until the parent closes stdin. Never writes
 /// anything but JSON-RPC to stdout; diagnostics go to stderr.
-pub fn serve(app_id: &str, session_dir: &Path) -> i32 {
-    let mut proxy = match Proxy::new(app_id, session_dir) {
+pub fn serve(app_id: &str, workspace: &Path) -> i32 {
+    let mut proxy = match Proxy::new(app_id, workspace) {
         Ok(proxy) => proxy,
         Err(e) => {
             eprintln!("eco-platform mcp proxy: {e}");
@@ -666,16 +815,23 @@ mod tests {
             "connections": [
                 { "id": "ctx", "type": "http-mcp" }
             ],
-            "docs": [
-                { "id": "report", "label": "Report" }
-            ],
-            "capabilities": { "external_writes": [] }
+            "capabilities": {
+                "file_scopes": ["workspace"],
+                "external_writes": []
+            }
         }))
         .unwrap()
     }
 
+    fn temp_workspace(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("eco-proxy-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
-    fn tool_names_are_normalized_and_write_gated() {
+    fn tool_names_are_normalized_and_scoped() {
         assert_eq!(
             normalize_tool_name("resolve.library/id"),
             "resolve_library_id"
@@ -684,117 +840,57 @@ mod tests {
         let names = gateway_tool_names(&test_manifest());
         assert!(names.contains(&"ctx_search".to_string()));
         assert!(!names.contains(&"ctx_dump".to_string()));
-        assert!(names.contains(&"doc_read".to_string()));
-    }
+        assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&"write_file".to_string()));
 
-    #[test]
-    fn write_tools_need_external_write_capability() {
         let mut app = test_manifest();
-        app.capabilities.external_writes = vec!["sentry".to_string()];
+        app.capabilities.file_scopes.clear();
         let names = gateway_tool_names(&app);
-        assert!(names.contains(&"ctx_dump".to_string()));
+        assert!(!names.contains(&"read_file".to_string()));
     }
 
     #[test]
-    fn doc_tools_are_absent_without_declared_documents() {
+    fn package_tools_are_exposed() {
         let mut app = test_manifest();
-        app.docs.clear();
+        app.tools.push(serde_json::from_value(json!({
+            "tool": "docx_export",
+            "stream": "write",
+            "bin": "bin/docx-export.exe"
+        }))
+        .unwrap());
         let names = gateway_tool_names(&app);
-        assert!(!names.iter().any(|n| n.starts_with("doc_")));
-    }
-
-    fn doc_json(value: &Value) -> Value {
-        let text = value["content"][0]["text"].as_str().unwrap();
-        serde_json::from_str(text).unwrap()
+        assert!(names.contains(&"docx_export".to_string()));
     }
 
     #[test]
-    fn doc_tools_enforce_declared_ids_and_revisions() {
-        let dir = std::env::temp_dir().join(format!("eco-proxy-docs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let docs = DocStore::new(dir.clone()).unwrap();
-        let declared = vec![DocDef {
-            id: "report".to_string(),
-            label: "Report".to_string(),
-            export: vec![],
-        }];
-
-        assert!(doc_call(
-            &docs,
-            &declared,
-            "doc_create",
-            &json!({ "id": "other", "markdown": "x" })
-        )
-        .is_err());
-
-        let created = doc_json(
-            &doc_call(
-                &docs,
-                &declared,
-                "doc_create",
-                &json!({ "id": "report", "markdown": "<!-- id: sym -->\nhello\n" }),
-            )
-            .unwrap(),
-        );
-        let revision = created["revision"].as_str().unwrap().to_string();
-
-        let appended = doc_json(
-            &doc_call(
-                &docs,
-                &declared,
-                "doc_append",
-                &json!({ "id": "report", "markdown": "more", "expected_revision": revision }),
-            )
-            .unwrap(),
-        );
-        assert!(appended["markdown"].as_str().unwrap().contains("more"));
-
-        assert!(doc_call(
-            &docs,
-            &declared,
-            "doc_append",
-            &json!({ "id": "report", "markdown": "stale", "expected_revision": revision })
-        )
-        .is_err());
-
-        let _ = std::fs::remove_dir_all(dir);
+    fn resolve_path_blocks_escapes() {
+        let root = temp_workspace("resolve");
+        assert!(resolve_path(&root, "docs/a.md", true).is_ok());
+        assert!(resolve_path(&root, "../secret.txt", true).is_err());
+        assert!(resolve_path(&root, "a/../../secret.txt", true).is_err());
+        assert!(resolve_path(&root, "C:\\Windows\\win.ini", true).is_err());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn doc_create_fills_empty_platform_document() {
-        let dir = std::env::temp_dir().join(format!("eco-proxy-empty-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let docs = DocStore::new(dir.clone()).unwrap();
-        let declared = vec![DocDef {
-            id: "report".to_string(),
-            label: "Report".to_string(),
-            export: vec![],
-        }];
-
-        // The UI creates declared documents as empty files on app open.
-        docs.create("report", "").unwrap();
-
-        let filled = doc_json(
-            &doc_call(
-                &docs,
-                &declared,
-                "doc_create",
-                &json!({ "id": "report", "markdown": "# Отчёт\n" }),
-            )
-            .unwrap(),
-        );
-        assert!(filled["markdown"].as_str().unwrap().contains("# Отчёт"));
-        assert!(!filled["revision"].as_str().unwrap().is_empty());
-
-        // A non-empty document is not overwritten.
-        assert!(doc_call(
-            &docs,
-            &declared,
-            "doc_create",
-            &json!({ "id": "report", "markdown": "other" })
+    fn file_tools_read_write_append() {
+        let root = temp_workspace("files");
+        file_call(
+            &root,
+            "write_file",
+            &json!({ "path": "docs/a.md", "content": "hello" }),
         )
-        .is_err());
-
-        let _ = std::fs::remove_dir_all(dir);
+        .unwrap();
+        file_call(
+            &root,
+            "append_file",
+            &json!({ "path": "docs/a.md", "content": " world" }),
+        )
+        .unwrap();
+        let read = file_call(&root, "read_file", &json!({ "path": "docs/a.md" })).unwrap();
+        assert_eq!(read["text"], "hello world");
+        let listed = file_call(&root, "list_files", &json!({ "path": "docs" })).unwrap();
+        assert_eq!(listed["entries"][0]["name"], "a.md");
+        let _ = fs::remove_dir_all(root);
     }
 }

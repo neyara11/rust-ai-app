@@ -27,6 +27,7 @@ pub struct PlatformInfo {
 pub struct SessionInfo {
     pub app_id: String,
     pub dir: String,
+    pub workspace: String,
     pub docs: Vec<DocMeta>,
 }
 
@@ -218,6 +219,7 @@ pub fn open_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<Ses
         }
     }
     let doc_list = docs.list()?;
+    let workspace = config::workspace(&state.home, &app_id);
 
     let mut guard = lock(&state)?;
     guard.insert(
@@ -232,6 +234,7 @@ pub fn open_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<Ses
     Ok(SessionInfo {
         app_id,
         dir: dir.display().to_string(),
+        workspace: workspace.display().to_string(),
         docs: doc_list,
     })
 }
@@ -345,6 +348,32 @@ pub fn finalize_doc(
     doc_id: String,
 ) -> Result<DocView> {
     with_session(&state, &app_id, |s| s.docs.finalize(&doc_id))
+}
+
+/// Lets the user pick the working folder for an app. The agent's file tools
+/// are confined to this folder.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn choose_workspace(
+    app: tauri::AppHandle,
+    app_id: String,
+) -> Result<Option<String>> {
+    manifest::parse_id(&app_id, "app")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Рабочая папка приложения")
+            .pick_folder()
+        else {
+            return Ok(None);
+        };
+        config::set_workspace(&state.home, &app_id, &path)?;
+        if let Ok(mut engines) = state.engines.lock() {
+            engines.clear();
+        }
+        Ok(Some(path.display().to_string()))
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("workspace dialog failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -565,10 +594,10 @@ fn chat_open_blocking(state: &AppState, app_id: String) -> Result<crate::engine:
         }
     }
 
-    let dir = with_session(state, &app_id, |s| Ok(s.dir.clone()))?;
-    // The engines lock is not held while the engine boots, so other chat
-    // commands stay responsive during startup.
-    let engine = crate::engine::Engine::start(&app_id, &state.home, &dir)?;
+    // The agent works in the user-chosen workspace; the artifacts session is
+    // still used for quotas and cleanup.
+    let workspace = config::workspace(&state.home, &app_id);
+    let engine = crate::engine::Engine::start(&app_id, &state.home, &workspace)?;
 
     let mut engines = engines_lock(state)?;
     if let Some(existing) = engines.get(&app_id) {

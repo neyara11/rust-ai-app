@@ -180,6 +180,12 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
 
     let dest = apps_dir(home).join(&manifest.app_id);
     if dest.exists() {
+        if let Ok(existing) = manifest::load(&dest) {
+            if let Err(e) = manifest::ensure_not_downgrade(&existing.version, &manifest.version) {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(e);
+            }
+        }
         fs::remove_dir_all(&dest)?;
     }
     fs::create_dir_all(apps_dir(home))?;
@@ -262,4 +268,50 @@ pub fn anchor_fingerprint(home: &Path) -> Option<String> {
     let key = load_trusted_key(home)?;
     let digest = manifest::sha256_hex(&key.to_bytes());
     Some(digest[..16].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    use std::fs;
+
+    fn write_package(dir: &Path, version: &str, key: &SigningKey) {
+        fs::create_dir_all(dir.join("prompt")).unwrap();
+        fs::write(dir.join("prompt/system.md"), b"prompt").unwrap();
+        let hash = manifest::sha256_hex(b"prompt");
+        let body = format!(
+            r#"{{"schema_version":2,"app_id":"demo","name":"Demo","version":"{version}","profile":{{"system_prompt":"prompt/system.md"}},"hashes":{{"prompt/system.md":"sha256:{hash}"}}}}"#
+        );
+        fs::write(dir.join("manifest.json"), &body).unwrap();
+        let sig = key.sign(body.as_bytes());
+        fs::write(dir.join("manifest.sig"), hex::encode(sig.to_bytes())).unwrap();
+    }
+
+    #[test]
+    fn downgrade_is_rejected_but_equal_version_is_allowed() {
+        let home = std::env::temp_dir().join(format!("eco-registry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+
+        let key = SigningKey::from_bytes(&[11u8; 32]);
+        fs::write(
+            trusted_pub_path(&home),
+            hex::encode(key.verifying_key().to_bytes()),
+        )
+        .unwrap();
+
+        let pkg = home.join("pkg");
+        write_package(&pkg, "1.1.0", &key);
+        install(&home, &pkg).unwrap();
+
+        write_package(&pkg, "1.0.0", &key);
+        let err = install(&home, &pkg).unwrap_err().to_string();
+        assert!(err.contains("downgrade"), "{err}");
+
+        write_package(&pkg, "1.1.0", &key);
+        install(&home, &pkg).unwrap();
+
+        let _ = fs::remove_dir_all(home);
+    }
 }

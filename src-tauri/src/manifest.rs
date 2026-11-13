@@ -22,6 +22,10 @@ pub struct ToolDef {
     pub tool: String,
     #[serde(default)]
     pub argv: Vec<String>,
+    /// Executable inside the package, relative to the package root. Used by
+    /// app-provided tools such as the docx converter.
+    #[serde(default)]
+    pub bin: Option<String>,
     #[serde(default = "stream_read")]
     pub stream: String,
 }
@@ -133,6 +137,39 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
+/// Version format is `major.minor.patch`; a `-suffix` or `+suffix` is ignored
+/// for ordering. Used for `min_shell_version` and downgrade protection.
+pub fn parse_version(raw: &str) -> Option<(u64, u64, u64)> {
+    let core = raw.trim().split(|c| c == '-' || c == '+').next()?;
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+pub fn shell_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Rejects a lower version than the installed one. Equal versions are allowed:
+/// re-installing a rebuilt package is a content update, not a downgrade.
+pub fn ensure_not_downgrade(current: &str, next: &str) -> Result<()> {
+    let current = parse_version(current)
+        .ok_or_else(|| Error::Msg(format!("installed version is not x.y.z: {current}")))?;
+    let next = parse_version(next)
+        .ok_or_else(|| Error::Msg(format!("package version is not x.y.z: {next}")))?;
+    if next < current {
+        return Err(Error::Msg(format!(
+            "downgrade rejected: installed version is higher than package version"
+        )));
+    }
+    Ok(())
+}
+
 /// Verifies the package in `dir`: schema version, detached signature over
 /// manifest.json and per-file hashes. Fail-closed: any problem makes the
 /// package unusable.
@@ -153,6 +190,33 @@ pub fn verify_package(dir: &Path, trusted: Option<&VerifyingKey>) -> VerifyRepor
             "schema_version {} is newer than supported {}",
             manifest.schema_version, SUPPORTED_SCHEMA
         ));
+    }
+
+    if parse_version(&manifest.version).is_none() {
+        problems.push(format!(
+            "version {} is not in major.minor.patch form",
+            manifest.version
+        ));
+    }
+
+    if !manifest.min_shell_version.trim().is_empty() {
+        match parse_version(&manifest.min_shell_version) {
+            Some(required) => {
+                if let Some(shell) = parse_version(shell_version()) {
+                    if required > shell {
+                        problems.push(format!(
+                            "min_shell_version {} is newer than shell {}",
+                            manifest.min_shell_version,
+                            shell_version()
+                        ));
+                    }
+                }
+            }
+            None => problems.push(format!(
+                "min_shell_version {} is not in major.minor.patch form",
+                manifest.min_shell_version
+            )),
+        }
     }
 
     match trusted {
@@ -283,6 +347,49 @@ mod tests {
         let report = verify_package(&dir, Some(&signing.verifying_key()));
         assert!(!report.ok);
         assert!(report.problems.iter().any(|p| p.contains("schema_version")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn versions_are_compared_and_shell_constraint_is_enforced() {
+        assert_eq!(parse_version("1.2.3"), Some((1, 2, 3)));
+        assert_eq!(parse_version("1.2.3-beta.1"), Some((1, 2, 3)));
+        assert!(parse_version("1.2").is_none());
+        assert!(parse_version("x.y.z").is_none());
+
+        assert!(ensure_not_downgrade("1.2.0", "1.1.9").is_err());
+        assert!(ensure_not_downgrade("1.2.0", "1.2.0").is_ok());
+        assert!(ensure_not_downgrade("1.2.0", "1.3.0").is_ok());
+
+        let dir = tmp("shell");
+        std::fs::write(dir.join("prompt.md"), b"hello").unwrap();
+        let base = TEMPLATE.replace("HASH", &sha256_hex(b"hello"));
+        let body = base.replace(
+            "\"version\": \"1.0.0\",",
+            "\"version\": \"1.0.0\",\n      \"min_shell_version\": \"99.0.0\",",
+        );
+        std::fs::write(dir.join("manifest.json"), &body).unwrap();
+        let signing = SigningKey::from_bytes(&[5u8; 32]);
+        let sig = signing.sign(body.as_bytes());
+        std::fs::write(dir.join("manifest.sig"), hex::encode(sig.to_bytes())).unwrap();
+
+        let report = verify_package(&dir, Some(&signing.verifying_key()));
+        assert!(!report.ok);
+        assert!(report
+            .problems
+            .iter()
+            .any(|p| p.contains("min_shell_version")));
+
+        let body = base.replace(
+            "\"version\": \"1.0.0\",",
+            "\"version\": \"1.0.0\",\n      \"min_shell_version\": \"0.0.1\",",
+        );
+        std::fs::write(dir.join("manifest.json"), &body).unwrap();
+        let sig = signing.sign(body.as_bytes());
+        std::fs::write(dir.join("manifest.sig"), hex::encode(sig.to_bytes())).unwrap();
+        let report = verify_package(&dir, Some(&signing.verifying_key()));
+        assert!(report.ok, "{:?}", report.problems);
+
         let _ = std::fs::remove_dir_all(dir);
     }
 }

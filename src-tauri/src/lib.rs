@@ -41,6 +41,7 @@ pub fn run() {
             commands::insert_after_doc,
             commands::replace_block_doc,
             commands::finalize_doc,
+            commands::choose_workspace,
             commands::artifacts_usage,
             commands::cleanup_artifacts,
             commands::mcp_servers,
@@ -390,7 +391,7 @@ pub fn cli_chat(
             return 1;
         }
     };
-    let engine = match engine::Engine::start(app_id, &home, &dir) {
+    let engine = match engine::Engine::start(app_id, &home, &config::workspace(&home, app_id)) {
         Ok(e) => e,
         Err(e) => {
             println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
@@ -514,7 +515,7 @@ pub fn cli_chat_async(app_id: Option<&String>, message: Option<&String>) -> i32 
             return 1;
         }
     };
-    let engine = match engine::Engine::start(app_id, &home, &dir) {
+    let engine = match engine::Engine::start(app_id, &home, &config::workspace(&home, app_id)) {
         Ok(e) => e,
         Err(e) => {
             println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
@@ -612,7 +613,7 @@ pub fn cli_chat_sessions(app_id: Option<&String>) -> i32 {
             return 1;
         }
     };
-    let mut engine = match engine::Engine::start(app_id, &home, &dir) {
+    let mut engine = match engine::Engine::start(app_id, &home, &config::workspace(&home, app_id)) {
         Ok(e) => e,
         Err(e) => {
             println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");

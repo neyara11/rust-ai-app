@@ -93,13 +93,13 @@
                   <polyline points="7 10 12 15 17 10" />
                   <line x1="12" y1="15" x2="12" y2="3" />
                 </svg>
-                <input id="install-path" placeholder="Например: dev-apps/eco-logs или C:\packages\app.zip" />
+                <input id="install-path" placeholder="Например: dev-apps/doc-writer или C:\packages\app.zip" />
               </div>
               <button id="install-btn" type="button">Установить пакет</button>
             </div>
             <div class="install-quick">
               <span class="muted small">Быстрая установка dev-пакетов:</span>
-              <button class="chip-btn" type="button" data-quick-install="dev-apps/eco-logs">eco-logs</button>
+              <button class="chip-btn" type="button" data-quick-install="dev-apps/doc-writer">doc-writer</button>
               <button class="chip-btn" type="button" data-quick-install="dev-apps/doc-lookup">doc-lookup</button>
             </div>
           </div>
@@ -144,22 +144,18 @@
             </div>
           </div>
 
+          <div class="ws-workspace">
+            <span class="muted small">Рабочая папка</span>
+            <span class="mono small ws-folder" id="ws-folder">—</span>
+            <button class="ghost small" id="ws-folder-pick" type="button">Выбрать</button>
+          </div>
+
           <div class="ws-tabs" role="tablist" aria-label="Режимы приложения">
             <button class="ws-tab active" data-ws="chat" type="button" role="tab">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
               </svg>
               <span>Диалог с агентом</span>
-            </button>
-            <button class="ws-tab" data-ws="docs" type="button" role="tab">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-                <line x1="16" y1="13" x2="8" y2="13" />
-                <line x1="16" y1="17" x2="8" y2="17" />
-              </svg>
-              <span>Документы сессии</span>
-              <span class="tab-counter" id="ws-docs-count">0</span>
             </button>
             <button class="ws-tab" data-ws="tools" type="button" role="tab">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -241,49 +237,6 @@
                     </button>
                   </div>
                 </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Documents Mode -->
-        <div class="ws-body" id="ws-docs" hidden>
-          <div class="workspace">
-            <aside class="doc-list">
-              <div class="sidebar-label">Типизированные документы</div>
-              <div id="docs" class="docs-items"></div>
-
-              <div class="artifacts-card">
-                <div class="sidebar-label">Квота и артефакты</div>
-                <div class="muted small mono artifacts-stat" id="artifacts">—</div>
-                <button class="ghost small cleanup-btn" id="cleanup-btn" type="button">Очистить устаревшие сессии</button>
-              </div>
-            </aside>
-
-            <div class="editor-col">
-              <div class="editor-head">
-                <div class="editor-meta-group">
-                  <span class="doc-badge mono" id="doc-meta">документ не выбран</span>
-                </div>
-                <div class="row-actions">
-                  <div class="view-mode-switch" role="group" aria-label="Режим отображения документа">
-                    <button class="ghost small active" id="doc-mode-edit" type="button">Редактор</button>
-                    <button class="ghost small" id="doc-mode-preview" type="button">Просмотр MD</button>
-                  </div>
-                  <button class="ghost small" id="append-btn" type="button">Дописать блок</button>
-                  <button class="ghost small" id="finalize-btn" type="button">Пометить готовым</button>
-                  <button class="small" id="save-btn" type="button">Сохранить ревизию</button>
-                </div>
-              </div>
-
-              <div class="editor-body">
-                <textarea id="doc-text" spellcheck="false" placeholder="Выберите документ слева для редактирования или просмотра markdown-структуры…"></textarea>
-                <div id="doc-preview" class="doc-preview" hidden></div>
-              </div>
-
-              <div class="append-row" hidden id="append-row">
-                <textarea id="append-text" placeholder="Фрагмент markdown, который атомарно добавится в конец документа с контролем ревизии…"></textarea>
-                <button id="append-apply" type="button">Добавить в документ</button>
               </div>
             </div>
           </div>

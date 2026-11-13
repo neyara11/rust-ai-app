@@ -1,7 +1,8 @@
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserConfig {
@@ -11,6 +12,10 @@ pub struct UserConfig {
     pub llm_model: Option<String>,
     #[serde(default)]
     pub enabled_apps: Vec<String>,
+    /// User-chosen working folder per app. The agent's file tools are confined
+    /// to this directory.
+    #[serde(default)]
+    pub workspaces: BTreeMap<String, String>,
     #[serde(default = "default_session_mb")]
     pub session_quota_mb: u64,
     #[serde(default = "default_global_mb")]
@@ -37,11 +42,31 @@ impl Default for UserConfig {
             llm_endpoint: None,
             llm_model: None,
             enabled_apps: Vec::new(),
+            workspaces: BTreeMap::new(),
             session_quota_mb: default_session_mb(),
             global_quota_mb: default_global_mb(),
             ttl_hours: default_ttl_hours(),
         }
     }
+}
+
+/// Working folder for an app: the user's choice or a default under the
+/// platform profile. Created on demand.
+pub fn workspace(home: &Path, app_id: &str) -> PathBuf {
+    let path = load(home)
+        .workspaces
+        .get(app_id)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join("workspaces").join(app_id));
+    let _ = fs::create_dir_all(&path);
+    path
+}
+
+pub fn set_workspace(home: &Path, app_id: &str, path: &Path) -> Result<()> {
+    let mut cfg = load(home);
+    cfg.workspaces
+        .insert(app_id.to_string(), path.display().to_string());
+    save(home, &cfg)
 }
 
 fn path(home: &Path) -> std::path::PathBuf {
