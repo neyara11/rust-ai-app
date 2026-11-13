@@ -1,0 +1,11 @@
+/target
+/src-tauri/target
+/tools/signer/target
+/.data
+/dev/keys
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

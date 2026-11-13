@@ -1,0 +1,619 @@
+pub mod artifacts;
+pub mod commands;
+pub mod config;
+pub mod docs;
+pub mod engine;
+pub mod error;
+pub mod manifest;
+pub mod mcp;
+pub mod registry;
+pub mod secrets;
+pub mod state;
+
+use secrets::SecretStore;
+use state::AppState;
+
+pub fn run() {
+    let state = AppState::new();
+    startup_sweep(&state.home);
+
+    tauri::Builder::default()
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![
+            commands::platform_info,
+            commands::list_apps,
+            commands::install_app,
+            commands::remove_app,
+            commands::get_config,
+            commands::save_config,
+            commands::probe_endpoint,
+            commands::secrets_list,
+            commands::secret_store,
+            commands::secret_delete,
+            commands::open_app,
+            commands::close_app,
+            commands::list_docs,
+            commands::read_doc,
+            commands::create_doc,
+            commands::write_doc,
+            commands::append_doc,
+            commands::insert_after_doc,
+            commands::replace_block_doc,
+            commands::finalize_doc,
+            commands::artifacts_usage,
+            commands::cleanup_artifacts,
+            commands::mcp_servers,
+            commands::mcp_server_get,
+            commands::mcp_server_save,
+            commands::mcp_server_delete,
+            commands::mcp_probe,
+            commands::mcp_call,
+            commands::audit_tail,
+            commands::chat_open,
+            commands::chat_send,
+            commands::chat_list,
+            commands::chat_new,
+            commands::chat_select,
+            commands::chat_abort,
+            commands::chat_status,
+            commands::chat_delete,
+            commands::chat_history,
+            commands::chat_reset,
+            commands::chat_stop,
+        ])
+        .run(tauri::generate_context!())
+        .expect("failed to run ECO AIOps platform");
+}
+
+/// Removes leftover staging directories and expired or orphaned session data.
+pub fn startup_sweep(home: &std::path::Path) {
+    let policy = config::policy(home);
+    for app in registry::list(home) {
+        let root = artifacts::sessions_root(home, &app.app_id);
+        let _ = artifacts::sweep(&root, &policy);
+    }
+    let _ = std::fs::remove_dir_all(home.join("staging"));
+}
+
+/// Headless verification of a package directory or zip. Used by CI and by
+/// `--verify` on the built binary; no window is created.
+pub fn cli_verify(arg: Option<&String>) -> i32 {
+    let Some(path) = arg else {
+        eprintln!("usage: eco-platform --verify <package-dir|package.zip>");
+        return 2;
+    };
+    let home = registry::home();
+    let src = std::path::PathBuf::from(path);
+    let (dir, _temp) = match prepare_package(&home, &src) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problems\": [\"{e}\"] }}");
+            return 1;
+        }
+    };
+    let trusted = registry::load_trusted_key(&home);
+    let report = manifest::verify_package(&dir, trusted.as_ref());
+    let out = serde_json::json!({ "ok": report.ok, "problems": report.problems });
+    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+    if report.ok {
+        0
+    } else {
+        1
+    }
+}
+
+fn prepare_package(
+    home: &std::path::Path,
+    src: &std::path::Path,
+) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), String> {
+    if src.is_dir() {
+        return Ok((src.to_path_buf(), None));
+    }
+    let staging = std::env::temp_dir().join(format!("eco-verify-{}", artifacts::now_secs()));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let _ = home;
+    registry::extract_zip_public(src, &staging).map_err(|e| e.to_string())?;
+    Ok((staging.clone(), Some(staging)))
+}
+
+/// Headless install, same fail-closed path as the UI. Used by CI and pilots.
+pub fn cli_install(arg: Option<&String>) -> i32 {
+    let Some(path) = arg else {
+        eprintln!("usage: eco-platform --install <package-dir|package.zip>");
+        return 2;
+    };
+    let home = registry::home();
+    let src = std::path::PathBuf::from(path);
+    match registry::install(&home, &src) {
+        Ok(app) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&app).unwrap_or_default()
+            );
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
+}
+
+/// Lists installed packages with verification status.
+pub fn cli_list() -> i32 {
+    let home = registry::home();
+    let apps = registry::list(&home);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&apps).unwrap_or_default()
+    );
+    0
+}
+
+
+
+/// Headless MCP probe: `--mcp-probe <url>`.
+pub fn cli_mcp_probe(url: Option<&String>) -> i32 {
+    let Some(url) = url else {
+        eprintln!("usage: eco-platform --mcp-probe <url>");
+        return 2;
+    };
+    let def = mcp::ServerDef {
+        id: "cli".to_string(),
+        url: url.clone(),
+        token: std::env::var("MCP_TOKEN").ok(),
+    };
+    match mcp::McpSession::connect(def).and_then(|s| {
+        let tools = s.list_tools()?;
+        Ok(serde_json::json!({
+            "protocol": s.protocol,
+            "server": s.server,
+            "tools": tools.iter().map(|t| t.get("name").cloned().unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>()
+        }))
+    }) {
+        Ok(out) => {
+            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
+}
+
+/// Headless MCP call: `--mcp-call <url> <tool> <json-args>`.
+pub fn cli_mcp_call(url: Option<&String>, tool: Option<&String>, args: Option<&String>) -> i32 {
+    let (Some(url), Some(tool)) = (url, tool) else {
+        eprintln!("usage: eco-platform --mcp-call <url> <tool> '<json-args>'");
+        return 2;
+    };
+    let arguments: serde_json::Value = match args {
+        Some(raw) => {
+            let text = if let Some(path) = raw.strip_prefix('@') {
+                std::fs::read_to_string(path).map_err(|e| format!("cannot read args file: {e}"))
+            } else {
+                Ok(raw.clone())
+            };
+            match text.and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string())) {
+                Ok(value) => value,
+                Err(e) => {
+                    eprintln!("invalid json args: {e}");
+                    return 2;
+                }
+            }
+        }
+        None => serde_json::json!({}),
+    };
+
+    let def = mcp::ServerDef {
+        id: "cli".to_string(),
+        url: url.clone(),
+        token: std::env::var("MCP_TOKEN").ok(),
+    };
+    match mcp::McpSession::connect(def).and_then(|s| s.call(tool, arguments)) {
+        Ok(value) => {
+            let (text, truncated, bytes) = mcp::capped(&value);
+            if truncated {
+                eprintln!("note: response truncated, {bytes} bytes total");
+            }
+            println!("{text}");
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
+}
+
+/// Full platform path for a tool call: signed manifest allow-list, server
+/// definition from DPAPI, size cap, audit record.
+pub fn mcp_call_for_app(
+    home: &std::path::Path,
+    app_id: &str,
+    server_id: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> error::Result<(usize, bool, String)> {
+    let app = registry::verified_manifest(home, app_id)?;
+    let Some(definition) = manifest::find_tool(&app, tool) else {
+        return error::msg(format!(
+            "tool {tool} is not in the allow-list of {app_id}"
+        ));
+    };
+    if definition.stream == "write" && !manifest::external_writes_allowed(&app) {
+        return error::msg(format!(
+            "tool {tool} is a write tool and {app_id} declares no external writes"
+        ));
+    }
+    if definition.stream == "read" && manifest::external_writes_allowed(&app) {
+        // write-capable apps still get read tools; nothing to do here
+    }
+
+    let started = std::time::Instant::now();
+    let def = mcp::get(&SecretStore::new(home), server_id)?;
+    let session = mcp::McpSession::connect(def)?;
+    let value = session.call(tool, arguments)?;
+    let (text, truncated, bytes) = mcp::capped(&value);
+
+    commands::audit(
+        home,
+        app_id,
+        serde_json::json!({
+            "ts": artifacts::now_secs(),
+            "app_id": app_id,
+            "server_id": server_id,
+            "tool": tool,
+            "bytes": bytes,
+            "truncated": truncated,
+            "took_ms": started.elapsed().as_millis() as u64
+        }),
+    );
+
+    Ok((bytes, truncated, text))
+}
+
+/// `--mcp-add <id> <url> [token]`: stores a server definition in DPAPI.
+pub fn cli_mcp_add(id: Option<&String>, url: Option<&String>, token: Option<&String>) -> i32 {
+    let (Some(id), Some(url)) = (id, url) else {
+        eprintln!("usage: eco-platform --mcp-add <id> <url> [token]");
+        return 2;
+    };
+    let home = registry::home();
+    let def = mcp::ServerDef {
+        id: id.clone(),
+        url: url.clone(),
+        token: token.cloned(),
+    };
+    match mcp::put(&SecretStore::new(&home), &def) {
+        Ok(()) => {
+            println!("stored mcp server {id} in DPAPI");
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
+}
+
+/// `--mcp-call-app <app-id> <server-id> <tool> <json-args>`.
+pub fn cli_mcp_call_app(
+    app: Option<&String>,
+    server: Option<&String>,
+    tool: Option<&String>,
+    args: Option<&String>,
+) -> i32 {
+    let (Some(app), Some(server), Some(tool)) = (app, server, tool) else {
+        eprintln!("usage: eco-platform --mcp-call-app <app-id> <server-id> <tool> '<json-args>'");
+        return 2;
+    };
+    let arguments: serde_json::Value = match args {
+        Some(raw) => {
+            let text = if let Some(path) = raw.strip_prefix('@') {
+                std::fs::read_to_string(path).map_err(|e| format!("cannot read args file: {e}"))
+            } else {
+                Ok(raw.clone())
+            };
+            match text.and_then(|t| {
+                serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string())
+            }) {
+                Ok(value) => value,
+                Err(e) => {
+                    eprintln!("invalid json args: {e}");
+                    return 2;
+                }
+            }
+        }
+        None => serde_json::json!({}),
+    };
+
+    match mcp_call_for_app(&registry::home(), app, server, tool, arguments) {
+        Ok((bytes, truncated, text)) => {
+            println!("{text}");
+            if truncated {
+                eprintln!("note: truncated, {bytes} bytes total");
+            }
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
+}
+
+/// `--trust <trusted.pub>`: installs the package signing trust anchor.
+pub fn cli_trust(arg: Option<&String>) -> i32 {
+    let Some(path) = arg else {
+        eprintln!("usage: eco-platform --trust <trusted.pub>");
+        return 2;
+    };
+    let home = registry::home();
+    match registry::install_trust_anchor(&home, &std::path::PathBuf::from(path)) {
+        Ok(key) => {
+            println!("trust anchor installed in {}", home.display());
+            println!("public key: {key}");
+            if let Some(fp) = registry::anchor_fingerprint(&home) {
+                println!("fingerprint: {fp}");
+            }
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
+}
+
+
+/// `--chat <app-id> <message> [low|medium|high]`: headless smoke test.
+pub fn cli_chat(
+    app_id: Option<&String>,
+    message: Option<&String>,
+    level: Option<&String>,
+) -> i32 {
+    let (Some(app_id), Some(message)) = (app_id, message) else {
+        eprintln!("usage: eco-platform --chat <app-id> <message> [low|medium|high]");
+        return 2;
+    };
+    let home = registry::home();
+    let policy = config::policy(&home);
+    let root = artifacts::sessions_root(&home, app_id);
+    let dir = match artifacts::open_session(&root, &policy) {
+        Ok(d) => d,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            return 1;
+        }
+    };
+    let engine = match engine::Engine::start(app_id, &home, &dir) {
+        Ok(e) => e,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            artifacts::close_session(&dir);
+            return 1;
+        }
+    };
+    println!("model: {}", engine.info().model);
+    let session = engine.snapshot();
+    let started = std::time::Instant::now();
+    let result = session
+        .prompt(message, level.map(|l| l.as_str()))
+        .and_then(|_| session.history());
+    drop(engine);
+    artifacts::close_session(&dir);
+    match result {
+        Ok(items) => {
+            for item in items {
+                let stats = item
+                    .tokens_out
+                    .map(|out| {
+                        let speed = item.tok_s.unwrap_or(0.0);
+                        let ms = item.ms.unwrap_or(0);
+                        format!(" (out {out}, {speed:.0} tok/s, {ms} ms)")
+                    })
+                    .unwrap_or_default();
+                if item.kind == "reasoning" {
+                    println!("[reasoning] {} chars", item.text.chars().count());
+                } else {
+                    println!("[{}]{stats} {}", item.role, item.text);
+                }
+            }
+            println!("total: {} ms", started.elapsed().as_millis());
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
+}
+/// `--secret-add <name> <value>`: stores a secret in DPAPI (dev helper).
+pub fn cli_secret_add(name: Option<&String>, value: Option<&String>) -> i32 {
+    let (Some(name), Some(value)) = (name, value) else {
+        eprintln!("usage: eco-platform --secret-add <name> <value>");
+        return 2;
+    };
+    let home = registry::home();
+    match SecretStore::new(&home).store(name, value) {
+        Ok(()) => {
+            println!("secret {name} stored");
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
+}
+
+/// `--import-auth <secret-name> <auth.json> <provider>`: copies a provider key
+/// from an existing local auth file into DPAPI without printing it.
+pub fn cli_import_auth(
+    name: Option<&String>,
+    path: Option<&String>,
+    provider: Option<&String>,
+) -> i32 {
+    let (Some(name), Some(path), Some(provider)) = (name, path, provider) else {
+        eprintln!("usage: eco-platform --import-auth <secret-name> <auth.json> <provider>");
+        return 2;
+    };
+    let parsed: Result<serde_json::Value, _> = std::fs::read_to_string(path)
+        .map_err(|e| e.to_string())
+        .and_then(|raw| serde_json::from_str(&raw).map_err(|e| e.to_string()));
+    let value = match parsed {
+        Ok(v) => v,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            return 1;
+        }
+    };
+    let key = value
+        .get(provider)
+        .and_then(|p| {
+            p.get("key")
+                .or_else(|| p.get("apiKey"))
+                .or_else(|| p.get("access"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let Some(key) = key else {
+        println!("{{ \"ok\": false, \"problem\": \"provider {provider} has no key field\" }}");
+        return 1;
+    };
+    match SecretStore::new(&registry::home()).store(name, &key) {
+        Ok(()) => {
+            println!("secret {name} imported from provider {provider} ({} chars)", key.len());
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
+}
+
+/// `--chat-async <app-id> <message>`: verifies async prompting and polling.
+pub fn cli_chat_async(app_id: Option<&String>, message: Option<&String>) -> i32 {
+    let (Some(app_id), Some(message)) = (app_id, message) else {
+        eprintln!("usage: eco-platform --chat-async <app-id> <message>");
+        return 2;
+    };
+    let home = registry::home();
+    let policy = config::policy(&home);
+    let root = artifacts::sessions_root(&home, app_id);
+    let dir = match artifacts::open_session(&root, &policy) {
+        Ok(d) => d,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            return 1;
+        }
+    };
+    let engine = match engine::Engine::start(app_id, &home, &dir) {
+        Ok(e) => e,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            artifacts::close_session(&dir);
+            return 1;
+        }
+    };
+    let session = engine.snapshot();
+    let started = std::time::Instant::now();
+    if let Err(e) = session.prompt(message, None) {
+        println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+        drop(engine);
+        artifacts::close_session(&dir);
+        return 1;
+    }
+    println!("prompt accepted in {} ms", started.elapsed().as_millis());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let mut ticks = 0;
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let Ok(raw) = session.history_raw() else { break };
+        let busy = session.busy(&raw);
+        let items = engine::parse_history(&raw);
+        ticks += 1;
+        println!(
+            "tick {ticks} t={}ms items={} busy={busy}",
+            started.elapsed().as_millis(),
+            items.len()
+        );
+        if !busy {
+            for item in items {
+                println!("[{}] {}", item.role, item.text);
+            }
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            println!("timed out waiting for completion");
+            break;
+        }
+    }
+    drop(engine);
+    artifacts::close_session(&dir);
+    0
+}
+
+/// `--chat-sessions <app-id>`: lists chats and creates one new chat, proving
+/// that starting a new chat does not delete the old ones.
+pub fn cli_chat_sessions(app_id: Option<&String>) -> i32 {
+    let Some(app_id) = app_id else {
+        eprintln!("usage: eco-platform --chat-sessions <app-id>");
+        return 2;
+    };
+    let home = registry::home();
+    let policy = config::policy(&home);
+    let root = artifacts::sessions_root(&home, app_id);
+    let dir = match artifacts::open_session(&root, &policy) {
+        Ok(d) => d,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            return 1;
+        }
+    };
+    let mut engine = match engine::Engine::start(app_id, &home, &dir) {
+        Ok(e) => e,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            artifacts::close_session(&dir);
+            return 1;
+        }
+    };
+    match engine.sessions() {
+        Ok(before) => {
+            println!("before: {} chats", before.len());
+            for chat in &before {
+                println!("  {}  {}", chat.id, chat.title);
+            }
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            drop(engine);
+            artifacts::close_session(&dir);
+            return 1;
+        }
+    }
+    if let Err(e) = engine.new_session("Проверка нового чата") {
+        println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+        drop(engine);
+        artifacts::close_session(&dir);
+        return 1;
+    }
+    match engine.sessions() {
+        Ok(after) => {
+            println!("after: {} chats", after.len());
+            for chat in &after {
+                println!("  {}  {}", chat.id, chat.title);
+            }
+        }
+        Err(e) => println!("{{ \"ok\": false, \"problem\": \"{e}\" }}"),
+    }
+    drop(engine);
+    artifacts::close_session(&dir);
+    0
+}

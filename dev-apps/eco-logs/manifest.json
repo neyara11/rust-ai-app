@@ -1,0 +1,49 @@
+{
+  "schema_version": 2,
+  "app_id": "eco-logs",
+  "name": "Разбор алертов и логов",
+  "version": "0.1.0",
+  "min_shell_version": "0.1.0",
+  "publisher": "CN=ECO AIOps Dev",
+  "profile": {
+    "system_prompt": "prompt/system.md",
+    "model_hint": "gateway-default",
+    "max_steps": 25
+  },
+  "tools": [
+    { "tool": "search", "argv": ["--tool", "search"], "stream": "read" },
+    { "tool": "top", "argv": ["--tool", "top"], "stream": "read" },
+    { "tool": "hist", "argv": ["--tool", "hist"], "stream": "read" },
+    { "tool": "stats", "argv": ["--tool", "stats"], "stream": "read" },
+    { "tool": "users", "argv": ["--tool", "users"], "stream": "read" },
+    { "tool": "dump", "argv": ["--tool", "dump"], "stream": "write" },
+    { "tool": "trace", "argv": ["--tool", "trace"], "stream": "read" },
+    { "tool": "impact", "argv": ["--tool", "impact"], "stream": "read" },
+    { "tool": "analyze", "argv": ["--tool", "analyze"], "stream": "read" },
+    { "tool": "verify", "argv": ["--tool", "verify"], "stream": "read" },
+    { "tool": "weblog", "argv": ["--tool", "weblog"], "stream": "read" },
+    { "tool": "artifact", "argv": ["--tool", "artifact"], "stream": "read" }
+  ],
+  "connections": [
+    { "id": "llm", "type": "llm", "required": true },
+    { "id": "opensearch", "type": "opensearch", "required": true },
+    { "id": "sentry", "type": "sentry", "required": false }
+  ],
+  "capabilities": {
+    "index_allowlist": ["bo-*", "eco-*"],
+    "file_scopes": ["session"],
+    "external_writes": []
+  },
+  "docs": [
+    { "id": "report", "label": "Отчёт по инциденту", "export": ["md", "docx"] },
+    { "id": "defect", "label": "Дефект", "export": ["md"] }
+  ],
+  "artifacts": {
+    "quota_mb": 500,
+    "ttl_hours": 168
+  },
+  "hashes": {
+    "prompt/system.md": "sha256:4d5d4d51107a9ca091e6436d431c696a2275cd9e03bdf064d2d1ce8d0468b22e",
+    "skills/log-triage/SKILL.md": "sha256:78a5e6312c058b2b5736a69ddbd12ea3f0bd34e05b38ba039ca7e550af1d5950"
+  }
+}

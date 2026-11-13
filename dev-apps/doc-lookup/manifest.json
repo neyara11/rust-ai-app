@@ -1,0 +1,37 @@
+{
+  "schema_version": 2,
+  "app_id": "doc-lookup",
+  "name": "Справка по библиотекам",
+  "version": "0.1.0",
+  "min_shell_version": "0.1.0",
+  "publisher": "CN=ECO AIOps Dev",
+  "profile": {
+    "system_prompt": "prompt/system.md",
+    "model_hint": "gateway-default",
+    "max_steps": 12
+  },
+  "tools": [
+    { "tool": "resolve-library-id", "stream": "read" },
+    { "tool": "query-docs", "stream": "read" }
+  ],
+  "connections": [
+    { "id": "llm", "type": "llm", "required": true },
+    { "id": "context7", "type": "http-mcp", "required": true }
+  ],
+  "capabilities": {
+    "index_allowlist": [],
+    "file_scopes": ["session"],
+    "external_writes": []
+  },
+  "docs": [
+    { "id": "findings", "label": "Выжимка", "export": ["md"] }
+  ],
+  "artifacts": {
+    "quota_mb": 50,
+    "ttl_hours": 72
+  },
+  "hashes": {
+    "prompt/system.md": "sha256:2a8e8a75097a4dc344e583411585b20c02662ab2ebb50a86e2fbd93196013002",
+    "skills/context7-docs/SKILL.md": "sha256:5979cb5cd6247fdea8751791f2207da8e0ef46783806b9aaa4d6f8d88325fa5f"
+  }
+}
