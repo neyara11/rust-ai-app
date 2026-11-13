@@ -82,7 +82,7 @@
           <div class="catalog-hero-copy">
             <div class="eyebrow">РЕЕСТР МИНИ-ПРИЛОЖЕНИЙ · ED25519 VERIFIED</div>
             <h1>Изолированные агентские пакеты</h1>
-            <p class="panel-desc">Каждое мини-приложение работает в собственном контуре с фиксированным системным промптом, белым списком MCP-инструментов и типизированными документами сессии.</p>
+            <p class="panel-desc">Каждое мини-приложение работает в собственном контуре с фиксированным системным промптом, белым списком инструментов и доступом к файлам только в выбранной рабочей папке.</p>
           </div>
           <div class="install-box">
             <div class="install-label">Установка подписанного пакета (.zip или каталог)</div>
@@ -192,7 +192,7 @@
               <div class="chat-sidebar-foot">
                 <div class="sidebar-label">Профиль безопасности</div>
                 <div class="security-summary" id="ws-security-summary">
-                  <div class="sec-row"><span>Файловые примитивы</span><strong class="mono">DENY</strong></div>
+                  <div class="sec-row"><span>Файлы в рабочей папке</span><strong class="mono" id="sec-file-scope">DENY</strong></div>
                   <div class="sec-row"><span>Allow-list tools</span><strong class="mono" id="sec-tools-count">0</strong></div>
                   <div class="sec-row"><span>Внешняя запись</span><strong class="mono" id="sec-writes">БЛОК</strong></div>
                 </div>
@@ -225,7 +225,7 @@
 
               <div class="chat-composer-wrap">
                 <div class="chat-input">
-                  <textarea id="chat-text" placeholder="Опишите инцидент, вставьте стектрейс или задайте вопрос по документации… (Enter — отправить, Shift+Enter — новая строка)" rows="2"></textarea>
+                  <textarea id="chat-text" placeholder="Создайте документ, поправьте файл в рабочей папке или попросите сконвертировать markdown в Word… (Enter — отправить, Shift+Enter — новая строка)" rows="2"></textarea>
                   <div class="chat-input-actions">
                     <span class="kbd-hint mono">Enter ↵</span>
                     <button id="chat-send" type="button">

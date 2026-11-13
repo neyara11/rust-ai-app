@@ -1,5 +1,5 @@
 ﻿use crate::error::{msg, Error, Result};
-use crate::manifest::{self, Connection, DocDef, Manifest, ToolDef};
+use crate::manifest::{self, Capabilities, Connection, DocDef, Manifest, ToolDef};
 use ed25519_dalek::VerifyingKey;
 use serde::Serialize;
 use std::fs;
@@ -18,6 +18,7 @@ pub struct InstalledApp {
     pub docs: Vec<DocDef>,
     pub tools: Vec<ToolDef>,
     pub connections: Vec<Connection>,
+    pub capabilities: Capabilities,
 }
 
 pub fn now_secs() -> u64 {
@@ -68,6 +69,7 @@ fn installed(path: &Path, manifest: &Manifest, report: &manifest::VerifyReport) 
         docs: manifest.docs.clone(),
         tools: manifest.tools.clone(),
         connections: manifest.connections.clone(),
+        capabilities: manifest.capabilities.clone(),
     }
 }
 
@@ -99,6 +101,7 @@ pub fn list(home: &Path) -> Vec<InstalledApp> {
                 docs: Vec::new(),
                 tools: Vec::new(),
                 connections: Vec::new(),
+                capabilities: Capabilities::default(),
             }),
         }
     }

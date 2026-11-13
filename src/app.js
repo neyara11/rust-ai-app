@@ -77,27 +77,37 @@ const browserMock = (() => {
     "doc-writer": [
       {
         id: "ses-301",
-        title: "Документ: план проверки",
+        title: "report.md → Word",
         items: [
           {
             role: "user",
             kind: "text",
-            text: "Создай документ с планом проверки гипотезы о деградации БД и заполни раздел «Кратко».",
+            text: "В рабочей папке создай report.md с планом проверки гипотезы о деградации БД и сконвертируй его в report.docx.",
           },
           {
             role: "assistant",
             kind: "reasoning",
-            text: "Сначала читаю `document`, затем заполняю пустой документ через `doc_create` и правлю разделы по якорям.",
+            text: "Сначала посмотрю файлы в рабочей папке, затем запишу отчёт и вызову `docx_export`.",
           },
           {
             role: "tool",
             kind: "tool",
-            text: "platform_doc_read -> completed",
+            text: "platform_list_files -> completed",
+          },
+          {
+            role: "tool",
+            kind: "tool",
+            text: "platform_write_file -> completed",
+          },
+          {
+            role: "tool",
+            kind: "tool",
+            text: "platform_docx_export -> completed",
           },
           {
             role: "assistant",
             kind: "text",
-            text: "### Документ обновлён\n\nСоздал `document` с разделами «Кратко», «Шаги» и «Вывод». Ревизия: `a4f912c0`.\n\nДальше можно дополнить шаги и экспортировать документ в Word.",
+            text: "### Готово\n\nСоздал в рабочей папке:\n\n- `report.md` — план проверки\n- `report.docx` — Word-версия через `docx_export`\n\nФайлы можно править и пересобирать.",
             tokens_in: 980,
             tokens_out: 210,
             reasoning_tokens: 120,
@@ -424,7 +434,9 @@ function renderApps() {
       : "";
 
     const toolsCount = (app.tools || []).length;
-    const docsCount = (app.docs || []).length;
+    const caps = app.capabilities || {};
+    const fileScope = (caps.file_scopes || []).includes("workspace");
+    const externalWrites = (caps.external_writes || []).length > 0;
     const conns = (app.connections || [])
       .map((c) => `<span class="conn-tag">${esc(c.id)}</span>`)
       .join("");
@@ -446,8 +458,8 @@ function renderApps() {
 
       <div class="app-specs">
         <span class="spec-pill">Tools: <strong>${toolsCount}</strong></span>
-        <span class="spec-pill">Документы: <strong>${docsCount}</strong></span>
-        <span class="spec-pill">Контур: <strong>read-only</strong></span>
+        <span class="spec-pill">Файлы: <strong>${fileScope ? "workspace" : "нет"}</strong></span>
+        <span class="spec-pill">Контур: <strong>${fileScope ? "локальный" : externalWrites ? "запись" : "read-only"}</strong></span>
       </div>
 
       ${problems}
@@ -504,6 +516,13 @@ async function openApp(appId) {
     if (wsPublisher) wsPublisher.textContent = `${appId} · ${ctx.appMeta.publisher || "Ed25519 verified"}`;
     const secTools = $("sec-tools-count");
     if (secTools) secTools.textContent = String((ctx.appMeta.tools || []).length);
+    const caps = ctx.appMeta.capabilities || {};
+    const fileScope = (caps.file_scopes || []).includes("workspace");
+    const externalWrites = (caps.external_writes || []).length > 0;
+    const secFiles = $("sec-file-scope");
+    if (secFiles) secFiles.textContent = fileScope ? "workspace" : "DENY";
+    const secWrites = $("sec-writes");
+    if (secWrites) secWrites.textContent = externalWrites ? "РАЗРЕШЕНА" : "БЛОК";
     const wsToolsCount = $("ws-tools-count");
     if (wsToolsCount) wsToolsCount.textContent = String((ctx.appMeta.tools || []).length);
 
