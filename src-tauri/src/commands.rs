@@ -19,7 +19,15 @@ pub struct PlatformInfo {
     pub schema: u32,
     pub trusted_anchor: bool,
     pub anchor_fingerprint: Option<String>,
+    pub anchor_fingerprints: Vec<String>,
     pub anchor_source: Option<String>,
+    pub anchor_count: usize,
+    pub allowlist_status: String,
+    pub allowlist_source: String,
+    pub allowlist_apps: usize,
+    pub allowlist_revoked: usize,
+    pub allowlist_expires_at: Option<u64>,
+    pub allowlist_problem: Option<String>,
     pub dev_mode: bool,
 }
 
@@ -39,13 +47,23 @@ pub struct Probe {
 #[tauri::command(rename_all = "snake_case")]
 pub fn platform_info(state: tauri::State<'_, AppState>) -> PlatformInfo {
     let anchor = registry::trusted_anchor(&state.home);
+    let keys = registry::load_trusted_keys(&state.home);
+    let allow = crate::allowlist::info(&state.home, &keys);
     PlatformInfo {
         home: state.home.display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         schema: manifest::SUPPORTED_SCHEMA,
         trusted_anchor: anchor.is_some(),
         anchor_fingerprint: registry::anchor_fingerprint(&state.home),
+        anchor_fingerprints: registry::anchor_fingerprints(&state.home),
         anchor_source: anchor.map(|(_, source)| source.as_str().to_string()),
+        anchor_count: keys.len(),
+        allowlist_status: allow.status,
+        allowlist_source: allow.source,
+        allowlist_apps: allow.apps,
+        allowlist_revoked: allow.revoked,
+        allowlist_expires_at: allow.expires_at,
+        allowlist_problem: allow.problems.first().cloned(),
         dev_mode: registry::dev_mode(),
     }
 }

@@ -105,6 +105,8 @@ pub struct Manifest {
 pub struct VerifyReport {
     pub ok: bool,
     pub problems: Vec<String>,
+    /// Fingerprint of the active anchor key that validated the signature.
+    pub signer_fingerprint: Option<String>,
 }
 
 impl VerifyReport {
@@ -112,6 +114,7 @@ impl VerifyReport {
         Self {
             ok: problems.is_empty(),
             problems,
+            signer_fingerprint: None,
         }
     }
 }
@@ -162,8 +165,9 @@ pub fn ensure_not_downgrade(current: &str, next: &str) -> Result<()> {
 
 /// Verifies the package in `dir`: schema version, detached signature over
 /// manifest.json and per-file hashes. Fail-closed: any problem makes the
-/// package unusable.
-pub fn verify_package(dir: &Path, trusted: Option<&VerifyingKey>) -> VerifyReport {
+/// package unusable. The signature may be made by any of the active anchors,
+/// which allows staged key rotation.
+pub fn verify_package(dir: &Path, trusted: &[VerifyingKey]) -> VerifyReport {
     let manifest_bytes = match fs::read(dir.join("manifest.json")) {
         Ok(b) => b,
         Err(e) => return VerifyReport::fail(vec![format!("manifest.json unreadable: {e}")]),
@@ -174,6 +178,7 @@ pub fn verify_package(dir: &Path, trusted: Option<&VerifyingKey>) -> VerifyRepor
     };
 
     let mut problems = Vec::new();
+    let mut signer_fingerprint = None;
 
     if manifest.schema_version > SUPPORTED_SCHEMA {
         problems.push(format!(
@@ -209,22 +214,31 @@ pub fn verify_package(dir: &Path, trusted: Option<&VerifyingKey>) -> VerifyRepor
         }
     }
 
-    match trusted {
-        None => problems.push("trust anchor missing: trusted.pub not installed".to_string()),
-        Some(key) => match fs::read_to_string(dir.join("manifest.sig")) {
+    if trusted.is_empty() {
+        problems.push("trust anchor missing: trusted.pub not installed".to_string());
+    } else {
+        match fs::read_to_string(dir.join("manifest.sig")) {
             Err(e) => problems.push(format!("manifest.sig unreadable: {e}")),
             Ok(raw) => match hex::decode(raw.trim()) {
                 Err(e) => problems.push(format!("manifest.sig is not hex: {e}")),
                 Ok(bytes) => match Signature::from_slice(&bytes) {
                     Err(e) => problems.push(format!("manifest.sig invalid: {e}")),
                     Ok(sig) => {
-                        if let Err(e) = key.verify_strict(&manifest_bytes, &sig) {
-                            problems.push(format!("signature mismatch: {e}"));
+                        let signer = trusted
+                            .iter()
+                            .find(|key| key.verify_strict(&manifest_bytes, &sig).is_ok());
+                        match signer {
+                            Some(key) => {
+                                let digest = sha256_hex(&key.to_bytes());
+                                signer_fingerprint = Some(digest[..16].to_string());
+                            }
+                            None => problems
+                                .push("signature mismatch: no active anchor matches".to_string()),
                         }
                     }
                 },
             },
-        },
+        }
     }
 
     if !manifest.profile.system_prompt.is_empty() {
@@ -253,7 +267,11 @@ pub fn verify_package(dir: &Path, trusted: Option<&VerifyingKey>) -> VerifyRepor
         }
     }
 
-    VerifyReport::fail(problems)
+    VerifyReport {
+        ok: problems.is_empty(),
+        problems,
+        signer_fingerprint,
+    }
 }
 
 pub fn find_tool<'a>(manifest: &'a Manifest, tool: &str) -> Option<&'a ToolDef> {
@@ -310,13 +328,13 @@ mod tests {
         std::fs::write(dir.join("manifest.sig"), hex::encode(sig.to_bytes())).unwrap();
 
         let trusted = signing.verifying_key();
-        let report = verify_package(&dir, Some(&trusted));
+        let report = verify_package(&dir, &[trusted]);
         assert!(report.ok, "{:?}", report.problems);
 
-        assert!(!verify_package(&dir, None).ok);
+        assert!(!verify_package(&dir, &[]).ok);
 
         std::fs::write(dir.join("prompt.md"), b"tampered").unwrap();
-        let report = verify_package(&dir, Some(&trusted));
+        let report = verify_package(&dir, &[trusted]);
         assert!(!report.ok);
         assert!(report.problems.iter().any(|p| p.contains("hash mismatch")));
 
@@ -334,7 +352,7 @@ mod tests {
         let signing = SigningKey::from_bytes(&[9u8; 32]);
         let sig = signing.sign(body.as_bytes());
         std::fs::write(dir.join("manifest.sig"), hex::encode(sig.to_bytes())).unwrap();
-        let report = verify_package(&dir, Some(&signing.verifying_key()));
+        let report = verify_package(&dir, &[signing.verifying_key()]);
         assert!(!report.ok);
         assert!(report.problems.iter().any(|p| p.contains("schema_version")));
         let _ = std::fs::remove_dir_all(dir);
@@ -363,7 +381,7 @@ mod tests {
         let sig = signing.sign(body.as_bytes());
         std::fs::write(dir.join("manifest.sig"), hex::encode(sig.to_bytes())).unwrap();
 
-        let report = verify_package(&dir, Some(&signing.verifying_key()));
+        let report = verify_package(&dir, &[signing.verifying_key()]);
         assert!(!report.ok);
         assert!(report
             .problems
@@ -377,7 +395,7 @@ mod tests {
         std::fs::write(dir.join("manifest.json"), &body).unwrap();
         let sig = signing.sign(body.as_bytes());
         std::fs::write(dir.join("manifest.sig"), hex::encode(sig.to_bytes())).unwrap();
-        let report = verify_package(&dir, Some(&signing.verifying_key()));
+        let report = verify_package(&dir, &[signing.verifying_key()]);
         assert!(report.ok, "{:?}", report.problems);
 
         let _ = std::fs::remove_dir_all(dir);

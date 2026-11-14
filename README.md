@@ -87,6 +87,20 @@ Release-сборка принимает anchor только machine-wide:
 `HKLM\SOFTWARE\EcoAIOps\TrustedPub` (ставить из-под администратора; GPO/установщик).
 Пользовательский anchor действует только при `ECO_PLATFORM_DEV=1` или в debug-сборке.
 
+Ротация ключей: до 4 активных anchor; `--trust <new.pub>` добавляет ключ,
+`--untrust <fingerprint|public-key|all> [--force]` убирает (последний ключ — только
+с `--force`). Пакет принимается, если подпись совпала хотя бы с одним активным ключом.
+
+Подписанный allowlist (необязателен): `%ProgramData%\EcoAIOps\allowlist.json` +
+`allowlist.sig` (в dev — `<home>\allowlist.json`; `ECO_ALLOWLIST_PATH` работает
+только в debug-сборке). Пока файла нет, действует только проверка подписи пакета;
+если файл есть и валиден, разрешены только перечисленные `app_id`/версии, а
+`revoked` блокирует запуск. Битый, неподписанный или просроченный документ блокирует
+установку/запуск (fail-closed); статус `incomplete` означает, что доставлен
+`allowlist.json` без `.sig` — сначала кладите подпись. Пример —
+`dev/allowlist.example.json`, проверка — `--allowlist`, `--allowlist-verify`,
+`--allowlist-check`.
+
 Движок ищется в `ECO_OPENCODE_BIN`, затем в `<home>\engine\opencode.exe`, затем в
 `tools\oc\node_modules\opencode-ai\bin\opencode.exe` (dev-путь).
 
@@ -203,8 +217,12 @@ cargo tauri build                     # NSIS per-machine, WebView2 offlineInstal
 --history <app>             сохранённые версии для отката
 --rollback <app> [version]  явный откат к сохранённой версии (в аудит)
 --list                      список установленных пакетов
---trust <trusted.pub>       установить trust anchor (release: только с админом)
---anchor                    источник, отпечаток и dev/elevated
+--trust <trusted.pub>       добавить trust anchor (release: только с админом)
+--untrust <fp|pub|all>      убрать активный anchor (последний — с --force)
+--anchor                    anchors, отпечатки, allowlist, dev/elevated
+--allowlist                 статус разрешённого списка
+--allowlist-verify <file>   проверить подпись allowlist перед раскаткой
+--allowlist-check <app> [ver]  решение allowlist для установки/запуска
 --secret-add <name> <v>     сохранить секрет в DPAPI
 --import-auth <name> <json> <provider>
 --mcp-probe <url>
@@ -231,7 +249,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
 Покрыты подпись/хеши/схема, версии и downgrade, path traversal, file tools, разбор
-MCP (JSON/SSE), лимит ответа, endpoint.
+MCP (JSON/SSE), лимит ответа, endpoint, allowlist (версии/revoked/TTL/подписи) и
+ротация нескольких anchor.
 
 ## Карта репозитория
 

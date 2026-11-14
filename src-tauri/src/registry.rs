@@ -1,4 +1,4 @@
-﻿use crate::error::{msg, Error, Result};
+use crate::error::{msg, Error, Result};
 use crate::manifest::{self, Capabilities, Connection, Manifest, ToolDef};
 use ed25519_dalek::VerifyingKey;
 use serde::Serialize;
@@ -14,6 +14,9 @@ pub struct InstalledApp {
     pub publisher: String,
     pub path: String,
     pub trusted: bool,
+    pub signer_fingerprint: Option<String>,
+    pub allowed: bool,
+    pub allowlist_problem: Option<String>,
     pub problems: Vec<String>,
     pub tools: Vec<ToolDef>,
     pub connections: Vec<Connection>,
@@ -61,6 +64,10 @@ pub fn trusted_pub_path(home: &Path) -> PathBuf {
 /// a ProgramData file that a regular user could create in some configurations.
 pub const MACHINE_ANCHOR_LABEL: &str = "HKLM\\SOFTWARE\\EcoAIOps\\TrustedPub";
 
+/// Staged rotation keeps up to four active keys: sign with the new one, wait
+/// until the park is updated, then remove the old fingerprint.
+pub const MAX_ANCHORS: usize = 4;
+
 /// Development mode allows a per-user anchor fallback. A release build is
 /// production-only unless `ECO_PLATFORM_DEV=1` is set explicitly.
 pub fn dev_mode() -> bool {
@@ -91,10 +98,59 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Parses one or more hex keys separated by commas, semicolons, or whitespace.
+/// Never truncates: callers that write a set must reject an over-limit input
+/// instead of silently dropping still-valid anchors.
+fn decode_anchor_keys(raw: &str) -> Vec<[u8; 32]> {
+    raw.split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .filter_map(|token| hex::decode(token).ok())
+        .filter_map(|bytes| bytes.try_into().ok())
+        .collect()
+}
+
 #[cfg(windows)]
-fn machine_anchor_bytes() -> Option<[u8; 32]> {
+fn decode_utf16(buf: &[u8]) -> String {
+    let units: Vec<u16> = buf
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
+/// Registry strings can be UTF-16 (`REG_SZ`/`REG_MULTI_SZ` as written by GPO
+/// or an admin tool) or ANSI bytes written by older builds. Accept both.
+#[cfg(windows)]
+fn registry_key_text(buf: &[u8], kind: u32) -> String {
+    use windows_sys::Win32::System::Registry::REG_MULTI_SZ;
+    if kind == REG_MULTI_SZ {
+        let text = decode_utf16(buf);
+        return text
+            .split('\0')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(",");
+    }
+    let utf16 = decode_utf16(buf);
+    let trimmed = utf16.trim_matches('\0').trim();
+    if !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == ',' || c == ';' || c.is_whitespace())
+    {
+        return trimmed.to_string();
+    }
+    String::from_utf8_lossy(buf)
+        .trim_matches('\0')
+        .trim()
+        .to_string()
+}
+
+#[cfg(windows)]
+fn machine_anchor_keys() -> Vec<[u8; 32]> {
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ,
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_MULTI_SZ,
+        REG_SZ,
     };
 
     let sub = wide("SOFTWARE\\EcoAIOps");
@@ -102,7 +158,7 @@ fn machine_anchor_bytes() -> Option<[u8; 32]> {
     unsafe {
         let mut key: HKEY = std::ptr::null_mut();
         if RegOpenKeyExW(HKEY_LOCAL_MACHINE, sub.as_ptr(), 0, KEY_READ, &mut key) != 0 {
-            return None;
+            return Vec::new();
         }
         let mut kind: u32 = 0;
         let mut len: u32 = 0;
@@ -114,12 +170,12 @@ fn machine_anchor_bytes() -> Option<[u8; 32]> {
             std::ptr::null_mut(),
             &mut len,
         ) != 0
-            || kind != REG_SZ
+            || (kind != REG_SZ && kind != REG_MULTI_SZ)
             || len == 0
-            || len > 256
+            || len > 4096
         {
             RegCloseKey(key);
-            return None;
+            return Vec::new();
         }
         let mut buf = vec![0u8; len as usize];
         if RegQueryValueExW(
@@ -132,31 +188,27 @@ fn machine_anchor_bytes() -> Option<[u8; 32]> {
         ) != 0
         {
             RegCloseKey(key);
-            return None;
+            return Vec::new();
         }
         RegCloseKey(key);
-        let raw = String::from_utf8_lossy(&buf);
-        let bytes = hex::decode(raw.trim().trim_end_matches('\0')).ok()?;
-        bytes.try_into().ok()
+        decode_anchor_keys(&registry_key_text(&buf, kind))
     }
 }
 
 #[cfg(not(windows))]
-fn machine_anchor_bytes() -> Option<[u8; 32]> {
-    None
+fn machine_anchor_keys() -> Vec<[u8; 32]> {
+    Vec::new()
 }
 
 #[cfg(windows)]
-fn write_machine_anchor(hex_key: &str) -> Result<()> {
+fn set_machine_anchor_keys(keys: &[[u8; 32]]) -> Result<()> {
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE,
-        REG_OPTION_NON_VOLATILE, REG_SZ,
+        RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE,
+        KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
     };
 
     let sub = wide("SOFTWARE\\EcoAIOps");
     let name = wide("TrustedPub");
-    let mut data: Vec<u8> = hex_key.as_bytes().to_vec();
-    data.push(0);
     unsafe {
         let mut key: HKEY = std::ptr::null_mut();
         let mut disposition: u32 = 0;
@@ -174,6 +226,22 @@ fn write_machine_anchor(hex_key: &str) -> Result<()> {
         if rc != 0 {
             return msg(format!("cannot open HKLM\\SOFTWARE\\EcoAIOps (error {rc})"));
         }
+        if keys.is_empty() {
+            RegDeleteValueW(key, name.as_ptr());
+            RegCloseKey(key);
+            return Ok(());
+        }
+        let text = keys
+            .iter()
+            .map(hex::encode)
+            .collect::<Vec<_>>()
+            .join(",");
+        // Older platform builds read this REG_SZ value as ANSI hex bytes, so
+        // keep writing that representation for mixed-version fleets and
+        // downgrades. The reader also accepts UTF-16 and REG_MULTI_SZ values
+        // that GPO or an admin tool may write.
+        let mut data: Vec<u8> = text.as_bytes().to_vec();
+        data.push(0);
         let rc = RegSetValueExW(
             key,
             name.as_ptr(),
@@ -191,24 +259,60 @@ fn write_machine_anchor(hex_key: &str) -> Result<()> {
 }
 
 #[cfg(not(windows))]
-fn write_machine_anchor(_hex_key: &str) -> Result<()> {
+fn set_machine_anchor_keys(_keys: &[[u8; 32]]) -> Result<()> {
     msg("machine trust anchor is only supported on Windows")
 }
 
-/// Resolves the anchor and its bytes. Machine scope wins; the per-user anchor
-/// is a dev fallback only.
-fn resolve_anchor(home: &Path) -> Option<(String, AnchorSource, [u8; 32])> {
+fn read_dev_anchor_keys(home: &Path) -> Vec<[u8; 32]> {
+    fs::read_to_string(trusted_pub_path(home))
+        .map(|raw| decode_anchor_keys(&raw))
+        .unwrap_or_default()
+}
+
+fn write_dev_anchor_keys(home: &Path, keys: &[[u8; 32]]) -> Result<()> {
+    let path = trusted_pub_path(home);
+    if keys.is_empty() {
+        let _ = fs::remove_file(path);
+        return Ok(());
+    }
+    fs::create_dir_all(home)?;
+    let text = keys
+        .iter()
+        .map(hex::encode)
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(path, format!("{text}\n"))?;
+    Ok(())
+}
+
+/// Resolves the active anchors. Machine scope wins; the per-user anchor is a
+/// dev fallback only. All keys in the chosen scope are active, which supports
+/// staged signing-key rotation.
+fn resolve_anchor(home: &Path) -> Option<(String, AnchorSource, Vec<VerifyingKey>)> {
     if !cfg!(test) {
-        if let Some(bytes) = machine_anchor_bytes() {
-            return Some((MACHINE_ANCHOR_LABEL.to_string(), AnchorSource::Machine, bytes));
+        let keys = machine_anchor_keys();
+        if !keys.is_empty() {
+            let parsed = keys
+                .iter()
+                .filter_map(|bytes| VerifyingKey::from_bytes(bytes).ok())
+                .collect::<Vec<_>>();
+            if !parsed.is_empty() {
+                return Some((MACHINE_ANCHOR_LABEL.to_string(), AnchorSource::Machine, parsed));
+            }
         }
     }
     if dev_mode() {
-        let path = trusted_pub_path(home);
-        if path.is_file() {
-            let raw = fs::read_to_string(&path).ok()?;
-            let bytes: [u8; 32] = hex::decode(raw.trim()).ok()?.try_into().ok()?;
-            return Some((path.display().to_string(), AnchorSource::Dev, bytes));
+        let bytes = read_dev_anchor_keys(home);
+        let parsed = bytes
+            .iter()
+            .filter_map(|key| VerifyingKey::from_bytes(key).ok())
+            .collect::<Vec<_>>();
+        if !parsed.is_empty() {
+            return Some((
+                trusted_pub_path(home).display().to_string(),
+                AnchorSource::Dev,
+                parsed,
+            ));
         }
     }
     None
@@ -218,9 +322,45 @@ pub fn trusted_anchor(home: &Path) -> Option<(String, AnchorSource)> {
     resolve_anchor(home).map(|(label, source, _)| (label, source))
 }
 
-pub fn load_trusted_key(home: &Path) -> Option<VerifyingKey> {
-    let (_, _, bytes) = resolve_anchor(home)?;
-    VerifyingKey::from_bytes(&bytes).ok()
+pub fn load_trusted_keys(home: &Path) -> Vec<VerifyingKey> {
+    resolve_anchor(home)
+        .map(|(_, _, keys)| keys)
+        .unwrap_or_default()
+}
+
+pub fn anchor_fingerprints(home: &Path) -> Vec<String> {
+    load_trusted_keys(home)
+        .iter()
+        .map(|key| {
+            let digest = manifest::sha256_hex(&key.to_bytes());
+            digest[..16].to_string()
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrustKeyInfo {
+    pub fingerprint: String,
+    pub public_key: String,
+    pub source: String,
+}
+
+pub fn trust_key_info(home: &Path) -> Vec<TrustKeyInfo> {
+    let source = resolve_anchor(home)
+        .map(|(_, source, _)| source.as_str().to_string())
+        .unwrap_or_else(|| "none".to_string());
+    load_trusted_keys(home)
+        .iter()
+        .map(|key| {
+            let public_key = hex::encode(key.to_bytes());
+            let digest = manifest::sha256_hex(&key.to_bytes());
+            TrustKeyInfo {
+                fingerprint: digest[..16].to_string(),
+                public_key,
+                source: source.clone(),
+            }
+        })
+        .collect()
 }
 
 #[cfg(windows)]
@@ -260,7 +400,13 @@ fn installed(
     path: &Path,
     manifest: &Manifest,
     report: &manifest::VerifyReport,
+    allow: &crate::allowlist::AllowlistGuard,
 ) -> InstalledApp {
+    let (allowed, allowlist_problem) =
+        match allow.decision(&manifest.app_id, &manifest.version) {
+            Ok(()) => (true, None),
+            Err(e) => (false, Some(e.to_string())),
+        };
     InstalledApp {
         app_id: manifest.app_id.clone(),
         name: manifest.name.clone(),
@@ -268,6 +414,9 @@ fn installed(
         publisher: manifest.publisher.clone(),
         path: path.display().to_string(),
         trusted: report.ok,
+        signer_fingerprint: report.signer_fingerprint.clone(),
+        allowed,
+        allowlist_problem,
         problems: report.problems.clone(),
         tools: manifest.tools.clone(),
         connections: manifest.connections.clone(),
@@ -277,7 +426,8 @@ fn installed(
 }
 
 pub fn list(home: &Path) -> Vec<InstalledApp> {
-    let trusted = load_trusted_key(home);
+    let trusted = load_trusted_keys(home);
+    let allow = crate::allowlist::guard(home, &trusted);
     let dir = apps_dir(home);
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(&dir) else {
@@ -290,8 +440,8 @@ pub fn list(home: &Path) -> Vec<InstalledApp> {
         }
         match manifest::load(&path) {
             Ok(m) => {
-                let report = manifest::verify_package(&path, trusted.as_ref());
-                out.push(installed(home, &path, &m, &report));
+                let report = manifest::verify_package(&path, &trusted);
+                out.push(installed(home, &path, &m, &report, &allow));
             }
             Err(e) => out.push(InstalledApp {
                 app_id: entry.file_name().to_string_lossy().to_string(),
@@ -300,6 +450,9 @@ pub fn list(home: &Path) -> Vec<InstalledApp> {
                 publisher: String::new(),
                 path: path.display().to_string(),
                 trusted: false,
+                signer_fingerprint: None,
+                allowed: false,
+                allowlist_problem: Some("manifest unreadable".into()),
                 problems: vec![format!("manifest unreadable: {e}")],
                 tools: Vec::new(),
                 connections: Vec::new(),
@@ -466,8 +619,8 @@ pub fn rollback(home: &Path, app_id: &str, version: Option<&str>) -> Result<Inst
     };
     let archived = PathBuf::from(&target.path);
 
-    let trusted = load_trusted_key(home);
-    let report = manifest::verify_package(&archived, trusted.as_ref());
+    let trusted = load_trusted_keys(home);
+    let report = manifest::verify_package(&archived, &trusted);
     if !report.ok {
         return msg(format!(
             "archived package rejected (fail-closed): {}",
@@ -475,6 +628,25 @@ pub fn rollback(home: &Path, app_id: &str, version: Option<&str>) -> Result<Inst
         ));
     }
     let manifest = manifest::load(&archived)?;
+    let allow = crate::allowlist::guard(home, &trusted);
+    if let Err(e) = allow.decision(&manifest.app_id, &manifest.version) {
+        crate::commands::audit(
+            home,
+            app_id,
+            serde_json::json!({
+                "ts": now_secs(),
+                "source": "admin",
+                "action": "rollback",
+                "app_id": app_id,
+                "from": current.version,
+                "to": manifest.version,
+                "ok": false,
+                "reason": "allowlist",
+                "problem": e.to_string()
+            }),
+        );
+        return Err(e);
+    }
 
     let staging = home.join("staging").join(format!("rollback-{}", now_secs()));
     if staging.exists() {
@@ -482,7 +654,7 @@ pub fn rollback(home: &Path, app_id: &str, version: Option<&str>) -> Result<Inst
     }
     fs::create_dir_all(&staging)?;
     copy_package_dir(&archived, &staging)?;
-    let staged_report = manifest::verify_package(&staging, trusted.as_ref());
+    let staged_report = manifest::verify_package(&staging, &trusted);
     if !staged_report.ok {
         let _ = fs::remove_dir_all(&staging);
         return msg(format!(
@@ -497,19 +669,19 @@ pub fn rollback(home: &Path, app_id: &str, version: Option<&str>) -> Result<Inst
 
     audit_rollback(home, app_id, &current.version, &manifest.version);
 
-    let report = manifest::verify_package(&dest, trusted.as_ref());
-    Ok(installed(home, &dest, &manifest, &report))
+    let report = manifest::verify_package(&dest, &trusted);
+    Ok(installed(home, &dest, &manifest, &report, &allow))
 }
 
-/// Loads the manifest only if the package is installed and passes signature
-/// and hash verification. Every entry point that runs app content goes
+/// Loads the manifest only if the package is installed and passes signature,
+/// hash, and allowlist checks. Every entry point that runs app content goes
 /// through this gate.
 pub fn verified_manifest(home: &Path, app_id: &str) -> Result<Manifest> {
     manifest::parse_id(app_id, "app")?;
     let path =
         find(home, app_id).ok_or_else(|| Error::Msg(format!("app {app_id} is not installed")))?;
-    let trusted = load_trusted_key(home);
-    let report = manifest::verify_package(&path, trusted.as_ref());
+    let trusted = load_trusted_keys(home);
+    let report = manifest::verify_package(&path, &trusted);
     if !report.ok {
         crate::commands::audit(
             home,
@@ -529,7 +701,26 @@ pub fn verified_manifest(home: &Path, app_id: &str) -> Result<Manifest> {
             report.problems.join("; ")
         ));
     }
-    manifest::load(&path)
+    let app = manifest::load(&path)?;
+    let allow = crate::allowlist::guard(home, &trusted);
+    if let Err(e) = allow.decision(&app.app_id, &app.version) {
+        crate::commands::audit(
+            home,
+            app_id,
+            serde_json::json!({
+                "ts": now_secs(),
+                "source": "user",
+                "action": "open",
+                "app_id": app_id,
+                "version": app.version,
+                "ok": false,
+                "reason": "allowlist",
+                "problem": e.to_string()
+            }),
+        );
+        return Err(e);
+    }
+    Ok(app)
 }
 
 pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
@@ -564,8 +755,8 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
         return Err(e);
     }
 
-    let trusted = load_trusted_key(home);
-    let report = manifest::verify_package(&staging, trusted.as_ref());
+    let trusted = load_trusted_keys(home);
+    let report = manifest::verify_package(&staging, &trusted);
     if !report.ok {
         crate::commands::audit(
             home,
@@ -586,6 +777,25 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
             "package rejected (fail-closed): {}",
             report.problems.join("; ")
         ));
+    }
+    let allow = crate::allowlist::guard(home, &trusted);
+    if let Err(e) = allow.decision(&manifest.app_id, &manifest.version) {
+        crate::commands::audit(
+            home,
+            &manifest.app_id,
+            serde_json::json!({
+                "ts": now_secs(),
+                "source": "user",
+                "action": "install",
+                "app_id": manifest.app_id,
+                "version": manifest.version,
+                "ok": false,
+                "reason": "allowlist",
+                "problem": e.to_string()
+            }),
+        );
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
     }
 
     let dest = apps_dir(home).join(&manifest.app_id);
@@ -633,7 +843,7 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
             "ok": true
         }),
     );
-    Ok(installed(home, &dest, &manifest, &report))
+    Ok(installed(home, &dest, &manifest, &report, &allow))
 }
 
 pub fn remove(home: &Path, app_id: &str) -> Result<()> {
@@ -689,61 +899,149 @@ pub fn extract_zip_public(src: &Path, dest: &Path) -> Result<()> {
 
 
 
-/// Installs the trust anchor (public signing key) into the platform home.
-/// In production this is done by the installer under an admin account.
+/// Adds one or more public signing keys to the active trust anchor set.
 #[derive(Debug, Clone, Serialize)]
 pub struct TrustAnchorInstalled {
     pub fingerprint: String,
     pub path: String,
     pub source: String,
     pub public_key: String,
+    pub added: usize,
+    pub keys: Vec<TrustKeyInfo>,
 }
 
-/// Installs the trust anchor. Machine-wide when elevated; in a release build
-/// without elevation this fails, so a user cannot pin their own signing key.
+/// Adds keys machine-wide when elevated; in a release build without elevation
+/// this fails, so a user cannot pin their own signing key. Existing keys stay
+/// active, which makes rotation a two-step operation: add the new key, update
+/// the park, then remove the old fingerprint.
 pub fn install_trust_anchor(home: &std::path::Path, src: &std::path::Path) -> Result<TrustAnchorInstalled> {
     let raw = fs::read_to_string(src)?;
-    let bytes = hex::decode(raw.trim())?;
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| Error::Msg("public key must be 32 bytes".to_string()))?;
-    let key = VerifyingKey::from_bytes(&arr)
-        .map_err(|e| Error::Msg(format!("invalid public key: {e}")))?;
+    let incoming = decode_anchor_keys(&raw);
+    if incoming.is_empty() {
+        return msg("public key file contains no valid 32-byte hex key");
+    }
+    if incoming.len() > MAX_ANCHORS {
+        return msg(format!(
+            "public key file contains {} keys; at most {} active anchors are supported",
+            incoming.len(),
+            MAX_ANCHORS
+        ));
+    }
 
-    let (dest, source) = if is_elevated() && !cfg!(test) {
-        (MACHINE_ANCHOR_LABEL.to_string(), AnchorSource::Machine)
-    } else if dev_mode() {
+    let use_machine = is_elevated() && !cfg!(test);
+    if !use_machine && !dev_mode() {
+        return msg("administrator rights are required: the trust anchor must be installed machine-wide");
+    }
+    let (dest, source, mut current) = if use_machine {
+        (
+            MACHINE_ANCHOR_LABEL.to_string(),
+            AnchorSource::Machine,
+            machine_anchor_keys(),
+        )
+    } else {
         (
             trusted_pub_path(home).display().to_string(),
             AnchorSource::Dev,
+            read_dev_anchor_keys(home),
         )
-    } else {
-        return msg("administrator rights are required: the trust anchor must be installed machine-wide");
     };
 
-    let hex_key = hex::encode(arr);
+    let mut added = 0;
+    for key in incoming {
+        if !current.contains(&key) {
+            current.push(key);
+            added += 1;
+        }
+    }
+    if current.len() > MAX_ANCHORS {
+        return msg(format!(
+            "too many active anchors ({}); remove an old key with --untrust first",
+            current.len()
+        ));
+    }
     if source == AnchorSource::Machine {
-        write_machine_anchor(&hex_key)?;
+        set_machine_anchor_keys(&current)?;
     } else {
-        fs::create_dir_all(home)?;
-        fs::write(trusted_pub_path(home), &hex_key)?;
+        write_dev_anchor_keys(home, &current)?;
     }
 
-    let digest = manifest::sha256_hex(&key.to_bytes());
+    let primary = VerifyingKey::from_bytes(&current[0])
+        .map_err(|e| Error::Msg(format!("invalid public key: {e}")))?;
+    let digest = manifest::sha256_hex(&primary.to_bytes());
     Ok(TrustAnchorInstalled {
         fingerprint: digest[..16].to_string(),
         path: dest,
         source: source.as_str().to_string(),
-        public_key: hex_key,
+        public_key: hex::encode(current[0]),
+        added,
+        keys: trust_key_info(home),
     })
 }
 
-/// Short fingerprint of the installed trust anchor, so a human can compare it
-/// with the value published by the security team.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrustAnchorRemoved {
+    pub removed: usize,
+    pub source: String,
+    pub keys: Vec<TrustKeyInfo>,
+}
+
+/// Removes an active anchor by fingerprint prefix, full public key, or `all`.
+/// Removing the last key is refused unless `force` is set, because zero anchors
+/// makes every installed package unlaunchable until an admin re-runs `--trust`.
+pub fn untrust_anchor(home: &Path, target: &str, force: bool) -> Result<TrustAnchorRemoved> {
+    let use_machine = is_elevated() && !cfg!(test);
+    if !use_machine && !dev_mode() {
+        return msg("administrator rights are required to change the machine trust anchor");
+    }
+    let (source, current) = if use_machine {
+        (AnchorSource::Machine, machine_anchor_keys())
+    } else {
+        (AnchorSource::Dev, read_dev_anchor_keys(home))
+    };
+    if current.is_empty() {
+        return msg("no active trust anchor to remove");
+    }
+
+    let wanted = target.trim().to_ascii_lowercase();
+    let remove_all = wanted == "all";
+    let (mut kept, mut removed) = (Vec::new(), 0usize);
+    for key in current {
+        let public_key = hex::encode(key);
+        let digest = manifest::sha256_hex(&key);
+        let fingerprint = &digest[..16];
+        let matches = remove_all
+            || public_key == wanted
+            || (wanted.len() >= 8 && fingerprint.starts_with(&wanted));
+        if matches {
+            removed += 1;
+        } else {
+            kept.push(key);
+        }
+    }
+    if removed == 0 {
+        return msg(format!("no active anchor matches {target}"));
+    }
+    if kept.is_empty() && !force {
+        return msg(
+            "refusing to remove the last active anchor: every installed package would stop opening; pass --force to do it anyway",
+        );
+    }
+    if source == AnchorSource::Machine {
+        set_machine_anchor_keys(&kept)?;
+    } else {
+        write_dev_anchor_keys(home, &kept)?;
+    }
+    Ok(TrustAnchorRemoved {
+        removed,
+        source: source.as_str().to_string(),
+        keys: trust_key_info(home),
+    })
+}
+
+/// Short fingerprint of the primary installed trust anchor, so a human can
+/// compare it with the value published by the security team.
 pub fn anchor_fingerprint(home: &Path) -> Option<String> {
-    let key = load_trusted_key(home)?;
-    let digest = manifest::sha256_hex(&key.to_bytes());
-    Some(digest[..16].to_string())
+    anchor_fingerprints(home).into_iter().next()
 }
 
 #[cfg(test)]
@@ -846,7 +1144,192 @@ mod tests {
         let info = install_trust_anchor(&home, &pub_path).unwrap();
         assert_eq!(info.source, "dev");
         assert!(Path::new(&info.path).is_file());
-        assert!(load_trusted_key(&home).is_some());
+        assert_eq!(load_trusted_keys(&home).len(), 1);
+
+        let second = SigningKey::from_bytes(&[14u8; 32]);
+        fs::write(&pub_path, hex::encode(second.verifying_key().to_bytes())).unwrap();
+        let info = install_trust_anchor(&home, &pub_path).unwrap();
+        assert_eq!(info.added, 1);
+        assert_eq!(load_trusted_keys(&home).len(), 2);
+        let first_fingerprint = anchor_fingerprints(&home)[0].clone();
+
+        let again = install_trust_anchor(&home, &pub_path).unwrap();
+        assert_eq!(again.added, 0);
+        assert_eq!(load_trusted_keys(&home).len(), 2);
+
+        let removed = untrust_anchor(&home, &first_fingerprint, false).unwrap();
+        assert_eq!(removed.removed, 1);
+        let remaining = load_trusted_keys(&home);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].to_bytes(), second.verifying_key().to_bytes());
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn packages_signed_by_any_active_anchor_are_accepted() {
+        let home = std::env::temp_dir().join(format!("eco-registry-rot-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+
+        let old = SigningKey::from_bytes(&[15u8; 32]);
+        let new = SigningKey::from_bytes(&[16u8; 32]);
+        fs::write(
+            trusted_pub_path(&home),
+            format!(
+                "{}\n{}\n",
+                hex::encode(old.verifying_key().to_bytes()),
+                hex::encode(new.verifying_key().to_bytes())
+            ),
+        )
+        .unwrap();
+
+        let pkg = home.join("pkg");
+        write_package(&pkg, "1.0.0", &new);
+        let app = install(&home, &pkg).unwrap();
+        assert!(app.trusted);
+        assert!(app.allowed);
+        assert!(app.signer_fingerprint.is_some());
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn untrust_refuses_to_leave_zero_anchors_without_force() {
+        let home = std::env::temp_dir().join(format!("eco-registry-zero-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+
+        let key = SigningKey::from_bytes(&[30u8; 32]);
+        let pub_path = home.join("pub.txt");
+        fs::write(&pub_path, hex::encode(key.verifying_key().to_bytes())).unwrap();
+        install_trust_anchor(&home, &pub_path).unwrap();
+
+        let err = untrust_anchor(&home, "all", false).unwrap_err().to_string();
+        assert!(err.contains("last active anchor"), "{err}");
+        assert_eq!(load_trusted_keys(&home).len(), 1);
+
+        let removed = untrust_anchor(&home, "all", true).unwrap();
+        assert_eq!(removed.removed, 1);
+        assert!(load_trusted_keys(&home).is_empty());
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn trust_anchor_rejects_more_keys_than_the_limit() {
+        let home = std::env::temp_dir().join(format!("eco-registry-max-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+
+        let mut raw = String::new();
+        for seed in 31u8..=35 {
+            let key = SigningKey::from_bytes(&[seed; 32]);
+            raw.push_str(&hex::encode(key.verifying_key().to_bytes()));
+            raw.push('\n');
+        }
+        let pub_path = home.join("pub.txt");
+        fs::write(&pub_path, raw).unwrap();
+
+        let err = install_trust_anchor(&home, &pub_path).unwrap_err().to_string();
+        assert!(err.contains("at most"), "{err}");
+        assert!(load_trusted_keys(&home).is_empty());
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn allowlist_denied_rollback_is_audited() {
+        let home = std::env::temp_dir().join(format!("eco-registry-rbal-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+
+        let key = SigningKey::from_bytes(&[36u8; 32]);
+        fs::write(
+            trusted_pub_path(&home),
+            hex::encode(key.verifying_key().to_bytes()),
+        )
+        .unwrap();
+
+        let pkg = home.join("pkg");
+        write_package(&pkg, "1.0.0", &key);
+        install(&home, &pkg).unwrap();
+        write_package(&pkg, "1.1.0", &key);
+        install(&home, &pkg).unwrap();
+
+        let doc = home.join("allowlist.json");
+        let body = r#"{"schema_version":1,"apps":[{"app_id":"demo","versions":["1.1.0"]}]}"#;
+        fs::write(&doc, body).unwrap();
+        fs::write(
+            doc.with_extension("sig"),
+            hex::encode(key.sign(body.as_bytes()).to_bytes()),
+        )
+        .unwrap();
+
+        let err = rollback(&home, "demo", Some("1.0.0"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not approved"), "{err}");
+        let audit = fs::read_to_string(home.join("audit").join("demo.jsonl")).unwrap();
+        assert!(
+            audit.contains("\"action\":\"rollback\"") && audit.contains("\"reason\":\"allowlist\""),
+            "{audit}"
+        );
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn allowlist_denies_install_and_open_but_absent_allows() {
+        let home = std::env::temp_dir().join(format!("eco-registry-al-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+
+        let key = SigningKey::from_bytes(&[17u8; 32]);
+        fs::write(
+            trusted_pub_path(&home),
+            hex::encode(key.verifying_key().to_bytes()),
+        )
+        .unwrap();
+
+        let pkg = home.join("pkg");
+        write_package(&pkg, "1.0.0", &key);
+        install(&home, &pkg).unwrap();
+
+        let doc = home.join("allowlist.json");
+        let body = r#"{"schema_version":1,"apps":[{"app_id":"other"}]}"#;
+        fs::write(&doc, body).unwrap();
+        fs::write(
+            doc.with_extension("sig"),
+            hex::encode(key.sign(body.as_bytes()).to_bytes()),
+        )
+        .unwrap();
+
+        let err = verified_manifest(&home, "demo").unwrap_err().to_string();
+        assert!(err.contains("not approved"), "{err}");
+        let err = install(&home, &pkg).unwrap_err().to_string();
+        assert!(err.contains("not approved"), "{err}");
+        let audit = fs::read_to_string(home.join("audit").join("demo.jsonl")).unwrap();
+        assert!(audit.contains("\"reason\":\"allowlist\""), "{audit}");
+
+        let body = r#"{"schema_version":1,"apps":[{"app_id":"demo","versions":["1.0.0"]}]}"#;
+        fs::write(&doc, body).unwrap();
+        fs::write(
+            doc.with_extension("sig"),
+            hex::encode(key.sign(body.as_bytes()).to_bytes()),
+        )
+        .unwrap();
+        assert!(verified_manifest(&home, "demo").is_ok());
+
+        let body = r#"{"schema_version":1,"revoked":["demo"]}"#;
+        fs::write(&doc, body).unwrap();
+        fs::write(
+            doc.with_extension("sig"),
+            hex::encode(key.sign(body.as_bytes()).to_bytes()),
+        )
+        .unwrap();
+        let err = verified_manifest(&home, "demo").unwrap_err().to_string();
+        assert!(err.contains("revoked"), "{err}");
 
         let _ = fs::remove_dir_all(home);
     }

@@ -266,8 +266,23 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 - Подпись пакета — Ed25519, ключ в HSM/офлайн-хранилище; `trusted.pub` —
   публичный anchor.
 - Приватный ключ никогда не попадает в репозиторий, CI-логи, dev-машины.
-- Ротация: в платформе предусмотреть 1–2 активных anchor и `key_id`, чтобы смена
-  ключа не требовала переустановки всего парка.
+- Ротация реализована: до 4 активных anchor, пакет принимается при совпадении
+  подписи с любым из них. Порядок: `--trust new.pub` на парке (или GPO/установщик)
+  → перевыпуск/подпись пакетов новым ключом → `--untrust <old-fingerprint>`.
+  Последний ключ удаляется только с `--force`: иначе все установленные пакеты
+  перестанут открываться. `--anchor` показывает `anchors[]` и отпечатки.
+  Allowlist может нести две подписи (старым и новым ключом), чтобы период ротации
+  не блокировал раскатку.
+
+Подпись allowlist (пример):
+
+```powershell
+tools\signer\target\debug\signer.exe sign allowlist.json `
+  --key C:\keys\prod.key --out allowlist.sig
+eco-platform.exe --allowlist-verify allowlist.json   # на машине ИБ/админа
+# затем положить allowlist.sig и allowlist.json в %ProgramData%\EcoAIOps\
+# порядок важен: подпись первой, иначе статус incomplete (fail-closed)
+```
 - Authenticode (подпись exe/MSI/NSIS) — отдельный сертификат, см. §8.
 
 ### 6.5. Аудит подписи
@@ -284,16 +299,26 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 3. Trust anchor ИБ раскатывается **в Machine-scope** (HKLM
    `SOFTWARE\EcoAIOps\TrustedPub`, GPO/установщик), не в пользовательский профиль.
    Пользовательский anchor действует только в dev-режиме (`debug`-сборка или
-   `ECO_PLATFORM_DEV=1`); release-сборка его игнорирует.
-4. Пользователь ставит пакет из хранилища; платформа проверяет подпись и хеши.
-5. Обновление: новая подписанная версия; платформа архивирует предыдущую,
+   `ECO_PLATFORM_DEV=1`); release-сборка его игнорирует. Допускается до 4 активных
+   ключей (ротация: `--trust` / `--untrust`).
+4. Подписанный allowlist (`%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`)
+   раскатывается тем же каналом, что и anchor. Он содержит `apps` с допустимыми
+   версиями и `revoked`; подпись — Ed25519 от активного anchor, допускается несколько
+   строк подписей. Перед раскаткой ИБ проверяет его
+   `eco-platform.exe --allowlist-verify <file>`, на машине — `--allowlist`.
+   Отсутствие файла означает «allowlist не настроен» (действует только подпись
+   пакета); битый/просроченный документ блокирует установку и запуск (fail-closed).
+   Доставляйте `allowlist.sig` раньше `allowlist.json`: при обратном порядке
+   платформа показывает `incomplete` и временно запрещает запуск.
+5. Пользователь ставит пакет из хранилища; платформа проверяет подпись, хеши и
+   allowlist.
+6. Обновление: новая подписанная версия; платформа архивирует предыдущую,
    `--rollback` — только явным действием администратора (пишется в аудит).
-6. Отзыв доступа к приложению: `--revoke <app-id>` ставит durable-маркер,
+7. Отзыв доступа к приложению: `--revoke <app-id>` ставит durable-маркер,
    останавливает движок и запрещает выпуск новых токенов до
    `--unrevoke <app-id>`; `--revoke <token-id>` отзывает только один токен.
-   Отзыв пакета — убрать `app_id`/версию из allowlist или выпустить исправленную
-   версию. **Целевое:** подписанный отзыв (CRL) с TTL, чтобы отзыв доезжал без
-   обновления пакета.
+   Отзыв пакета — добавить `app_id` в `revoked` allowlist (действует при следующем
+   запуске, без переустановки пакета) или выпустить исправленную версию.
 
 ## 8. Платформа и поставка
 
@@ -329,9 +354,11 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
   `eco-platform --anchor` показывает `source` и `fingerprint`.
 - dev-режим — `debug`-сборка или явный `ECO_PLATFORM_DEV=1`; в UI источник anchor
   виден (`machine`/`dev`), dev-anchor не действует в prod.
-- Опционально allowlist: подписанный ИБ файл в `%ProgramData%\EcoAIOps\`;
-  платформа проверяет его подпись и разрешает только перечисленные `app_id`/
-  версии. Обновление allowlist не требует обновления платформы.
+- Allowlist (реализован): подписанный ИБ файл в `%ProgramData%\EcoAIOps\`;
+  платформа проверяет подпись и TTL и разрешает только перечисленные `app_id`/
+  версии, а `revoked` запрещает запуск. Обновление allowlist не требует обновления
+  платформы или пакета; отсутствие файла оставляет только проверку подписи пакета,
+  а битый/неподписанный/просроченный документ блокирует всё (fail-closed).
 - ACL: `Program Files`, `%ProgramData%\EcoAIOps` — запись только администраторы.
 - Аудит установок/отказов/откатов; отпечаток anchor виден в UI.
 - Идентичность агента: короткоживущий токен на приложение/версию (только hash на
@@ -360,7 +387,10 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
   без Rust/Node/Python на машине автора, с Authenticode-подписью dev-сертификатом;
 - Machine-scope anchor в `HKLM\SOFTWARE\EcoAIOps\TrustedPub`; release-сборка
   игнорирует пользовательский anchor, `--trust` без прав администратора отклоняется,
-  `--anchor` показывает источник и отпечаток;
+  `--anchor` показывает источник и отпечатки; до 4 активных anchor и `--untrust`
+  для ротации;
+- подписанный allowlist/CRL (`allowlist.json` + `allowlist.sig`) с версиями, revoked,
+  TTL, проверкой при установке/запуске/откате и аудитом `reason: allowlist`;
 - `tools/package.ps1` (hashes → sign → verify → install) с параметрами ключей;
 - dev-ключи, отдельные профили, `--verify`, `--list`, `--check`, `--history`,
   `--rollback`, `--chat-async`;
@@ -377,10 +407,9 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 
 Не хватает для целевой модели:
 
-- allowlist и отзыв (CRL) как подписанные файлы;
 - провенанс/CI/SBOM и подпись артефакта из CI;
-- ротация ключей и несколько активных anchor;
-- production-сертификат Authenticode (сейчас dev self-signed).
+- production-сертификат Authenticode (сейчас dev self-signed);
+- автоматическая доставка и мониторинг allowlist (GPO/HTTPS), ревью его изменений.
 
 ## 11. Шпаргалка
 

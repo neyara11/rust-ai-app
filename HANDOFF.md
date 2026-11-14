@@ -38,14 +38,19 @@ cargo run --manifest-path src-tauri/Cargo.toml
 
 ```powershell
 eco-platform.exe --trust dev\keys\trusted.pub   # debug: dev-anchor в профиле
-eco-platform.exe --anchor                       # проверить source/fingerprint
+eco-platform.exe --anchor                       # проверить source/fingerprint/anchors
+eco-platform.exe --allowlist                    # статус подписанного allowlist (если есть)
 ```
+
+Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
+подпись — от активного anchor; пример — `dev/allowlist.example.json`.
 
 ## 3. Карта репозитория
 
 | Путь | Что там |
 |---|---|
 | `src-tauri/src/manifest.rs` | манифест пакета, Ed25519-подпись, sha256, schema |
+| `src-tauri/src/allowlist.rs` | подписанный allowlist/CRL одобренных приложений и версий |
 | `src-tauri/src/registry.rs` | установка/удаление, fail-closed, список, trust anchor |
 | `src-tauri/src/artifacts.rs` | сессии, квоты, TTL, sweep осиротевших |
 | `src-tauri/src/identity.rs` | короткоживущие токены приложений, отзыв, псевдоним пользователя |
@@ -88,6 +93,22 @@ eco-platform.exe --anchor                       # проверить source/fing
   `<home>/versions/<app>/<version>__<ts>` (без `engine`/`sessions`, до 5 версий).
   Откат — явные `--rollback`/кнопка «↩ vX», с проверкой архива и записью в аудит;
   `--check <package>` показывает `new`/`update`/`same`/`downgrade`.
+- Мульти-anchor (ротация): `HKLM\SOFTWARE\EcoAIOps\TrustedPub` и dev-`trusted.pub`
+  хранят до 4 активных ключей (hex через запятую/перевод строки). Подпись пакета
+  принимается любым из них; `--trust` добавляет ключ, `--untrust <fingerprint|pub|all>`
+  убирает (последний ключ — только с `--force`); `--anchor` показывает все отпечатки.
+  В UI виден `+N` при нескольких ключах.
+- Подписанный allowlist/CRL: `%ProgramData%\EcoAIOps\allowlist.json` +
+  `allowlist.sig` (в dev — `<home>\allowlist.json`; `ECO_ALLOWLIST_PATH` — только
+  debug-сборка и никогда не перекрывает machine-документ). Формат:
+  `apps: [{app_id, versions[]}]` (пустой `versions` — любая версия),
+  `revoked: [app_id]`, опциональные `issued_at`/`expires_at`. Подпись Ed25519 от
+  любого активного anchor; допускается несколько строк подписей для ротации.
+  Проверяется при установке, запуске и откате (включая запись отказа в аудит);
+  отсутствие файла не ограничивает (действует только подпись пакета), а
+  битый/просроченный/неподписанный документ блокирует всё (fail-closed).
+  Отдельный статус `incomplete` — доставлен `allowlist.json` без `.sig`.
+  `--allowlist`, `--allowlist-verify <file>`, `--allowlist-check <app> [version]`.
 
 ### Рабочая папка и файлы
 - У каждого приложения своя рабочая папка: `config.json` → `workspaces.<app_id>`.
@@ -205,16 +226,18 @@ eco-platform.exe --anchor                       # проверить source/fing
   `platform_write_file` и `platform_docx_export`; файлы появились в рабочей папке.
 
 ### CLI
-`--verify`, `--install`, `--list`, `--trust`, `--anchor`, `--secret-add`, `--import-auth`,
-`--mcp-probe`, `--mcp-call`, `--mcp-add`, `--mcp-call-app`,
+`--verify`, `--install`, `--list`, `--trust`, `--untrust`, `--anchor`,
+`--allowlist`, `--allowlist-verify`, `--allowlist-check`, `--secret-add`,
+`--import-auth`, `--mcp-probe`, `--mcp-call`, `--mcp-add`, `--mcp-call-app`,
 `--chat <app> <text> [low|medium|high]`, `--chat-async`, `--chat-sessions`,
 `--tokens [app]`, `--issue-token <app> [ttl-hours]`, `--revoke <token-id|app-id>`,
 `--unrevoke <app-id>`.
 
 ### Тесты
-`cargo test --manifest-path src-tauri/Cargo.toml` — 23 теста: подпись/хеши/схема,
+`cargo test --manifest-path src-tauri/Cargo.toml` — 33 теста: подпись/хеши/схема,
 path traversal, sweep артефактов, разбор MCP (JSON/SSE),
-лимит ответа, разбор endpoint, allow-list, file tools и path escape шлюза.
+лимит ответа, разбор endpoint, allow-list, file tools и path escape шлюза,
+allowlist (версии/revoked/TTL/две подписи) и ротация anchor.
 
 ## 5. Что проверено вживую
 
@@ -254,6 +277,13 @@ path traversal, sweep артефактов, разбор MCP (JSON/SSE),
 - Доверие: release-сборка игнорирует `<home>\trusted.pub` (`--anchor` → `ok:false`),
   `--trust` без прав администратора отклоняется, `ECO_PLATFORM_DEV=1` включает
   dev-anchor; установка и отказ по хешам пишутся в `audit/<app>.jsonl`.
+- P10: два активных anchor (dev-key + второй ключ), `--trust` добавил второй
+  (`added:1`), пакет прошёл проверку; allowlist, подписанный **вторым** ключом,
+  дал `status:valid`, `--allowlist-check` — `allowed`; запрет чужого приложения и
+  версии `0.2.0` отклонён, установка отклонена с `reason:allowlist`; revoked
+  заблокировал `--chat-async` до старта движка (`action:open`, `reason:allowlist`);
+  подмена `allowlist.json` без переподписи дала `status:invalid`; `--untrust`
+  по отпечатку оставил один anchor.
 - `eco-pack` (release, Authenticode `Valid`): `init` → `validate` (до build падает на
   непокрытых hashes) → `build` (zip) → `keygen` → `sign` → `verify` → `dev-install`
   в отдельный профиль через debug-платформу; пакет виден в `--list` как trusted,
@@ -287,8 +317,8 @@ path traversal, sweep артефактов, разбор MCP (JSON/SSE),
    в сеть и не требует npm: провайдер `@ai-sdk/openai-compatible` встроен в бинарь.
 
 ### Функциональные пробелы
-3. Нет полной матрицы совместимости платформа × пакет, реестра версий и отката.
-   Проверяются только `min_shell_version` и запрет downgrade.
+3. Нет полной матрицы совместимости платформа × пакет. Реестр версий, архив и
+   `--rollback` сделаны (P3); проверяются `min_shell_version` и запрет downgrade.
 4. Нет артефактов-дампов, grep/query по NDJSON, квот для них; `artifacts.rs` сейчас
    считает пустые сессии.
 5. ~~Нет идентичности агента~~ — сделано (P4): короткоживущие токены, отзыв,
@@ -304,7 +334,8 @@ path traversal, sweep артефактов, разбор MCP (JSON/SSE),
 10. `tools[].argv` не используется: пакетные инструменты запускаются по `tools[].bin`
     с фиксированными аргументами, остальное — задел.
 11. Заголовки старых сессий — имя приложения; новые берутся из первого сообщения.
-12. Нет обновления контента, отката, ротации ключей подписи, защиты от downgrade.
+12. Нет обновления контента и защиты от downgrade. Откат, ротация ключей и
+    подписанный allowlist/CRL сделаны (P3/P10).
 
 ### Решения по объёму (2026-11-13)
 
@@ -582,9 +613,40 @@ path traversal, sweep артефактов, разбор MCP (JSON/SSE),
 - dev-режим: debug-сборка или явный `ECO_PLATFORM_DEV=1`; `--anchor` показывает
   `source` (`machine`/`dev`), отпечаток, `elevated`, `dev_mode`; UI показывает
   источник anchor (dev — жёлтый бейдж).
-- Аудит: `action: install` (`ok:true/false`, `reason: verification|downgrade`) и
-  `action: open` при отказе в проверке пакета.
-- Осталось: подписанный allowlist/CRL, ротация ключей (несколько активных anchor).
+- Аудит: `action: install` (`ok:true/false`, `reason: verification|downgrade|allowlist`)
+  и `action: open` при отказе в проверке пакета или allowlist.
+
+### P10. Подписанный allowlist/CRL и ротация ключей — сделано (2026-11-14)
+
+- `allowlist.rs`: `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`
+  (Machine scope, доставка GPO/Intune/SCCM; путь ProgramData читается из HKLM, а не
+  из пользовательской env); dev-fallback `<home>\allowlist.json`, а
+  `ECO_ALLOWLIST_PATH` работает только в debug-сборке и не перекрывает machine.
+- Формат: `schema_version:1`, `apps:[{app_id, versions[]}]` (пустой список — любая
+  версия), `revoked:[app_id]`, `issued_at`/`expires_at`. Документ подписывается
+  Ed25519-ключом ИБ; `allowlist.sig` может содержать несколько подписей (по строке),
+  чтобы ротация ключей не блокировала тиражирование.
+- Enforcement: одна загрузка/проверка (`AllowlistGuard`) на установку, запуск
+  (`verified_manifest`), откат и `list()`; нет файла — ограничения нет;
+  битый/просроченный/неподписанный/частично доставленный документ — fail-closed.
+  Отказы: `reason: allowlist` в `audit/<app>.jsonl`, включая rollback.
+- CLI: `--allowlist` (статус/source/fingerprint), `--allowlist-verify <file>`,
+  `--allowlist-check <app> [version]`; `--check` показывает `allowlist_ok`.
+  Отзыв (`--revoke`) не зависит от allowlist: использует установленный пакет.
+- Ротация anchor: `TrustedPub`/`trusted.pub` хранят до 4 ключей; `--trust` добавляет
+  (`added`), `--untrust <fingerprint|pub|all> [--force]` убирает (без `--force`
+  последний ключ не удаляется), `--anchor` выдаёт `anchors[]`/`fingerprints[]`.
+  Значение HKLM пишется в legacy-совместимом ANSI-hex (старые сборки читают),
+  читатель принимает ANSI/UTF-16/REG_MULTI_SZ; усечения набора больше нет.
+- Проверено вживую в отдельном профиле: 2 anchor, подпись пакета и allowlist вторым
+  ключом, версия/revoked/подмена документа, отказ установки и запуска, `--untrust`.
+- После ревью добавлены регрессионные тесты: `incomplete` allowlist, запрет
+  удаления последнего anchor, отказ >4 ключей, аудит отказа rollback.
+- Попутно исправлено: `dev-apps/doc-writer/manifest.sig` был рассинхронизирован после
+  P6 (поле `docs` удалили без переподписи); переподписан dev-ключом, `signer verify`
+  для `doc-writer` и `doc-lookup` проходит.
+- Осталось: доставка allowlist по GPO/HTTPS и его аудит на стороне ИБ; подпись
+  allowlist сейчас через `tools/signer sign <file> --key ... --out allowlist.sig`.
 
 ### С чего начать
 
@@ -596,6 +658,9 @@ path traversal, sweep артефактов, разбор MCP (JSON/SSE),
    для поставки — сертификат УЦ, см. §6 и §7).
 5. Доверие: `eco-platform.exe --anchor`; для prod — установить anchor из-под
    администратора (HKLM), для dev — debug-сборка или `ECO_PLATFORM_DEV=1`.
+   Ротация: `--trust <new.pub>` → обновить парк → `--untrust <old-fingerprint>`.
+   Allowlist: подписать `dev/allowlist.example.json` (`tools/signer sign ... --out
+   allowlist.sig`) и положить в `%ProgramData%\EcoAIOps\`; проверить `--allowlist`.
 6. Для разработки мини-приложений внешними авторами: `tools\build-pack.ps1` →
    `vendor/pack/eco-pack.exe` (P8 сделано); проверить на машине без Rust/Node/Python.
 7. P6 сделано; взять P7: мелочи (смена приложения/папки, осиротевшие движки,

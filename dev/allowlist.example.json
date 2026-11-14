@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "issued_at": 1794643200,
+  "expires_at": 1826179200,
+  "apps": [
+    {
+      "app_id": "doc-writer",
+      "versions": ["0.1.0"]
+    },
+    {
+      "app_id": "doc-lookup"
+    }
+  ],
+  "revoked": []
+}

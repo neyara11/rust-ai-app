@@ -1,4 +1,5 @@
 pub mod artifacts;
+pub mod allowlist;
 pub mod commands;
 pub mod config;
 pub mod engine;
@@ -88,8 +89,8 @@ pub fn cli_verify(arg: Option<&String>) -> i32 {
             return 1;
         }
     };
-    let trusted = registry::load_trusted_key(&home);
-    let report = manifest::verify_package(&dir, trusted.as_ref());
+    let trusted = registry::load_trusted_keys(&home);
+    let report = manifest::verify_package(&dir, &trusted);
     let out = serde_json::json!({ "ok": report.ok, "problems": report.problems });
     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     if report.ok {
@@ -201,8 +202,8 @@ pub fn cli_check(arg: Option<&String>) -> i32 {
             return 1;
         }
     };
-    let trusted = registry::load_trusted_key(&home);
-    let report = manifest::verify_package(&dir, trusted.as_ref());
+    let trusted = registry::load_trusted_keys(&home);
+    let report = manifest::verify_package(&dir, &trusted);
     if !report.ok {
         let out = serde_json::json!({ "ok": false, "problems": report.problems });
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
@@ -230,13 +231,21 @@ pub fn cli_check(arg: Option<&String>) -> i32 {
             }
         }
     };
+    let allow = allowlist::enforce(
+        &home,
+        &registry::load_trusted_keys(&home),
+        &package.app_id,
+        &package.version,
+    );
     let out = serde_json::json!({
         "ok": true,
         "app_id": package.app_id,
         "name": package.name,
         "package_version": package.version,
         "installed_version": installed_version,
-        "status": status
+        "status": status,
+        "allowlist_ok": allow.is_ok(),
+        "allowlist_problem": allow.err().map(|e| e.to_string())
     });
     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     0
@@ -462,30 +471,142 @@ pub fn cli_trust(arg: Option<&String>) -> i32 {
     }
 }
 
-/// `--anchor`: shows which trust anchor the platform would use.
+/// `--anchor`: shows which trust anchors the platform would use.
 pub fn cli_anchor() -> i32 {
     let home = registry::home();
-    let out = match registry::trusted_anchor(&home) {
-        Some((path, source)) => serde_json::json!({
-            "ok": true,
-            "path": path,
-            "source": source.as_str(),
-            "fingerprint": registry::anchor_fingerprint(&home),
-            "dev_mode": registry::dev_mode(),
-            "elevated": registry::is_elevated()
-        }),
-        None => serde_json::json!({
+    let keys = registry::trust_key_info(&home);
+    let anchor = registry::trusted_anchor(&home);
+    let fingerprints = registry::anchor_fingerprints(&home);
+    let allow = allowlist::info(&home, &registry::load_trusted_keys(&home));
+    let out = if keys.is_empty() {
+        serde_json::json!({
             "ok": false,
             "source": "none",
+            "anchors": [],
+            "allowlist": allow,
             "dev_mode": registry::dev_mode(),
             "elevated": registry::is_elevated()
-        }),
+        })
+    } else {
+        serde_json::json!({
+            "ok": true,
+            "path": anchor.as_ref().map(|(path, _)| path.clone()),
+            "source": anchor.map(|(_, source)| source.as_str()),
+            "fingerprint": fingerprints.first(),
+            "fingerprints": fingerprints,
+            "anchors": keys,
+            "allowlist": allow,
+            "dev_mode": registry::dev_mode(),
+            "elevated": registry::is_elevated()
+        })
     };
     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     if out["ok"].as_bool().unwrap_or(false) {
         0
     } else {
         1
+    }
+}
+
+/// `--untrust <fingerprint|public-key|all> [--force]`: removes an active anchor.
+pub fn cli_untrust(target: Option<&String>, force: Option<&String>) -> i32 {
+    let Some(target) = target else {
+        eprintln!("usage: eco-platform --untrust <fingerprint|public-key|all> [--force]");
+        return 2;
+    };
+    let home = registry::home();
+    let force = force.map(|value| value == "--force").unwrap_or(false);
+    match registry::untrust_anchor(&home, target, force) {
+        Ok(info) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&info).unwrap_or_default()
+            );
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
+}
+
+/// `--allowlist`: shows the resolved allowlist document and its status.
+pub fn cli_allowlist() -> i32 {
+    let home = registry::home();
+    let keys = registry::load_trusted_keys(&home);
+    let info = allowlist::info(&home, &keys);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&info).unwrap_or_default()
+    );
+    if info.valid() {
+        0
+    } else {
+        1
+    }
+}
+
+/// `--allowlist-verify <allowlist.json>`: checks a signed document before rollout.
+pub fn cli_allowlist_verify(arg: Option<&String>) -> i32 {
+    let Some(path) = arg else {
+        eprintln!("usage: eco-platform --allowlist-verify <allowlist.json>");
+        return 2;
+    };
+    let home = registry::home();
+    let keys = registry::load_trusted_keys(&home);
+    let info = allowlist::inspect_file(&std::path::PathBuf::from(path), "file", &keys);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&info).unwrap_or_default()
+    );
+    if info.status == "valid" {
+        0
+    } else {
+        1
+    }
+}
+
+/// `--allowlist-check <app-id> [version]`: evaluates one install/open decision.
+pub fn cli_allowlist_check(app: Option<&String>, version: Option<&String>) -> i32 {
+    let Some(app_id) = app else {
+        eprintln!("usage: eco-platform --allowlist-check <app-id> [version]");
+        return 2;
+    };
+    let home = registry::home();
+    let keys = registry::load_trusted_keys(&home);
+    let installed = registry::find(&home, app_id)
+        .and_then(|path| manifest::load(&path).ok())
+        .map(|m| m.version);
+    let version = version.cloned().or(installed).unwrap_or_default();
+    match allowlist::enforce(&home, &keys, app_id, &version) {
+        Ok(()) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "app_id": app_id,
+                    "version": version,
+                    "decision": "allowed"
+                }))
+                .unwrap_or_default()
+            );
+            0
+        }
+        Err(e) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": false,
+                    "app_id": app_id,
+                    "version": version,
+                    "decision": "denied",
+                    "problem": e.to_string()
+                }))
+                .unwrap_or_default()
+            );
+            1
+        }
     }
 }
 
@@ -889,7 +1010,9 @@ pub fn cli_revoke(target: Option<&String>) -> i32 {
         return if ok { 0 } else { 1 };
     }
 
-    if registry::verified_manifest(&home, target).is_err() {
+    // Revocation must work even when the allowlist already denies the app, so
+    // use the installed-package lookup instead of the runtime trust gate.
+    if registry::find(&home, target).is_none() {
         println!(
             "{{ \"ok\": false, \"problem\": \"app {target} is not installed; nothing to revoke\" }}"
         );

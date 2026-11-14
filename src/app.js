@@ -116,7 +116,15 @@ const browserMock = (() => {
           schema: 2,
           trusted_anchor: true,
           anchor_fingerprint: "48efcf9d72861a68",
+          anchor_fingerprints: ["48efcf9d72861a68"],
           anchor_source: "dev",
+          anchor_count: 1,
+          allowlist_status: "absent",
+          allowlist_source: "none",
+          allowlist_apps: 0,
+          allowlist_revoked: 0,
+          allowlist_expires_at: null,
+          allowlist_problem: null,
           dev_mode: true,
         };
       case "list_apps":
@@ -362,9 +370,16 @@ function renderApps() {
   for (const app of ctx.apps) {
     const card = document.createElement("div");
     card.className = "card" + (app.trusted ? "" : " untrusted");
-    const problems = app.problems.length
-      ? `<ul class="problems">${app.problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>`
+    const allowOk = app.allowed !== false;
+    const usable = app.trusted && allowOk;
+    const allProblems = [...(app.problems || [])];
+    if (!allowOk && app.allowlist_problem) allProblems.push(app.allowlist_problem);
+    const problems = allProblems.length
+      ? `<ul class="problems">${allProblems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>`
       : "";
+    const allowBadge = allowOk
+      ? ""
+      : '<span class="badge bad">allowlist: запрещено</span>';
 
     const toolsCount = (app.tools || []).length;
     const caps = app.capabilities || {};
@@ -392,6 +407,7 @@ function renderApps() {
           </div>
         </div>
         <span class="badge ${app.trusted ? "ok" : "bad"}">${app.trusted ? "подпись ок" : "не доверенный"}</span>
+        ${allowBadge}
       </div>
 
       <div class="app-specs">
@@ -407,7 +423,7 @@ function renderApps() {
         <div class="row-actions">
           ${rollback}
           <button class="ghost small" data-remove="${esc(app.app_id)}">Удалить</button>
-          <button class="small" data-open="${esc(app.app_id)}" ${app.trusted ? "" : "disabled"}>Открыть среду</button>
+          <button class="small" data-open="${esc(app.app_id)}" ${usable ? "" : "disabled"}>Открыть среду</button>
         </div>
       </div>`;
     box.appendChild(card);
@@ -1392,10 +1408,27 @@ async function init() {
     $("version").textContent = `v${info.version} · schema ${info.schema}`;
     const trust = $("trust");
     const anchorSource = info.anchor_source === "machine" ? "machine" : info.anchor_source === "dev" ? "dev" : null;
+    const anchorCount = info.anchor_count || 0;
     trust.textContent = info.trusted_anchor
-      ? `trust anchor: ${info.anchor_fingerprint || "установлен"}${anchorSource ? ` (${anchorSource})` : ""}`
+      ? `trust anchor: ${info.anchor_fingerprint || "установлен"}${anchorCount > 1 ? ` +${anchorCount - 1}` : ""}${anchorSource ? ` (${anchorSource})` : ""}`
       : "trust anchor: НЕТ";
     trust.className = "badge " + (info.trusted_anchor ? (anchorSource === "dev" ? "warn" : "ok") : "bad");
+    const allow = $("allowlist");
+    const allowStatus = info.allowlist_status || "absent";
+    const allowSource = info.allowlist_source && info.allowlist_source !== "none" ? ` (${info.allowlist_source})` : "";
+    if (allowStatus === "valid") {
+      allow.textContent = `allowlist: ${info.allowlist_apps || 0}${allowSource}`;
+      allow.className = "badge ok";
+    } else if (allowStatus === "expired" || allowStatus === "invalid" || allowStatus === "incomplete") {
+      const label = allowStatus === "expired" ? "истёк" : allowStatus === "incomplete" ? "не доставлен" : "ошибка";
+      allow.textContent = `allowlist: ${label}`;
+      allow.className = "badge bad";
+      allow.title = info.allowlist_problem || "Подписанный allowlist не проходит проверку";
+    } else {
+      allow.textContent = "allowlist: нет";
+      allow.className = "badge";
+      allow.title = "Подписанный allowlist не настроен: действует только проверка подписи пакета";
+    }
     await loadConfig();
     await refreshLlmKeyStatus();
     await refreshApps();

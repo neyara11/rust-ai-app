@@ -13,7 +13,18 @@ fn main() {
         )),
         Some("--check") => std::process::exit(eco_platform_lib::cli_check(args.get(1))),
         Some("--trust") => std::process::exit(eco_platform_lib::cli_trust(args.get(1))),
+        Some("--untrust") => {
+            std::process::exit(eco_platform_lib::cli_untrust(args.get(1), args.get(2)))
+        }
         Some("--anchor") => std::process::exit(eco_platform_lib::cli_anchor()),
+        Some("--allowlist") => std::process::exit(eco_platform_lib::cli_allowlist()),
+        Some("--allowlist-verify") => {
+            std::process::exit(eco_platform_lib::cli_allowlist_verify(args.get(1)))
+        }
+        Some("--allowlist-check") => std::process::exit(eco_platform_lib::cli_allowlist_check(
+            args.get(1),
+            args.get(2),
+        )),
         Some("--secret-add") => std::process::exit(eco_platform_lib::cli_secret_add(args.get(1), args.get(2))),
         Some("--import-auth") => std::process::exit(eco_platform_lib::cli_import_auth(args.get(1), args.get(2), args.get(3))),
         Some("--chat-sessions") => std::process::exit(eco_platform_lib::cli_chat_sessions(args.get(1))),
