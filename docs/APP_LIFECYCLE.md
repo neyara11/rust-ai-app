@@ -54,20 +54,67 @@ dev-apps/<app_id>/
 
 ## 4. Разработка
 
-### 4.1. Рабочее место
+### 4.0. Два разных разработчика
 
-- Windows 10/11, Rust/MSVC, Node.js (поставить opencode в `tools/oc`), WebView2.
-- Python — только если пакет содержит Python-инструмент, собранный PyInstaller.
-- Свой dev-ключ (один раз):
+- **Разработчик платформы** собирает саму платформу, движок и утилиты. Ему нужны
+  Rust/MSVC, Node (opencode в `tools/oc`), Python/PyInstaller для конвертера,
+  доступ к crates.io/npm и большой диск. Это отдельная роль и отдельное рабочее
+  место.
+- **Автор мини-приложения** пишет `manifest.json`, prompt и skills, упаковывает и
+  тестирует пакет. Ему **не нужны** Rust, Node, Python, интернет и большой диск.
 
-```powershell
-cargo build --manifest-path tools\signer\Cargo.toml
-tools\signer\target\debug\signer.exe genkey --out dev\keys\<user>
+Дальше в этом разделе речь только про автора мини-приложения; сборка платформы
+описана в §8.
+
+### 4.1. Рабочее место автора мини-приложения
+
+- Windows 10/11 x64, текстовый редактор.
+- Установленная платформа ECO AIOps (WebView2 ставится её установщиком) — для
+  локального теста.
+- Портативная утилита `eco-pack.exe` (без внешних зависимостей), версия которой
+  совместима с установленной платформой.
+- Опционально git-клиент, если пакеты ведутся в репозитории.
+
+Не требуются: Rust, MSVC, Node/npm, Python, доступ в интернет, десятки гигабайт
+диска. Репозиторий платформы для разработки пакета не нужен.
+
+### 4.2. Утилита `eco-pack` (требование к инструменту)
+
+Один статический exe, работает офлайн, шаблоны и проверки внутри:
+
+```text
+eco-pack init <dir> --app-id <id> [--name <name>]   # каркас пакета
+eco-pack validate <dir>                             # схема, политика, пути, размеры
+eco-pack build <dir> [-o <app.zip>]                 # пересчёт hashes + zip (без ключей)
+eco-pack keygen --out <dir>                         # личный dev-ключ
+eco-pack sign <dir> --key <dev.key>                 # dev-подпись для локального теста
+eco-pack verify <dir> --pub <trusted.pub>           # проверка подписи и хешей
+eco-pack dev-install <dir> --key <dev.key> --profile <path>
+                                                    # build + sign + install в dev-профиль
 ```
 
-`dev\keys` в git не попадает. Ключи не переиспользуются между разработчиками.
+Обязательные свойства:
 
-### 4.2. Правила пакета
+- не компилирует платформу и не собирает exe-инструменты — только валидирует,
+  хеширует, упаковывает, подписывает dev-ключом;
+- не содержит и не запрашивает prod-ключи; prod-подпись делает только ИБ;
+- офлайн: без обращений к crates.io/npm/registry и без установки зависимостей;
+- шаблоны: минимальный пакет, файловый агент, пакет с `tools[]`-заглушкой;
+- `validate` проверяет: `schema_version`, `app_id`, semver, `min_shell_version`,
+  отсутствие абсолютных путей и `..`, наличие всех файлов из `hashes`/`tools[].bin`,
+  разумные лимиты, эвристики на секреты;
+- `build` пишет `hashes` по фактическим файлам (не доверяет старым значениям);
+- `dev-install` использует установленную платформу и отдельный dev-профиль;
+- версия утилиты печатается в `eco-pack --version` и совместима с платформой;
+- распространяется вместе с платформой из доверенного хранилища и подписана
+  Authenticode ИБ.
+
+**Сейчас:** такой утилиты нет. В репозитории есть `tools\package.ps1` +
+`tools\signer` + собранная платформа — это инструменты команды платформы, они
+требуют Rust-окружения и сборки. Для авторов мини-приложений это не подходит;
+`eco-pack` занесён в backlog (HANDOFF §11, P8).
+
+### 4.3. Правила пакета
 
 - Запрашивать минимальные `capabilities`: файлы — только `file_scopes: ["workspace"]`,
   внешние записи — только с обоснованием.
@@ -76,23 +123,32 @@ tools\signer\target\debug\signer.exe genkey --out dev\keys\<user>
 - Секреты не кладутся в пакет: только в DPAPI-хранилище профиля.
 - `version` — semver `x.y.z`; обновление контента той же версии допустимо,
   понижение версии при обычной установке запрещено.
-- Если инструмент — exe: исходники и сборка в репозитории, версия зафиксирована,
-  в заявку на подпись прикладывается SBOM/список зависимостей.
 - Конвертер/бинарь принадлежит пакету (`bin/`), а не платформе.
 
-### 4.3. Локальная установка dev-пакета
+### 4.4. Пакеты с exe-инструментами
+
+Это отдельный трек, не типовой сценарий автора мини-приложения:
+
+- exe собирается в контролируемом окружении/CI с вендоренными зависимостями
+  (wheelhouse для PyInstaller, vendor для Rust/Go), фиксируется коммит;
+- в заявку на подпись прикладывается SBOM/список зависимостей;
+- готовый бинарь передаётся автору пакета либо собирается им в том же окружении;
+- `eco-pack` такой бинарь не компилирует — только упаковывает, хеширует и
+  подписывает dev-ключом для теста.
+
+### 4.5. Локальный цикл (целевой)
 
 ```powershell
-powershell -File tools\package.ps1 `
-  -App <app_id> `
-  -KeyPath dev\keys\<user>\dev.key `
-  -TrustedPath dev\keys\<user>\trusted.pub `
-  -DataHome D:\work\eco-dev-<user>
+eco-pack init D:\apps\my-app --app-id my-app
+# правим prompt/system.md, skills/**, manifest.json
+eco-pack validate D:\apps\my-app
+eco-pack keygen --out D:\keys\me            # один раз
+eco-pack dev-install D:\apps\my-app --key D:\keys\me\dev.key --profile D:\work\eco-dev-me
 ```
 
-Команда собирает конвертер (если есть), пересчитывает `hashes`, подписывает
-dev-ключом, выполняет `--verify` и устанавливает пакет в отдельный профиль.
-Прод-профиль и Machine-anchor не затрагиваются.
+Далее — тесты в GUI и `--chat-async`; после правок повторяем `validate` и
+`dev-install`. Перед передачей ИБ: `eco-pack build` и отправка архива **без**
+prod-подписи.
 
 ## 5. Тестирование
 
@@ -281,6 +337,8 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 
 Не хватает для целевой модели:
 
+- standalone-утилиты `eco-pack` для авторов мини-приложений (сейчас упаковка
+  требует репозитория платформы и Rust-окружения);
 - trust anchor в Machine-scope и запрет пользовательского `--trust` в release;
 - разделение `prepare`/`sign` в инструментах подписи;
 - allowlist и отзыв (CRL) как подписанные файлы;
@@ -292,12 +350,22 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 
 ## 11. Шпаргалка
 
-Разработчик:
+Разработчик мини-приложения (целевой сценарий, после появления `eco-pack`):
 
 ```powershell
-$env:ECO_PLATFORM_HOME="D:\work\eco-dev-<user>"
-powershell -File tools\package.ps1 -KeyPath dev\keys\<user>\dev.key `
-  -TrustedPath dev\keys\<user>\trusted.pub -DataHome $env:ECO_PLATFORM_HOME
+eco-pack init D:\apps\<app_id> --app-id <app_id>
+eco-pack validate D:\apps\<app_id>
+eco-pack dev-install D:\apps\<app_id> --key D:\keys\<user>\dev.key --profile D:\work\eco-dev-<user>
+```
+
+Разработчик платформы (текущий способ в репозитории):
+
+```powershell
+powershell -File tools\package.ps1 `
+  -App <app_id> `
+  -KeyPath dev\keys\<user>\dev.key `
+  -TrustedPath dev\keys\<user>\trusted.pub `
+  -DataHome D:\work\eco-dev-<user>
 ```
 
 ИБ:
