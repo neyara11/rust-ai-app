@@ -120,7 +120,6 @@ enum Route {
         bin: String,
         argv: Vec<String>,
         io: String,
-        parameters: Value,
         secrets: std::collections::BTreeMap<String, String>,
     },
 }
@@ -263,11 +262,6 @@ impl Proxy {
                 eprintln!("eco-platform mcp proxy: json tool {exposed} must not use {{input}}/{{output}} argv");
                 continue;
             }
-            let parameters = tool
-                .parameters
-                .clone()
-                .filter(Value::is_object)
-                .unwrap_or_else(|| json!({ "type": "object", "additionalProperties": true }));
             self.routes.insert(
                 exposed,
                 Route::Package {
@@ -275,7 +269,6 @@ impl Proxy {
                     bin,
                     argv: tool.argv.clone(),
                     io,
-                    parameters,
                     secrets: tool.secrets.clone(),
                 },
             );
@@ -612,7 +605,6 @@ impl Proxy {
                 argv,
                 io,
                 secrets,
-                ..
             } => self.package_call(tool, bin, argv, io, secrets, &arguments),
         };
 
