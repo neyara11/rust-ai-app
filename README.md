@@ -126,6 +126,28 @@ powershell -File tools\package.ps1 -SkipConverter   # только hashes/sign/v
 оставляет только сборку и проверку пакета. Для закрытого контура см.
 `tools/docx-export/README.md`.
 
+## Упаковка мини-приложения (`eco-pack`)
+
+`eco-pack` — офлайн-утилита для авторов мини-приложений: один exe, без Rust/Node/Python
+и без сети.
+
+```powershell
+eco-pack init D:\apps\my-app --app-id my-app --name "My App"
+eco-pack validate D:\apps\my-app
+eco-pack build D:\apps\my-app -o D:\out\my-app.zip   # пересчитывает hashes и пакует zip
+eco-pack keygen --out D:\keys\me
+eco-pack dev-install D:\apps\my-app `
+  --key D:\keys\me\dev.key --pub D:\keys\me\trusted.pub `
+  --profile D:\work\eco-dev-me --platform "C:\Program Files\ECO AIOps\eco-platform.exe"
+```
+
+- `validate` до первого `build` падает: файлы ещё не покрыты `hashes`.
+- `dev-install` подписывает пакет dev-ключом, кладёт anchor в указанный dev-профиль и
+  ставит пакет через установленную платформу (`ECO_PLATFORM_DEV=1`). Machine-anchor
+  prod-машины имеет приоритет, поэтому там dev-install не пройдёт.
+- Сборка самой утилиты (команда платформы): `powershell -File tools\build-pack.ps1`
+  → `vendor/pack/eco-pack.exe` (подписывается dev-сертификатом, если он есть).
+
 ## Сборка дистрибутива
 
 ```powershell
@@ -220,6 +242,8 @@ MCP (JSON/SSE), лимит ответа, endpoint.
 | `dev-apps/` | подписанные пакеты-примеры |
 | `tools/signer/` | genkey / sign / verify пакетов |
 | `tools/package.ps1` | сборка/подпись/установка пакета одной командой |
+| `tools/pack/` | `eco-pack`: офлайн-упаковка мини-приложений для авторов |
+| `tools/build-pack.ps1` | сборка и Authenticode-подпись `eco-pack.exe` |
 | `tools/vendor.ps1` | вендоринг движка в `vendor/engine` |
 | `tools/docx-export/` | исходник конвертера и PyInstaller-сборка |
 | `tools/stub-llm/` | локальная заглушка OpenAI-совместимого API |

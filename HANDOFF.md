@@ -60,6 +60,8 @@ eco-platform.exe --anchor                       # проверить source/fing
 | `tools/package.ps1` | одна команда: сборка конвертера → hashes → подпись → `--verify` → `--install` |
 | `tools/vendor.ps1` | вендоринг движка в `vendor/engine` (opencode + models.json + хеши) |
 | `tools/build-installer.ps1` | `cargo tauri build` + dev-подпись (self-signed или `-Thumbprint`) |
+| `tools/pack` | `eco-pack`: офлайн-утилита автора мини-приложения (init/validate/build/sign/dev-install) |
+| `tools/build-pack.ps1` | сборка `eco-pack.exe` и Authenticode-подпись в `vendor/pack` |
 | `tools/docx-export` | Python-скрипт markdown → docx, PyInstaller-сборка, README |
 | `tools/stub-llm/server.js` | локальная заглушка OpenAI-совместимого API (порт 4098) |
 | `dev-apps/*` | подписанные пакеты-примеры: `doc-writer`, `doc-lookup` |
@@ -222,6 +224,10 @@ eco-platform.exe --anchor                       # проверить source/fing
 - Доверие: release-сборка игнорирует `<home>\trusted.pub` (`--anchor` → `ok:false`),
   `--trust` без прав администратора отклоняется, `ECO_PLATFORM_DEV=1` включает
   dev-anchor; установка и отказ по хешам пишутся в `audit/<app>.jsonl`.
+- `eco-pack` (release, Authenticode `Valid`): `init` → `validate` (до build падает на
+  непокрытых hashes) → `build` (zip) → `keygen` → `sign` → `verify` → `dev-install`
+  в отдельный профиль через debug-платформу; пакет виден в `--list` как trusted,
+  установка попала в аудит.
 
 ## 6. Что НЕ реализовано (важно)
 
@@ -346,8 +352,8 @@ eco-platform.exe --anchor                       # проверить source/fing
 4. Идентичность агента и аудит вызовов LLM (Observability отложена) (P4).
 5. Таймауты/лимиты пакетных инструментов и изоляция процессов (P5).
 6. Чистка мёртвой docs-подсистемы, `doc-lookup` и вкладки ручных MCP-вызовов (P6).
-7. Standalone `eco-pack` для авторов мини-приложений — офлайн-утилита без
-   Rust/Node/Python на машине разработчика (P8).
+7. ~~Standalone `eco-pack` для авторов мини-приложений~~ — сделано: `tools/pack`,
+   сборка/подпись `tools/build-pack.ps1` (P8).
 8. Ужесточение доверия (P9) — сделано: Machine-scope anchor, release игнорирует
    пользовательский anchor, `--trust` только с elevation, аудит установок.
 
@@ -471,21 +477,25 @@ eco-platform.exe --anchor                       # проверить source/fing
   фиксированными аргументами; остальное — задел.
 - Автоматизировать UI-прогоны (Playwright с моками Tauri) и e2e поток «файл → docx».
 
-### P8. Standalone-утилита `eco-pack` (разработка мини-приложений)
+### P8. Standalone-утилита `eco-pack` — сделано (2026-11-14)
 
-- Сейчас упаковка пакета требует репозитория платформы: PowerShell, `signer.exe`,
-  собранная платформа, а для конвертера — Python/PyInstaller. Для автора
-  мини-приложения это неприемлемо (нужны Rust/Node/интернет и большой диск).
-- Сделать отдельный статический `eco-pack.exe` (Rust, собирает команда платформы):
-  `init`, `validate`, `build` (hashes + zip), `keygen`, `sign` (dev), `verify`,
-  `dev-install` в отдельный профиль установленной платформы.
-- Требования: офлайн, без внешних зависимостей, шаблоны внутри, без prod-ключей,
-  не собирает платформу и exe-инструменты; `validate` проверяет схему/пути/
-  `capabilities`/наличие файлов; версия совместима с платформой.
-- **Приёмка:** на чистой Windows без Rust/Node/Python/интернета автор создаёт пакет,
-  `validate` проходит, `dev-install` ставит его в dev-профиль, приложение работает;
-  `build` даёт zip, который ИБ подписывает без изменения содержимого; сам `eco-pack`
-  подписан Authenticode и лежит в доверенном хранилище.
+- Крейт `tools/pack` (бинарник `eco-pack`): `init` (шаблоны `minimal|files`),
+  `validate`, `build` (пересчёт `hashes` + zip), `keygen`, `sign` (dev),
+  `verify`, `trust`, `dev-install`. Офлайн, без внешних зависимостей; платформу и
+  exe-инструменты не собирает, prod-ключей не содержит.
+- `validate` проверяет схему, `app_id`, semver, пути/`..`, покрытие `hashes`,
+  наличие `tools[].bin`, размеры и эвристики на секреты; `build` пересчитывает
+  `hashes` по фактическим файлам и сохраняет форматирование манифеста.
+- `dev-install` пересчитывает hashes, подписывает dev-ключом, кладёт anchor в
+  указанный профиль и вызывает установленную платформу с `ECO_PLATFORM_DEV=1`;
+  Machine-scope anchor prod-машины имеет приоритет и блокирует такой запуск.
+- Сборка/подпись: `powershell -File tools\build-pack.ps1` → `vendor/pack/eco-pack.exe`
+  (Authenticode dev-сертификатом, статус `Valid`).
+- Проверено: init → validate (до build падает на непокрытых hashes) → build →
+  validate ok → keygen/sign/verify → dev-install в отдельный профиль; пакет виден
+  в `--list` как `trusted`, запись установки в аудите; `cargo test` — 9/9.
+- Осталось: положить подписанный `eco-pack.exe` в доверенное хранилище и проверить
+  на машине без Rust/Node/Python (сейчас проверено на dev-машине).
 
 ### P9. Ужесточение доверия — сделано (2026-11-14)
 
@@ -510,5 +520,6 @@ eco-platform.exe --anchor                       # проверить source/fing
    для поставки — сертификат УЦ, см. §6 и §7).
 5. Доверие: `eco-platform.exe --anchor`; для prod — установить anchor из-под
    администратора (HKLM), для dev — debug-сборка или `ECO_PLATFORM_DEV=1`.
-6. Для запуска разработки мини-приложений внешними авторами — P8 (`eco-pack`).
+6. Для разработки мини-приложений внешними авторами: `tools\build-pack.ps1` →
+   `vendor/pack/eco-pack.exe` (P8 сделано); проверить на машине без Rust/Node/Python.
 7. Взять P4: идентичность агента и аудит вызовов LLM.

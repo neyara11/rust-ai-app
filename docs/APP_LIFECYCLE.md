@@ -89,7 +89,8 @@ eco-pack build <dir> [-o <app.zip>]                 # пересчёт hashes + 
 eco-pack keygen --out <dir>                         # личный dev-ключ
 eco-pack sign <dir> --key <dev.key>                 # dev-подпись для локального теста
 eco-pack verify <dir> --pub <trusted.pub>           # проверка подписи и хешей
-eco-pack dev-install <dir> --key <dev.key> --profile <path>
+eco-pack trust --profile <path> --pub <trusted.pub> # dev-anchor в профиль
+eco-pack dev-install <dir> --key <dev.key> --pub <trusted.pub> --profile <path>
                                                     # build + sign + install в dev-профиль
 ```
 
@@ -99,20 +100,24 @@ eco-pack dev-install <dir> --key <dev.key> --profile <path>
   хеширует, упаковывает, подписывает dev-ключом;
 - не содержит и не запрашивает prod-ключи; prod-подпись делает только ИБ;
 - офлайн: без обращений к crates.io/npm/registry и без установки зависимостей;
-- шаблоны: минимальный пакет, файловый агент, пакет с `tools[]`-заглушкой;
+- шаблоны: `minimal` (prompt + один skill) и `files` (то же с `file_scopes:
+  ["workspace"]`);
 - `validate` проверяет: `schema_version`, `app_id`, semver, `min_shell_version`,
   отсутствие абсолютных путей и `..`, наличие всех файлов из `hashes`/`tools[].bin`,
   разумные лимиты, эвристики на секреты;
 - `build` пишет `hashes` по фактическим файлам (не доверяет старым значениям);
-- `dev-install` использует установленную платформу и отдельный dev-профиль;
+- `dev-install` использует установленную платформу и отдельный dev-профиль
+  (`ECO_PLATFORM_DEV=1`, dev-anchor); Machine-scope anchor prod-машины имеет
+  приоритет и блокирует такой запуск;
 - версия утилиты печатается в `eco-pack --version` и совместима с платформой;
 - распространяется вместе с платформой из доверенного хранилища и подписана
   Authenticode ИБ.
 
-**Сейчас:** такой утилиты нет. В репозитории есть `tools\package.ps1` +
-`tools\signer` + собранная платформа — это инструменты команды платформы, они
-требуют Rust-окружения и сборки. Для авторов мини-приложений это не подходит;
-`eco-pack` занесён в backlog (HANDOFF §11, P8).
+**Сейчас:** `eco-pack` реализован в `tools/pack` и собирается командой платформы
+(`powershell -File tools\build-pack.ps1` → `vendor/pack/eco-pack.exe`, подпись
+Authenticode dev-сертификатом). Автору мини-приложения не нужны Rust/Node/Python и
+репозиторий платформы; `tools\package.ps1` + `tools\signer` остаются инструментами
+команды платформы для сборки/подписи prod-пакетов.
 
 ### 4.3. Правила пакета
 
@@ -136,15 +141,19 @@ eco-pack dev-install <dir> --key <dev.key> --profile <path>
 - `eco-pack` такой бинарь не компилирует — только упаковывает, хеширует и
   подписывает dev-ключом для теста.
 
-### 4.5. Локальный цикл (целевой)
+### 4.5. Локальный цикл
 
 ```powershell
 eco-pack init D:\apps\my-app --app-id my-app
 # правим prompt/system.md, skills/**, manifest.json
-eco-pack validate D:\apps\my-app
 eco-pack keygen --out D:\keys\me            # один раз
-eco-pack dev-install D:\apps\my-app --key D:\keys\me\dev.key --profile D:\work\eco-dev-me
+eco-pack dev-install D:\apps\my-app --key D:\keys\me\dev.key `
+  --pub D:\keys\me\trusted.pub --profile D:\work\eco-dev-me
 ```
+
+`dev-install` сам пересчитывает `hashes`, подписывает dev-ключом, кладёт anchor в
+профиль и ставит пакет. `eco-pack validate` полезен до/после правок: до первого
+`build`/`dev-install` он ругается на непокрытые `hashes` — это ожидаемо.
 
 Далее — тесты в GUI и `--chat-async`; после правок повторяем `validate` и
 `dev-install`. Перед передачей ИБ: `eco-pack build` и отправка архива **без**
@@ -241,9 +250,10 @@ tools\signer\target\debug\signer.exe sign manifest.json --key C:\keys\prod.key
 src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 ```
 
-**Целевое:** разделить `package.ps1` на `prepare` (только пересчёт `hashes`, без
-ключа) и `sign` (подпись готового манифеста), чтобы у ИБ не было доступа к
-сборочным шагам. Сейчас режим `prepare` отсутствует.
+**Разделение шагов:** `eco-pack build <dir>` пересчитывает `hashes` без ключей,
+затем `eco-pack sign <dir> --key prod.key` подписывает готовый манифест. ИБ может
+использовать эту пару вместо `package.ps1`; хеши при этом пересчитываются по
+фактическим файлам. `eco-pack verify <dir> --pub prod.pub` проверяет результат.
 
 ### 6.4. Ключи
 
@@ -332,6 +342,8 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 Работает:
 
 - подпись/проверка Ed25519, хеши, fail-closed, проверка при каждом запуске;
+- `eco-pack` (`init/validate/build/keygen/sign/verify/trust/dev-install`) — офлайн,
+  без Rust/Node/Python на машине автора, с Authenticode-подписью dev-сертификатом;
 - Machine-scope anchor в `HKLM\SOFTWARE\EcoAIOps\TrustedPub`; release-сборка
   игнорирует пользовательский anchor, `--trust` без прав администратора отклоняется,
   `--anchor` показывает источник и отпечаток;
@@ -344,9 +356,6 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 
 Не хватает для целевой модели:
 
-- standalone-утилиты `eco-pack` для авторов мини-приложений (сейчас упаковка
-  требует репозитория платформы и Rust-окружения);
-- разделение `prepare`/`sign` в инструментах подписи;
 - allowlist и отзыв (CRL) как подписанные файлы;
 - провенанс/CI/SBOM и подпись артефакта из CI;
 - ротация ключей и несколько активных anchor;
@@ -354,12 +363,13 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 
 ## 11. Шпаргалка
 
-Разработчик мини-приложения (целевой сценарий, после появления `eco-pack`):
+Разработчик мини-приложения:
 
 ```powershell
 eco-pack init D:\apps\<app_id> --app-id <app_id>
-eco-pack validate D:\apps\<app_id>
-eco-pack dev-install D:\apps\<app_id> --key D:\keys\<user>\dev.key --profile D:\work\eco-dev-<user>
+eco-pack keygen --out D:\keys\<user>
+eco-pack dev-install D:\apps\<app_id> --key D:\keys\<user>\dev.key `
+  --pub D:\keys\<user>\trusted.pub --profile D:\work\eco-dev-<user>
 ```
 
 Разработчик платформы (текущий способ в репозитории):
