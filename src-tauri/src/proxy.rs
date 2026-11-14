@@ -6,10 +6,12 @@ use crate::secrets::SecretStore;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Name of the single local MCP server that opencode sees. Every tool the
 /// model can call is exposed by the platform gateway under this name.
@@ -19,6 +21,8 @@ const MAX_READ_BYTES: usize = 64 * 1024;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 200;
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PACKAGE_OUTPUT: usize = 64 * 1024;
+const PACKAGE_TOOL_TIMEOUT_SECS: u64 = 60;
 
 const FILE_TOOLS: &[&str] = &["list_files", "read_file", "write_file", "append_file"];
 
@@ -360,20 +364,54 @@ impl Proxy {
             .arg(&output)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // The package tool is untrusted app code: it must not inherit the
+            // engine env (LLM key, agent token) or run in an unexpected cwd.
+            .env_clear()
+            .current_dir(&self.workspace);
+        for key in ["SystemRoot", "windir", "TEMP", "TMP"] {
+            if let Ok(value) = std::env::var(key) {
+                command.env(key, value);
+            }
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
 
-        let result = command
-            .output()
-            .map_err(|e| Error::Msg(format!("cannot run docx converter: {e}")))?;
-        if !result.status.success() {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            let snippet: String = stderr.chars().take(400).collect();
-            return msg(format!("docx converter failed: {snippet}"));
+        let timeout = package_timeout();
+        let run = run_with_limits(&mut command, timeout, MAX_PACKAGE_OUTPUT)?;
+        if run.timed_out {
+            return msg(format!(
+                "docx converter timed out after {}s; process killed",
+                timeout.as_secs()
+            ));
+        }
+        if run.overflowed {
+            return msg(format!(
+                "docx converter output exceeded {} KiB per stream; process killed",
+                MAX_PACKAGE_OUTPUT / 1024
+            ));
+        }
+        if !run.status.success() {
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            let stdout = String::from_utf8_lossy(&run.stdout);
+            let detail = if stderr.trim().is_empty() {
+                stdout
+            } else {
+                stderr
+            };
+            let snippet: String = detail.trim().chars().take(400).collect();
+            let code = run
+                .status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            if snippet.is_empty() {
+                return msg(format!("docx converter failed (exit {code})"));
+            }
+            return msg(format!("docx converter failed (exit {code}): {snippet}"));
         }
         if !output.is_file() {
             return msg("docx converter finished without creating the output file");
@@ -430,6 +468,7 @@ impl Proxy {
         let (value, bytes, truncated) = match raw {
             Ok(value) => wrap_result(value),
             Err(e) => {
+                let problem = e.to_string();
                 self.audit(
                     &route,
                     name,
@@ -438,6 +477,7 @@ impl Proxy {
                     false,
                     started.elapsed().as_millis() as u64,
                     true,
+                    Some(&problem),
                 );
                 return Err(e);
             }
@@ -450,10 +490,12 @@ impl Proxy {
             truncated,
             started.elapsed().as_millis() as u64,
             false,
+            None,
         );
         Ok((value, bytes, truncated))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn audit(
         &self,
         route: &Route,
@@ -463,6 +505,7 @@ impl Proxy {
         truncated: bool,
         took_ms: u64,
         failed: bool,
+        problem: Option<&str>,
     ) {
         let (server, tool) = match route {
             Route::Files => ("files".to_string(), name.to_string()),
@@ -486,10 +529,121 @@ impl Proxy {
                 "bytes": bytes,
                 "truncated": truncated,
                 "failed": failed,
+                "problem": problem.map(|value| value.chars().take(400).collect::<String>()),
                 "took_ms": took_ms
             }),
         );
     }
+}
+
+struct BoundedRun {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    timed_out: bool,
+    overflowed: bool,
+}
+
+fn package_timeout() -> Duration {
+    std::env::var("ECO_PACKAGE_TOOL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(PACKAGE_TOOL_TIMEOUT_SECS))
+}
+
+/// Reads a pipe while keeping at most `cap` bytes and draining the rest so a
+/// chatty child cannot deadlock on a full pipe.
+fn read_capped<R: Read>(mut reader: R, cap: usize, overflow: Arc<AtomicBool>) -> (Vec<u8>, usize) {
+    let mut stored = Vec::new();
+    let mut total = 0usize;
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                total = total.saturating_add(n);
+                if stored.len() < cap {
+                    let take = (cap - stored.len()).min(n);
+                    stored.extend_from_slice(&buf[..take]);
+                }
+                if total > cap {
+                    overflow.store(true, Ordering::Relaxed);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    (stored, total)
+}
+
+fn kill_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut kill = Command::new("taskkill");
+        kill.args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        kill.creation_flags(0x0800_0000);
+        let _ = kill.status();
+    }
+    let _ = child.kill();
+}
+
+/// Runs a package-provided executable with a hard timeout and bounded output.
+/// The caller interprets `timed_out` / `overflowed` and `status`.
+fn run_with_limits(command: &mut Command, timeout: Duration, cap: usize) -> Result<BoundedRun> {
+    let mut child = command
+        .spawn()
+        .map_err(|e| Error::Msg(format!("cannot start package tool: {e}")))?;
+    let overflow = Arc::new(AtomicBool::new(false));
+
+    let stdout_handle = child.stdout.take().map(|stdout| {
+        let flag = overflow.clone();
+        std::thread::spawn(move || read_capped(stdout, cap, flag))
+    });
+    let stderr_handle = child.stderr.take().map(|stderr| {
+        let flag = overflow.clone();
+        std::thread::spawn(move || read_capped(stderr, cap, flag))
+    });
+
+    let timeout = timeout.max(Duration::from_millis(100));
+    let deadline = Instant::now() + timeout;
+    let (status, timed_out, overflowed) = loop {
+        match child.try_wait()? {
+            Some(status) => break (status, false, false),
+            None => {
+                if overflow.load(Ordering::Relaxed) {
+                    kill_tree(&mut child);
+                    let status = child.wait()?;
+                    break (status, false, true);
+                }
+                if Instant::now() >= deadline {
+                    kill_tree(&mut child);
+                    let status = child.wait()?;
+                    break (status, true, false);
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    };
+
+    let (stdout, _bytes_out) = stdout_handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    let (stderr, _bytes_err) = stderr_handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    Ok(BoundedRun {
+        status,
+        stdout,
+        stderr,
+        timed_out,
+        overflowed,
+    })
 }
 
 fn text_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
@@ -996,5 +1150,24 @@ mod tests {
         let listed = file_call(&root, "list_files", &json!({ "path": "docs" })).unwrap();
         assert_eq!(listed["entries"][0]["name"], "a.md");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_runner_enforces_timeout_and_captures_output() {
+        let mut ok = Command::new("cmd");
+        ok.args(["/C", "echo", "hi"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let run = run_with_limits(&mut ok, Duration::from_secs(5), 1024).unwrap();
+        assert!(run.status.success());
+        assert!(String::from_utf8_lossy(&run.stdout).contains("hi"));
+
+        let mut slow = Command::new("cmd");
+        slow.args(["/C", "ping -n 20 127.0.0.1 >nul"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let run = run_with_limits(&mut slow, Duration::from_millis(200), 1024).unwrap();
+        assert!(run.timed_out);
     }
 }
