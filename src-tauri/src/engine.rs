@@ -233,6 +233,10 @@ struct StreamPart {
 struct StreamState {
     message_id: Option<String>,
     parts: Vec<StreamPart>,
+    /// Items from earlier assistant messages of the same turn. Without this a
+    /// new message (for example after a tool call) would erase the reasoning
+    /// and tool calls the user already saw.
+    done: Vec<ChatItem>,
     changed: bool,
 }
 
@@ -264,6 +268,12 @@ impl StreamState {
     }
 
     fn items(&self) -> Vec<ChatItem> {
+        let mut items = self.done.clone();
+        items.extend(self.current_items());
+        items
+    }
+
+    fn current_items(&self) -> Vec<ChatItem> {
         let mut items = Vec::new();
         let reasoning = self
             .parts
@@ -300,6 +310,14 @@ impl StreamState {
         }
         items
     }
+
+    fn flush(&mut self) {
+        let current = self.current_items();
+        if !current.is_empty() {
+            self.done.extend(current);
+        }
+        self.parts.clear();
+    }
 }
 
 /// Applies one bus event to the live state. Returns true when the turn is
@@ -316,8 +334,8 @@ fn apply_stream_event(state: &mut StreamState, event: &Value) -> bool {
             }
             if let Some(id) = info.get("id").and_then(Value::as_str) {
                 if state.message_id.as_deref() != Some(id) {
+                    state.flush();
                     state.message_id = Some(id.to_string());
-                    state.parts.clear();
                 }
             }
         }
@@ -1900,6 +1918,51 @@ mod tests {
         let items = state.items();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].text, "mine");
+    }
+
+    #[test]
+    fn previous_messages_are_kept_in_live_items() {
+        let mut state = StreamState::default();
+        let mut feed = |value: Value| apply_stream_event(&mut state, &value);
+
+        feed(json!({
+            "type": "message.updated",
+            "properties": { "info": { "id": "m1", "role": "assistant" } }
+        }));
+        feed(json!({
+            "type": "message.part.updated",
+            "properties": { "part": {
+                "id": "r", "messageID": "m1", "type": "reasoning", "text": "first"
+            }}
+        }));
+        feed(json!({
+            "type": "message.part.updated",
+            "properties": { "part": {
+                "id": "x", "messageID": "m1", "type": "tool", "tool": "agg",
+                "state": { "status": "running" }
+            }}
+        }));
+
+        // A tool call starts a new assistant message; the earlier reasoning and
+        // tool call must stay visible while the next answer streams.
+        feed(json!({
+            "type": "message.updated",
+            "properties": { "info": { "id": "m2", "role": "assistant" } }
+        }));
+        feed(json!({
+            "type": "message.part.updated",
+            "properties": { "part": {
+                "id": "t", "messageID": "m2", "type": "text", "text": "answer"
+            }}
+        }));
+
+        let items = state.items();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].kind, "reasoning");
+        assert_eq!(items[0].text, "first");
+        assert_eq!(items[1].text, "agg -> running");
+        assert_eq!(items[2].kind, "text");
+        assert_eq!(items[2].text, "answer");
     }
 
     #[test]

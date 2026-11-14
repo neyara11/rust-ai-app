@@ -69,6 +69,12 @@ try {
   const stats = await page.locator("#chat-log").textContent();
   assert(stats.includes("58.4") || stats.includes("tok/s"), "chat statistics were not rendered");
 
+  const reasoningNode = page.locator("details.msg.reasoning").first();
+  assert((await reasoningNode.count()) === 1, "reasoning block was not rendered");
+  assert(!(await reasoningNode.evaluate((el) => el.open)), "reasoning should start collapsed");
+  await reasoningNode.locator("summary").click();
+  assert(await reasoningNode.evaluate((el) => el.open), "reasoning block did not expand");
+
   const reasoningOptions = await page.locator("#chat-reasoning option").count();
   assert(reasoningOptions === 4, `expected 4 reasoning options, got ${reasoningOptions}`);
   assert(await page.locator("#chat-reasoning-wrap").isVisible(), "reasoning selector is hidden");
