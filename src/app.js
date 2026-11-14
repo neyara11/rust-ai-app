@@ -187,6 +187,22 @@ const browserMock = (() => {
         return null;
       case "artifacts_usage":
         return { sessions: 2, bytes: 18454937, files: 6 };
+      case "artifact_dumps":
+        return [
+          { session: "s1700000100", path: "D:\\mock\\s1700000100\\dumps.ndjson", bytes: 6291456, modified: 1700000100 },
+          { session: "s1700000000", path: "D:\\mock\\s1700000000\\dumps.ndjson", bytes: 14486, modified: 1700000000 },
+        ];
+      case "artifact_grep":
+        return [
+          {
+            session: args.session || "s1700000000",
+            path: "D:\\mock\\dumps.ndjson",
+            line: 1,
+            text: '{"tool":"platform_read_file","result":{"text":"mock hit for ' + String(args.query || "") + '"}}',
+          },
+        ];
+      case "export_artifacts":
+        return { dir: "D:\\exports", files: args.session ? 1 : 2, bytes: args.session ? 14486 : 6305942 };
       case "cleanup_artifacts":
         return { removed: 1, bytes_freed: 6291456 };
       case "chat_open":
@@ -351,6 +367,7 @@ async function guard(fn) {
 async function refreshApps() {
   ctx.apps = await invoke("list_apps");
   renderApps();
+  renderArtifactApps();
 }
 
 function renderApps() {
@@ -1151,6 +1168,130 @@ async function callTool() {
   });
 }
 
+/* ---------- artifacts ---------- */
+
+function fmtBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} ГиБ`;
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} МиБ`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} КиБ`;
+  return `${bytes} Б`;
+}
+
+function renderArtifactApps() {
+  const select = $("artifact-app");
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = "";
+  for (const app of ctx.apps || []) {
+    const option = document.createElement("option");
+    option.value = app.app_id;
+    option.textContent = `${app.name} (${app.app_id})`;
+    select.appendChild(option);
+  }
+  if (current && (ctx.apps || []).some((app) => app.app_id === current)) {
+    select.value = current;
+  }
+  select.disabled = !select.options.length;
+}
+
+let artifactRefreshToken = 0;
+
+async function refreshArtifacts() {
+  const appId = $("artifact-app").value;
+  const sessionSelect = $("artifact-session");
+  const dumpsBox = $("artifact-dumps");
+  $("artifact-results").innerHTML = "";
+  if (!appId) {
+    $("artifact-usage").textContent = "нет установленных приложений";
+    sessionSelect.innerHTML = '<option value="">все сессии</option>';
+    dumpsBox.innerHTML = "";
+    return;
+  }
+  const token = ++artifactRefreshToken;
+  const [usage, dumps] = await Promise.all([
+    invoke("artifacts_usage", { app_id: appId }),
+    invoke("artifact_dumps", { app_id: appId }),
+  ]);
+  if (token !== artifactRefreshToken || $("artifact-app").value !== appId) return;
+  $("artifact-usage").textContent = `${usage.sessions} сессий · ${fmtBytes(usage.bytes)} · ${usage.files} файлов`;
+
+  const selected = sessionSelect.value;
+  sessionSelect.innerHTML = '<option value="">все сессии</option>';
+  for (const dump of dumps) {
+    const option = document.createElement("option");
+    option.value = dump.session;
+    option.textContent = `${dump.session} · ${fmtBytes(dump.bytes)}`;
+    sessionSelect.appendChild(option);
+  }
+  if (selected && dumps.some((dump) => dump.session === selected)) {
+    sessionSelect.value = selected;
+  }
+
+  dumpsBox.innerHTML = dumps.length ? "" : '<span class="muted small">дампов пока нет</span>';
+  for (const dump of dumps) {
+    const row = document.createElement("div");
+    row.className = "artifact-row";
+    const when = dump.modified ? new Date(dump.modified * 1000).toLocaleString() : "";
+    row.innerHTML = `
+      <span class="mono">${esc(dump.session)}</span>
+      <code>${fmtBytes(dump.bytes)}${when ? ` · ${esc(when)}` : ""}</code>`;
+    dumpsBox.appendChild(row);
+  }
+}
+
+async function searchArtifacts() {
+  const appId = $("artifact-app").value;
+  const query = $("artifact-query").value.trim();
+  if (!appId) return toast("Нет установленных приложений", true);
+  if (!query) return toast("Введите строку поиска", true);
+  await guard(async () => {
+    const session = $("artifact-session").value || null;
+    const limit = 50;
+    const hits = await invoke("artifact_grep", {
+      app_id: appId,
+      query,
+      session,
+      limit,
+    });
+    const box = $("artifact-results");
+    box.innerHTML = hits.length ? "" : '<span class="muted small">совпадений нет</span>';
+    for (const hit of hits) {
+      const row = document.createElement("div");
+      row.className = "artifact-row";
+      row.innerHTML = `
+        <span class="mono">${esc(hit.session)}:${hit.line}</span>
+        <code title="${esc(hit.text)}">${esc(hit.text)}</code>`;
+      box.appendChild(row);
+    }
+    if (!hits.length) toast("Совпадений нет");
+    else if (hits.length >= limit) toast(`Показано ${hits.length} совпадений (лимит ${limit}), возможно есть ещё`);
+    else toast(`Найдено совпадений: ${hits.length}`);
+  });
+}
+
+async function exportArtifacts() {
+  const appId = $("artifact-app").value;
+  if (!appId) return toast("Нет установленных приложений", true);
+  await guard(async () => {
+    const session = $("artifact-session").value || null;
+    const report = await invoke("export_artifacts", { app_id: appId, session });
+    if (!report) return;
+    if (!report.files) return toast("Экспортировать нечего: дампов нет", true);
+    toast(`Экспортировано ${report.files} файл(ов), ${fmtBytes(report.bytes)} → ${report.dir}`);
+  });
+}
+
+async function cleanupArtifacts() {
+  const appId = $("artifact-app").value;
+  if (!appId) return toast("Нет установленных приложений", true);
+  await guard(async () => {
+    const report = await invoke("cleanup_artifacts", { app_id: appId });
+    toast(`Удалено сессий: ${report.removed} · ${fmtBytes(report.bytes_freed)}`);
+    await refreshArtifacts();
+  });
+}
+
 /* ---------- settings & secrets ---------- */
 
 async function loadConfig() {
@@ -1267,6 +1408,7 @@ function bind() {
       document
         .querySelectorAll(".tab-body")
         .forEach((b) => b.classList.toggle("active", b.id === `tab-${tab.dataset.tab}`));
+      if (tab.dataset.tab === "settings") guard(refreshArtifacts);
     });
   });
 
@@ -1298,6 +1440,20 @@ function bind() {
   $("ws-folder-pick").addEventListener("click", pickWorkspace);
 
   $("settings-save").addEventListener("click", saveConfig);
+  $("artifact-refresh").addEventListener("click", () => guard(refreshArtifacts));
+  $("artifact-search").addEventListener("click", searchArtifacts);
+  $("artifact-export").addEventListener("click", exportArtifacts);
+  $("artifact-cleanup").addEventListener("click", cleanupArtifacts);
+  $("artifact-app").addEventListener("change", () => guard(refreshArtifacts));
+  $("artifact-session").addEventListener("change", () => {
+    $("artifact-results").innerHTML = "";
+  });
+  $("artifact-query").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      searchArtifacts();
+    }
+  });
   $("probe-btn").addEventListener("click", probe);
   $("secret-save").addEventListener("click", saveSecret);
   $("secret-refresh").addEventListener("click", refreshSecrets);
@@ -1435,6 +1591,7 @@ async function init() {
     await loadConfig();
     await refreshLlmKeyStatus();
     await refreshApps();
+    await refreshArtifacts();
     await refreshSecrets();
     await refreshMcpServers();
   });

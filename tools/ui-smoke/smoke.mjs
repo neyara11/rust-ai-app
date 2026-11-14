@@ -76,8 +76,25 @@ try {
     { timeout: 5000 },
   );
 
+  await page.click('.tab[data-tab="settings"]');
+  await page.waitForSelector("#tab-settings.active");
+  const artifactUsage = await page.locator("#artifact-usage").textContent();
+  assert(artifactUsage.includes("2 сессий"), `unexpected artifact usage: ${artifactUsage}`);
+  const dumpRows = await page.locator("#artifact-dumps .artifact-row").count();
+  assert(dumpRows === 2, `expected 2 mock dumps, got ${dumpRows}`);
+
+  await page.fill("#artifact-query", "mock");
+  await page.click("#artifact-search");
+  await page.waitForFunction(
+    () => document.querySelectorAll("#artifact-results .artifact-row").length > 0,
+  );
+  const hitText = await page.locator("#artifact-results").textContent();
+  assert(hitText.includes("mock hit"), `artifact search did not render hits: ${hitText}`);
+
   assert(pageErrors.length === 0, `page errors: ${pageErrors.join("; ")}`);
-  console.log("ui smoke ok: catalog, allowlist badge, trust gating, chat render, app switch");
+  console.log(
+    "ui smoke ok: catalog, allowlist badge, trust gating, chat render, app switch, artifact search",
+  );
 } finally {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));

@@ -1,7 +1,7 @@
 use crate::error::{msg, Result};
 use serde::Serialize;
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,6 +35,13 @@ pub struct SweepReport {
     pub removed: usize,
     pub bytes_freed: u64,
     pub kept: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExportReport {
+    pub dir: String,
+    pub files: usize,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -231,10 +238,13 @@ pub fn grep(
             }
         }
         let path = dir.join(DUMP_FILE);
-        let Ok(text) = fs::read_to_string(&path) else {
+        let Ok(file) = fs::File::open(&path) else {
             continue;
         };
-        for (index, line) in text.lines().enumerate() {
+        for (index, line) in BufReader::new(file).lines().enumerate() {
+            let Ok(line) = line else {
+                break;
+            };
             if !line.to_lowercase().contains(&query) {
                 continue;
             }
@@ -250,6 +260,35 @@ pub fn grep(
         }
     }
     Ok(out)
+}
+
+/// Copies dump files into `dest` as `<session>-dumps.ndjson`. With `session`
+/// set, only that session's dump is exported. Read-only with respect to the
+/// profile: the source sessions stay in place.
+pub fn export(root: &Path, session: Option<&str>, dest: &Path) -> Result<ExportReport> {
+    if let Some(name) = session {
+        if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+            return msg("invalid artifact session");
+        }
+    }
+    fs::create_dir_all(dest)?;
+    let mut report = ExportReport {
+        dir: dest.display().to_string(),
+        files: 0,
+        bytes: 0,
+    };
+    for dump in list_dumps(root) {
+        if let Some(wanted) = session {
+            if dump.session != wanted {
+                continue;
+            }
+        }
+        let target = dest.join(format!("{}-{}", dump.session, DUMP_FILE));
+        fs::copy(&dump.path, &target)?;
+        report.files += 1;
+        report.bytes += dump.bytes;
+    }
+    Ok(report)
 }
 
 pub fn sweep(root: &Path, policy: &Policy) -> Result<SweepReport> {
@@ -345,5 +384,29 @@ mod tests {
 
         close_session(&session);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_copies_selected_dump_and_rejects_bad_session() {
+        let dir = std::env::temp_dir().join(format!("eco-export-{}", now_secs()));
+        let dest = std::env::temp_dir().join(format!("eco-export-out-{}", now_secs()));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dest);
+        let policy = Policy::default();
+        let session = open_session(&dir, &policy).unwrap();
+        append_dump(&session, &serde_json::json!({ "text": "needle" }), &policy).unwrap();
+        close_session(&session);
+
+        let name = session.file_name().unwrap().to_string_lossy().to_string();
+        let report = export(&dir, Some(&name), &dest).unwrap();
+        assert_eq!(report.files, 1);
+        assert!(dest.join(format!("{name}-{DUMP_FILE}")).exists());
+
+        assert!(export(&dir, None, &dest).unwrap().files >= 1);
+        assert!(export(&dir, Some("../escape"), &dest).is_err());
+        assert!(!dest.join("..-dumps.ndjson").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dest);
     }
 }

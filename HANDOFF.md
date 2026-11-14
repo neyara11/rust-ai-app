@@ -123,7 +123,10 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 - Каждый запуск движка открывает артефакт-сессию; tool-результаты ≥ 8 КиБ (и все
   усечённые) пишутся в `sessions/<id>/dumps.ndjson` с лимитом сессии. Дамп не
   ломает tool-вызов при превышении квоты. Поиск/список: `--artifacts <app>`,
-  `--grep-artifacts <app> <query> [session]` и Tauri-команда `artifact_grep`.
+  `--grep-artifacts <app> <query> [session]`, Tauri-команды `artifact_dumps`,
+  `artifact_grep`, `export_artifacts`; в настройках есть панель «Артефакты сессий»
+  (приложение/сессия, использование, поиск по дампам, экспорт выбранной сессии или
+  всех дампов в выбранную папку, очистка).
 - Типизированная docs-подсистема удалена (P6): нет `docs.rs`, doc-команд, поля `docs`
   в манифесте/реестре и UI документов. `doc-lookup` переведён на файловый сценарий.
 
@@ -246,7 +249,7 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 `--unrevoke <app-id>`.
 
 ### Тесты
-`cargo test --manifest-path src-tauri/Cargo.toml` — 36 тестов: подпись/хеши/схема,
+`cargo test --manifest-path src-tauri/Cargo.toml` — 37 тестов: подпись/хеши/схема,
 path traversal, sweep артефактов, разбор MCP (JSON/SSE),
 лимит ответа, разбор endpoint, allow-list, file tools и path escape шлюза,
 allowlist (версии/revoked/TTL/две подписи) и ротация anchor.
@@ -304,7 +307,7 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   `sessions/s-test-artifacts/dumps.ndjson` (14486 байт); `--artifacts` и
   `--grep-artifacts doc-writer ARTIFACTNEEDLE` нашли запись, токены/тестовые
   файлы после проверки удалены.
-- `cargo test` — 36 тестов, включая detection/derive старых заголовков и схему
+- `cargo test` — 37 тестов, включая detection/derive старых заголовков и схему
   пакетного инструмента с `input`/`output`.
 - `eco-pack` (release, Authenticode `Valid`): `init` → `validate` (до build падает на
   непокрытых hashes) → `build` (zip) → `keygen` → `sign` → `verify` → `dev-install`
@@ -618,7 +621,7 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   browser-mock: каталог, allowlist-бейдж, запрет недоверенного пакета, рендер чата,
   переключение приложения).
 - Проверено: e2e создал `note.md` → `note.docx` (37 КБ, real LLM); `npm test` в
-  `tools/ui-smoke` — `ui smoke ok`; `cargo test` — 36 тестов.
+  `tools/ui-smoke` — `ui smoke ok`; `cargo test` — 37 тестов.
 
 ### P8. Standalone-утилита `eco-pack` — сделано (2026-11-14)
 
@@ -695,11 +698,18 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   `dumps.ndjson`, если он ≥ 8 КиБ или усечён; квота сессии не влияет на ответ
   модели и аудит.
 - CLI: `--artifacts <app>`, `--grep-artifacts <app> <query> [session]`;
-  Tauri-команда `artifact_grep`; UI `artifacts_usage`/`cleanup_artifacts` работают
-  с теми же сессиями.
-- Проверено: `read_file` 14 КБ через прокси → `dumps.ndjson` 14486 байт, grep
-  нашёл уникальную строку; unit-тест покрывает квоту и поиск.
-- Осталось: UI-поиск по артефактам (сейчас CLI/команда) и экспорт дампов.
+  Tauri-команды `artifact_dumps`, `artifact_grep`, `export_artifacts`,
+  `artifacts_usage`/`cleanup_artifacts`. В настройках — панель «Артефакты сессий»:
+  выбор приложения и сессии, использование, поиск по дампам с подсветкой номера
+  строки, экспорт выбранной сессии или всех дампов в выбранную папку
+  (`<session>-dumps.ndjson`), очистка с отчётом.
+- `artifacts::export` копирует дампы в выбранную папку и отклоняет имя сессии с
+  разделителями/`..` (read-only по отношению к профилю); unit-тест покрывает
+  копирование, экспорт всех сессий и отказ на плохом имени.
+- UI-smoke (`tools/ui-smoke`) проверяет панель: 2 mock-дампа, поиск и рендер
+  совпадений.
+- Осталось: подсветка самого совпадения в строке и потоковая выгрузка очень
+  больших дампов (сейчас файл копируется целиком).
 
 ### С чего начать
 

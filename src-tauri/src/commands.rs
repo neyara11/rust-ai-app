@@ -270,20 +270,57 @@ pub fn artifacts_usage(state: tauri::State<'_, AppState>, app_id: String) -> art
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn artifact_grep(
+pub async fn artifact_grep(
     state: tauri::State<'_, AppState>,
     app_id: String,
     query: String,
     session: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<artifacts::GrepHit>> {
+    manifest::parse_id(&app_id, "app")?;
     let root = artifacts::sessions_root(&state.home, &app_id);
-    artifacts::grep(
-        &root,
-        &query,
-        session.as_deref(),
-        limit.unwrap_or(50).clamp(1, 500),
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        artifacts::grep(
+            &root,
+            &query,
+            session.as_deref(),
+            limit.unwrap_or(50).clamp(1, 500),
+        )
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("artifact grep failed: {e}")))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn artifact_dumps(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+) -> Result<Vec<artifacts::DumpFile>> {
+    manifest::parse_id(&app_id, "app")?;
+    let root = artifacts::sessions_root(&state.home, &app_id);
+    Ok(artifacts::list_dumps(&root))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn export_artifacts(
+    app: tauri::AppHandle,
+    app_id: String,
+    session: Option<String>,
+) -> Result<Option<artifacts::ExportReport>> {
+    manifest::parse_id(&app_id, "app")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let Some(dest) = rfd::FileDialog::new()
+            .set_title("Экспорт дампов артефактов")
+            .pick_folder()
+        else {
+            return Ok(None);
+        };
+        let root = artifacts::sessions_root(&state.home, &app_id);
+        artifacts::export(&root, session.as_deref(), &dest).map(Some)
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("artifact export dialog failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]
