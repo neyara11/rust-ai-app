@@ -104,8 +104,15 @@ cd tools\docx-export
 .\build.ps1                 # соберёт и скопирует exe в dev-apps/doc-writer/bin
 ```
 
-Пересборка меняет хеш exe — обновите `hashes` в манифесте и переподпишите пакет.
-Для закрытого контура используется офлайн-сборка через wheelhouse, см.
+Пересборка, обновление `hashes`, подпись и установка — одной командой:
+
+```powershell
+powershell -File tools\package.ps1              # exe -> hashes -> sign -> --verify -> --install
+powershell -File tools\package.ps1 -SkipConverter   # только hashes/sign/verify/install
+```
+
+Ключ `-Wheelhouse <dir>` передаёт офлайн-зависимости в сборку конвертера, `-NoInstall`
+оставляет только сборку и проверку пакета. Для закрытого контура см.
 `tools/docx-export/README.md`.
 
 ## Файловые инструменты

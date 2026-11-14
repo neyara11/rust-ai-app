@@ -56,6 +56,7 @@ eco-platform.exe --trust dev\keys\trusted.pub
 | `src-tauri/src/lib.rs` | сборка приложения, startup sweep, CLI |
 | `src/app.js`, `src/index.html`, `src/styles.css` | интерфейс, без npm и сборки |
 | `tools/signer` | genkey / sign / verify для пакетов |
+| `tools/package.ps1` | одна команда: сборка конвертера → hashes → подпись → `--verify` → `--install` |
 | `tools/docx-export` | Python-скрипт markdown → docx, PyInstaller-сборка, README |
 | `tools/stub-llm/server.js` | локальная заглушка OpenAI-совместимого API (порт 4098) |
 | `dev-apps/*` | подписанные пакеты-примеры: `doc-writer`, `doc-lookup` |
@@ -96,6 +97,7 @@ eco-platform.exe --trust dev\keys\trusted.pub
   инструмент `docx_export`: markdown из рабочей папки → `.docx` там же.
 - Конвертер является частью мини-приложения, а не платформы. Платформа не ищет его
   по глобальным путям и не запускает свои экспорты.
+- Пересборка и подпись пакета — `tools/package.ps1` (см. §7).
 
 ### Секреты
 - DPAPI (per-user) в `<home>\secrets\<name>.bin`, в конфиг не попадают.
@@ -245,11 +247,18 @@ eco-platform.exe --trust dev\keys\trusted.pub
   события сессии, если её каталог отличается от `cwd` движка. В `/global/event`
   событие лежит в `payload`, сверху — `directory`/`project`; синк-события (`sync`)
   игнорируются.
-- Для пересборки `docx-export.exe` нужен Python + PyInstaller; офлайн — wheelhouse
-  (см. `tools/docx-export/README.md`), затем скопировать exe в
-  `dev-apps/doc-writer/bin`, обновить хеш и переподписать манифест.
+- Пакет собирается и подписывается одной командой:
+  `powershell -File tools\package.ps1` (сборка `docx-export.exe` через PyInstaller,
+  пересчёт `hashes` для prompt/skills/bin, подпись `dev/keys/dev.key`, `--verify`,
+  `--install` в `ECO_PLATFORM_HOME` или `.data`). Ключи: `-SkipConverter` — не
+  пересобирать exe; `-Wheelhouse <dir>` — офлайн-зависимости PyInstaller;
+  `-NoInstall` — только собрать и проверить; `-PackageDir` — другой пакет.
+  Офлайн-сборка конвертера: wheelhouse (см. `tools/docx-export/README.md`).
 - PowerShell 5.1: не использовать `Get-Content`/`Set-Content` на UTF-8 файлах без
   явной кодировки — уже приводило к mojibake в `app.js`.
+- `dev-apps/**/manifest.json` и `manifest.sig` помечены `-text` в `.gitattributes`:
+  подпись считается по байтам, и CRLF-конверсия Git делает её невалидной. Не убирать
+  эти правила и не пересохранять манифест с другим переводом строк.
 
 ## 8. Данные в dev-профиле (`.data`, gitignored)
 
@@ -270,12 +279,12 @@ eco-platform.exe --trust dev\keys\trusted.pub
 
 Подробный backlog с критериями приёмки — §11. Краткий порядок:
 
-1. Скрипт сборки/подписи пакета — снимает ручные ошибки с хешами и `manifest.sig`.
-2. Инсталлятор и вендоринг opencode/npm/WebView2 для закрытого контура.
-3. Реестр версий, матрица совместимости и управляемый откат.
-4. Идентичность агента и аудит вызовов LLM (Observability отложена).
-5. Таймауты/лимиты пакетных инструментов и изоляция процессов.
-6. Чистка мёртвой docs-подсистемы, `doc-lookup` и вкладки ручных MCP-вызовов.
+1. ~~Скрипт сборки/подписи пакета~~ — сделано: `tools/package.ps1` (P1).
+2. Инсталлятор и вендоринг opencode/npm/WebView2 для закрытого контура (P2).
+3. Реестр версий, матрица совместимости и управляемый откат (P3).
+4. Идентичность агента и аудит вызовов LLM (Observability отложена) (P4).
+5. Таймауты/лимиты пакетных инструментов и изоляция процессов (P5).
+6. Чистка мёртвой docs-подсистемы, `doc-lookup` и вкладки ручных MCP-вызовов (P6).
 
 ## 10. Известные баги/шероховатости
 
@@ -291,6 +300,10 @@ eco-platform.exe --trust dev\keys\trusted.pub
   «Выбрать» в шапке (нативный диалог), после чего приложение переоткрывается.
 - `docx_export` работает только если в пакете есть `bin/docx-export.exe`; иначе
   инструмента нет в списке или вызов вернёт ошибку. Платформа сама ничего не конвертирует.
+- `--install`/`tools/package.ps1` падают с `os error 32`, если запущено приложение или
+  остался осиротевший движок opencode: он держит `apps/<app>/engine/data/opencode.db`.
+  Скрипт в этом случае подсказывает закрыть приложение; при необходимости остановить
+  процесс `opencode.exe` из `tools\oc` вручную.
 
 ## 11. Backlog для следующего агента
 
@@ -311,17 +324,15 @@ eco-platform.exe --trust dev\keys\trusted.pub
   затем проверить файлы в рабочей папке. Проверка escape: `read_file("../x")` должен
   вернуть `path must stay inside the workspace`.
 
-### P1. Пайплайн пакета (быстрый эффект)
+### P1. Пайплайн пакета — сделано (2026-11-14)
 
-Файлы: `tools/signer`, `tools/docx-export`, `dev-apps/doc-writer`, `manifest.rs`.
-
-- Сейчас после пересборки `docx-export.exe` нужно вручную обновить хеш в манифесте и
-  переподписать `manifest.sig` — это легко забыть.
-- Сделать `tools/package.ps1` (или подкоманду signer): пересчитать `hashes` для
-  `prompt/system.md`, `skills/**`, `bin/docx-export.exe`, записать `manifest.json`,
-  подписать `dev.key`, выполнить `--verify` и `--install`.
-- **Приёмка:** одна команда пересобирает exe, обновляет хеши, подписывает и
-  проверяет пакет; `--verify` возвращает `ok: true`; хеш exe в манифесте совпадает.
+- `tools/package.ps1`: сборка `docx-export.exe` → пересчёт `hashes` (prompt,
+  `skills/**`, `tools[].bin`) → подпись `dev.key` → `--verify` → `--install`.
+- Хеши считаются по фактическим файлам, новые файлы скилов добавляются сами;
+  форматирование и порядок ключей манифеста сохраняются (минимальный diff).
+- Проверено: полный прогон пересобрал exe, обновил хеш и `manifest.sig`, `--verify`
+  вернул `ok: true`, установка прошла; повторный прогон без изменений не меняет
+  манифест; подмена хеша в копии пакета исправляется прогоном.
 
 ### P2. Инсталлятор и вендоринг (блокер закрытого контура)
 
@@ -371,6 +382,8 @@ eco-platform.exe --trust dev\keys\trusted.pub
 ### P7. Мелочи
 
 - Смена приложения или рабочей папки закрывает движок — незавершённый ход теряется.
+- Осиротевший `opencode.exe` после падения приложения держит `opencode.db` и ломает
+  переустановку пакета (`os error 32`); стоит прибирать по `engine/engine.pid` при старте.
 - Старые чаты имеют заголовок по имени приложения.
 - `tools[].argv` не используется: пакетные инструменты запускаются по `bin` с
   фиксированными аргументами; остальное — задел.
@@ -380,4 +393,5 @@ eco-platform.exe --trust dev\keys\trusted.pub
 
 1. Прочитать §1–§8, запустить приложение по §2.
 2. Проверить `--list`, `--verify dev-apps/doc-writer`, `--chat-async doc-writer ...`.
-3. Взять P1: он быстрый и убирает ручные ошибки подписи; затем P2.
+3. Пересобрать пакет через `powershell -File tools\package.ps1` (P1 сделано).
+4. Взять P2: инсталлятор и вендоринг для закрытого контура.

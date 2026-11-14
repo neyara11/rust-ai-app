@@ -1,0 +1,2 @@
+dev-apps/**/manifest.json -text
+dev-apps/**/manifest.sig -text
