@@ -100,6 +100,29 @@ pub fn remove_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub fn app_history(state: tauri::State<'_, AppState>, app_id: String) -> Vec<registry::ArchivedVersion> {
+    registry::history(&state.home, &app_id)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn rollback_app(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    version: Option<String>,
+) -> Result<registry::InstalledApp> {
+    let home = state.home.clone();
+    if let Ok(mut engines) = state.engines.lock() {
+        engines.remove(&app_id);
+    }
+    let mut guard = lock(&state)?;
+    if let Some(session) = guard.remove(&app_id) {
+        artifacts::close_session(&session.dir);
+    }
+    drop(guard);
+    registry::rollback(&home, &app_id, version.as_deref())
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub fn get_config(state: tauri::State<'_, AppState>) -> UserConfig {
     config::load(&state.home)
 }

@@ -25,6 +25,8 @@ pub fn run() {
             commands::list_apps,
             commands::install_app,
             commands::remove_app,
+            commands::app_history,
+            commands::rollback_app,
             commands::get_config,
             commands::save_config,
             commands::probe_endpoint,
@@ -150,6 +152,100 @@ pub fn cli_list() -> i32 {
         "{}",
         serde_json::to_string_pretty(&apps).unwrap_or_default()
     );
+    0
+}
+
+/// `--history <app-id>`: archived package versions, newest first.
+pub fn cli_history(arg: Option<&String>) -> i32 {
+    let Some(app_id) = arg else {
+        eprintln!("usage: eco-platform --history <app-id>");
+        return 2;
+    };
+    let home = registry::home();
+    let entries = registry::history(&home, app_id);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&entries).unwrap_or_default()
+    );
+    0
+}
+
+/// `--rollback <app-id> [version]`: explicit downgrade to an archived version.
+pub fn cli_rollback(app: Option<&String>, version: Option<&String>) -> i32 {
+    let Some(app_id) = app else {
+        eprintln!("usage: eco-platform --rollback <app-id> [version]");
+        return 2;
+    };
+    let home = registry::home();
+    match registry::rollback(&home, app_id, version.map(String::as_str)) {
+        Ok(app) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&app).unwrap_or_default()
+            );
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
+}
+
+/// `--check <package-dir|package.zip>`: compares a package with the installed
+/// version without touching the profile.
+pub fn cli_check(arg: Option<&String>) -> i32 {
+    let Some(path) = arg else {
+        eprintln!("usage: eco-platform --check <package-dir|package.zip>");
+        return 2;
+    };
+    let home = registry::home();
+    let src = std::path::PathBuf::from(path);
+    let (dir, _temp) = match prepare_package(&home, &src) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problems\": [\"{e}\"] }}");
+            return 1;
+        }
+    };
+    let trusted = registry::load_trusted_key(&home);
+    let report = manifest::verify_package(&dir, trusted.as_ref());
+    if !report.ok {
+        let out = serde_json::json!({ "ok": false, "problems": report.problems });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+        return 1;
+    }
+    let package = match manifest::load(&dir) {
+        Ok(m) => m,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            return 1;
+        }
+    };
+    let installed_version = registry::find(&home, &package.app_id)
+        .and_then(|p| manifest::load(&p).ok())
+        .map(|m| m.version);
+    let status = match &installed_version {
+        None => "new",
+        Some(current) => {
+            let current = manifest::parse_version(current);
+            let next = manifest::parse_version(&package.version);
+            match (current, next) {
+                (Some(a), Some(b)) if b > a => "update",
+                (Some(a), Some(b)) if b < a => "downgrade",
+                _ => "same",
+            }
+        }
+    };
+    let out = serde_json::json!({
+        "ok": true,
+        "app_id": package.app_id,
+        "name": package.name,
+        "package_version": package.version,
+        "installed_version": installed_version,
+        "status": status
+    });
+    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     0
 }
 

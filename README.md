@@ -31,7 +31,9 @@ sidecar, интерфейс — Tauri v2 + WebView2.
 - **Секреты.** DPAPI (per-user), в конфиг и логи не попадают.
 - **Чат.** История, переключение и удаление чатов; live-стриминг reasoning/текста через
   SSE; уровни reasoning; статистика ответов.
-- **Версии.** Проверка `min_shell_version` и запрет downgrade при установке.
+- **Версии.** Проверка `min_shell_version`, запрет downgrade, архив предыдущих версий,
+  управляемый откат (`--rollback`/кнопка в UI) и сравнение пакета с установленной
+  версией (`--check`).
 
 ## Архитектура
 
@@ -159,7 +161,10 @@ cargo tauri build                     # NSIS per-machine, WebView2 offlineInstal
 
 ```text
 --verify <package>          проверить подпись и хеши
---install <package>         установить пакет
+--install <package>         установить пакет (downgrade отклоняется)
+--check <package>           сравнить версию пакета с установленной
+--history <app>             сохранённые версии для отката
+--rollback <app> [version]  явный откат к сохранённой версии (в аудит)
 --list                      список установленных пакетов
 --trust <trusted.pub>       установить trust anchor
 --secret-add <name> <v>     сохранить секрет в DPAPI

@@ -6,6 +6,12 @@ fn main() {
         Some("--verify") => std::process::exit(eco_platform_lib::cli_verify(args.get(1))),
         Some("--install") => std::process::exit(eco_platform_lib::cli_install(args.get(1))),
         Some("--list") => std::process::exit(eco_platform_lib::cli_list()),
+        Some("--history") => std::process::exit(eco_platform_lib::cli_history(args.get(1))),
+        Some("--rollback") => std::process::exit(eco_platform_lib::cli_rollback(
+            args.get(1),
+            args.get(2),
+        )),
+        Some("--check") => std::process::exit(eco_platform_lib::cli_check(args.get(1))),
         Some("--trust") => std::process::exit(eco_platform_lib::cli_trust(args.get(1))),
         Some("--secret-add") => std::process::exit(eco_platform_lib::cli_secret_add(args.get(1), args.get(2))),
         Some("--import-auth") => std::process::exit(eco_platform_lib::cli_import_auth(args.get(1), args.get(2), args.get(3))),

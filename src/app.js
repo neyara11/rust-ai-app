@@ -441,6 +441,11 @@ function renderApps() {
       .map((c) => `<span class="conn-tag">${esc(c.id)}</span>`)
       .join("");
 
+    const history = app.history || [];
+    const rollback = history.length
+      ? `<button class="ghost small" data-rollback="${esc(app.app_id)}" data-version="${esc(history[0].version)}" title="Откатить к сохранённой версии">↩ v${esc(history[0].version)}</button>`
+      : "";
+
     card.innerHTML = `
       <div class="app-card-top">
         <div class="app-identity">
@@ -467,6 +472,7 @@ function renderApps() {
       <div class="app-card-foot">
         <div class="conn-tags">${conns || '<span class="muted small">автономный</span>'}</div>
         <div class="row-actions">
+          ${rollback}
           <button class="ghost small" data-remove="${esc(app.app_id)}">Удалить</button>
           <button class="small" data-open="${esc(app.app_id)}" ${app.trusted ? "" : "disabled"}>Открыть среду</button>
         </div>
@@ -580,6 +586,16 @@ async function removeApp(appId) {
     if (ctx.appId === appId) await closeApp();
     await invoke("remove_app", { app_id: appId });
     toast("Удалено");
+    await refreshApps();
+  });
+}
+
+async function rollbackApp(appId, version) {
+  if (!confirm(`Откатить ${appId} к версии ${version}?`)) return;
+  await guard(async () => {
+    if (ctx.appId === appId) await closeApp();
+    const app = await invoke("rollback_app", { app_id: appId, version });
+    toast(`Откат: ${app.name} ${app.version}`);
     await refreshApps();
   });
 }
@@ -1314,6 +1330,8 @@ function bind() {
     if (open) return openApp(open.dataset.open);
     const remove = e.target.closest("[data-remove]");
     if (remove) return removeApp(remove.dataset.remove);
+    const rollback = e.target.closest("[data-rollback]");
+    if (rollback) return rollbackApp(rollback.dataset.rollback, rollback.dataset.version);
   });
 
   const wsBack = $("ws-back");
