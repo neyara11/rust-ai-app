@@ -560,6 +560,7 @@ pub fn chat_send(
     app_id: String,
     text: String,
     variant: Option<String>,
+    attachments: Option<Vec<crate::engine::AttachmentInput>>,
 ) -> Result<()> {
     let session = {
         let engines = engines_lock(&state)?;
@@ -568,6 +569,25 @@ pub fn chat_send(
             .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?
             .snapshot()
     };
+
+    let attachments = attachments.unwrap_or_default();
+    let caps = config::load(&state.home).llm_capabilities;
+    if text.trim().is_empty() && attachments.is_empty() {
+        return msg("message is empty");
+    }
+    crate::engine::validate_attachments(&attachments, caps.vision)?;
+
+    if let Some(variant) = variant.as_deref() {
+        if !caps.allows_variant(variant) {
+            return msg(if caps.reasoning {
+                format!("reasoning variant '{variant}' is not enabled for this model")
+            } else {
+                "model is configured without reasoning support".to_string()
+            });
+        }
+    }
+
+
 
     let busy_key = format!("{}:{}", app_id, session.session_id);
     {
@@ -624,8 +644,16 @@ pub fn chat_send(
     }
 
     std::thread::spawn(move || {
-        session.title_from_first_message(&text);
-        let result = session.prompt(&text, variant.as_deref());
+        let title_source = if text.trim().is_empty() {
+            attachments
+                .first()
+                .map(|attachment| attachment.filename.clone())
+                .unwrap_or_default()
+        } else {
+            text.clone()
+        };
+        session.title_from_first_message(&title_source);
+        let result = session.prompt_with_attachments(&text, variant.as_deref(), &attachments);
         stop_stream.store(true, Ordering::Relaxed);
         match result {
             Ok(()) => {

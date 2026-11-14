@@ -102,6 +102,13 @@ const browserMock = (() => {
   let config = {
     llm_endpoint: "https://routerai.ru/api/v1",
     llm_model: "~deepseek/deepseek-v4-flash-latest",
+    llm_capabilities: {
+      vision: false,
+      reasoning: true,
+      reasoning_efforts: ["low", "medium", "high"],
+      context_tokens: 128000,
+      output_tokens: 32000,
+    },
     session_quota_mb: 500,
     global_quota_mb: 5120,
     ttl_hours: 168,
@@ -275,6 +282,7 @@ const ctx = {
   appId: null,
   appMeta: null,
   config: null,
+  attachments: [],
 };
 
 const THEME_KEY = "theme";
@@ -471,7 +479,9 @@ async function openApp(appId) {
     const toolsTab = document.querySelector('.ws-tab[data-ws="tools"]');
     if (toolsTab) toolsTab.hidden = !hasMcp;
     try {
-      $("chat-reasoning").value = localStorage.getItem(`reasoning:${appId}`) || "";
+      const saved = localStorage.getItem(`reasoning:${appId}`) || "";
+      const efforts = [...$("chat-reasoning").options].map((option) => option.value);
+      $("chat-reasoning").value = efforts.includes(saved) ? saved : "";
     } catch (_) {
       $("chat-reasoning").value = "";
     }
@@ -479,6 +489,7 @@ async function openApp(appId) {
     ctx.chatItems = [];
     ctx.chats = [];
     ctx.chatId = null;
+    clearAttachments();
     setBusy(false);
 
     $("workspace").hidden = false;
@@ -692,6 +703,17 @@ function buildChatNode(item) {
     const div = document.createElement("div");
     div.className = "msg tool";
     div.textContent = `⚙ tool: ${item.text}`;
+    return div;
+  }
+
+  if (item.kind === "file") {
+    const div = document.createElement("div");
+    div.className = "msg " + (item.role === "user" ? "user" : "assistant");
+    const chip = document.createElement("div");
+    chip.className = "chat-attachment-chip";
+    const kind = item.mime && item.mime.startsWith("image/") ? "изображение" : "файл";
+    chip.textContent = `${kind}: ${item.text}`;
+    div.appendChild(chip);
     return div;
   }
 
@@ -979,20 +1001,154 @@ async function deleteChat(sessionId) {
   });
 }
 
+const MAX_ATTACHMENTS = 3;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+const MAX_TEXT_BYTES = 64 * 1024;
+const ATTACHMENT_TEXT_MIMES = new Set([
+  "application/json",
+  "application/xml",
+  "application/x-yaml",
+  "application/yaml",
+  "application/toml",
+  "application/javascript",
+]);
+const ATTACHMENT_EXT_MIME = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+  txt: "text/plain",
+  md: "text/markdown",
+  json: "application/json",
+  csv: "text/csv",
+  log: "text/plain",
+  yaml: "application/x-yaml",
+  yml: "application/x-yaml",
+  xml: "application/xml",
+  html: "text/html",
+  css: "text/css",
+  js: "application/javascript",
+  ts: "text/plain",
+  rs: "text/plain",
+  py: "text/plain",
+  toml: "application/toml",
+  ini: "text/plain",
+};
+
+function attachmentMime(file) {
+  const declared = String(file.type || "").toLowerCase();
+  if (declared) return declared === "image/jpg" ? "image/jpeg" : declared;
+  const ext = String(file.name || "").split(".").pop().toLowerCase();
+  return ATTACHMENT_EXT_MIME[ext] || "";
+}
+
+function readFileBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("не удалось прочитать файл"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderAttachments() {
+  const box = $("chat-attachments");
+  if (!box) return;
+  box.innerHTML = "";
+  box.hidden = !ctx.attachments.length;
+  ctx.attachments.forEach((attachment, index) => {
+    const chip = document.createElement("div");
+    chip.className = "chat-attachment-chip";
+    const name = document.createElement("span");
+    name.textContent = attachment.filename;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.dataset.removeAttachment = String(index);
+    remove.title = "Убрать вложение";
+    remove.textContent = "×";
+    chip.appendChild(name);
+    chip.appendChild(remove);
+    box.appendChild(chip);
+  });
+}
+
+async function addAttachments(fileList) {
+  const files = [...(fileList || [])];
+  if (!files.length) return;
+  const caps = (ctx.config && ctx.config.llm_capabilities) || {};
+  for (const file of files) {
+    if (ctx.attachments.length >= MAX_ATTACHMENTS) {
+      toast(`Не больше ${MAX_ATTACHMENTS} вложений в сообщении`, true);
+      break;
+    }
+    const mime = attachmentMime(file);
+    const isImage = mime.startsWith("image/");
+    const isText = mime.startsWith("text/") || ATTACHMENT_TEXT_MIMES.has(mime);
+    if (!isImage && !isText) {
+      toast(`Тип файла не поддерживается: ${file.name}`, true);
+      continue;
+    }
+    if (isImage && caps.vision !== true) {
+      toast("Модель не настроена на изображения: включите vision в настройках", true);
+      continue;
+    }
+    if (isImage && file.size > MAX_IMAGE_BYTES) {
+      toast(`Изображение больше ${Math.round(MAX_IMAGE_BYTES / (1024 * 1024))} МиБ`, true);
+      continue;
+    }
+    if (isText && file.size > MAX_TEXT_BYTES) {
+      toast(`Текстовый файл больше ${Math.round(MAX_TEXT_BYTES / 1024)} КиБ`, true);
+      continue;
+    }
+    try {
+      const data = await readFileBase64(file);
+      ctx.attachments.push({ mime, filename: file.name || "attachment", data });
+    } catch (e) {
+      toast(String(e), true);
+    }
+  }
+  renderAttachments();
+}
+
+function clearAttachments() {
+  ctx.attachments = [];
+  renderAttachments();
+}
+
 async function sendChat() {
   const text = $("chat-text").value.trim();
-  if (!text || ctx.busy) return;
+  const attachments = ctx.attachments.map((attachment) => ({
+    mime: attachment.mime,
+    filename: attachment.filename,
+    data: attachment.data,
+  }));
+  if ((!text && !attachments.length) || ctx.busy) return;
   $("chat-text").value = "";
+  clearAttachments();
   setBusy(true);
   const variant = $("chat-reasoning").value || null;
-  const optimistic = [...(ctx.chatItems || []), { role: "user", kind: "text", text }];
+  const optimistic = [...(ctx.chatItems || [])];
+  if (text) optimistic.push({ role: "user", kind: "text", text });
+  for (const attachment of attachments) {
+    optimistic.push({
+      role: "user",
+      kind: "file",
+      text: attachment.filename,
+      mime: attachment.mime,
+    });
+  }
   ctx.chatItems = optimistic;
   ctx.streamingItems = [];
   ctx.acceptStream = true;
   renderChat(optimistic);
   try {
     await ensureChat();
-    await invoke("chat_send", { app_id: ctx.appId, text, variant });
+    await invoke("chat_send", { app_id: ctx.appId, text, variant, attachments });
     if (!(window.__TAURI__ && window.__TAURI__.event)) {
       ctx.acceptStream = false;
       await refreshChats();
@@ -1294,21 +1450,74 @@ async function cleanupArtifacts() {
 
 /* ---------- settings & secrets ---------- */
 
+const EFFORT_LABELS = {
+  low: "Низкий (low)",
+  medium: "Средний (medium)",
+  high: "Глубокий (high)",
+  max: "Максимальный (max)",
+};
+
+function renderReasoningOptions() {
+  const select = $("chat-reasoning");
+  const wrap = $("chat-reasoning-wrap");
+  if (!select) return;
+  const caps = (ctx.config && ctx.config.llm_capabilities) || {};
+  const efforts =
+    Array.isArray(caps.reasoning_efforts) && caps.reasoning_efforts.length
+      ? caps.reasoning_efforts
+      : ["low", "medium", "high"];
+  const enabled = caps.reasoning !== false;
+  if (wrap) wrap.hidden = !enabled;
+  select.disabled = !enabled;
+  select.innerHTML = '<option value="">Авто</option>';
+  if (enabled) {
+    for (const effort of efforts) {
+      const option = document.createElement("option");
+      option.value = effort;
+      option.textContent = EFFORT_LABELS[effort] || effort;
+      select.appendChild(option);
+    }
+  }
+  select.value = "";
+}
+
 async function loadConfig() {
   ctx.config = await invoke("get_config");
   $("llm-endpoint").value = ctx.config.llm_endpoint || "";
   $("llm-model").value = ctx.config.llm_model || "";
+  const caps = ctx.config.llm_capabilities || {};
+  $("llm-vision").checked = !!caps.vision;
+  $("llm-reasoning").checked = caps.reasoning !== false;
+  $("llm-efforts").value = (
+    Array.isArray(caps.reasoning_efforts) && caps.reasoning_efforts.length
+      ? caps.reasoning_efforts
+      : ["low", "medium", "high"]
+  ).join(",");
+  $("llm-context").value = caps.context_tokens || "";
+  $("llm-output").value = caps.output_tokens || "";
   $("q-session").value = ctx.config.session_quota_mb;
   $("q-global").value = ctx.config.global_quota_mb;
   $("q-ttl").value = ctx.config.ttl_hours;
+  renderReasoningOptions();
 }
 
 async function saveConfig() {
   await guard(async () => {
+    const efforts = $("llm-efforts")
+      .value.split(",")
+      .map((effort) => effort.trim().toLowerCase())
+      .filter(Boolean);
     ctx.config = {
       ...(ctx.config || {}),
       llm_endpoint: $("llm-endpoint").value.trim() || null,
       llm_model: $("llm-model").value.trim() || null,
+      llm_capabilities: {
+        vision: $("llm-vision").checked,
+        reasoning: $("llm-reasoning").checked,
+        reasoning_efforts: efforts.length ? [...new Set(efforts)] : ["low", "medium", "high"],
+        context_tokens: Number($("llm-context").value) || null,
+        output_tokens: Number($("llm-output").value) || null,
+      },
       session_quota_mb: Number($("q-session").value) || 500,
       global_quota_mb: Number($("q-global").value) || 5120,
       ttl_hours: Number($("q-ttl").value) || 168,
@@ -1319,6 +1528,7 @@ async function saveConfig() {
     setBusy(false);
     renderChat([]);
     renderChatMeta();
+    renderReasoningOptions();
     toast("Настройки сохранены, движок перезапустится при следующем сообщении");
   });
 }
@@ -1528,6 +1738,35 @@ function bind() {
       sendChat();
     }
   });
+
+  $("chat-file-input").addEventListener("change", async (event) => {
+    await addAttachments(event.target.files);
+    event.target.value = "";
+  });
+
+  $("chat-attachments").addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-remove-attachment]");
+    if (!remove) return;
+    const index = Number(remove.dataset.removeAttachment);
+    if (Number.isInteger(index)) {
+      ctx.attachments.splice(index, 1);
+      renderAttachments();
+    }
+  });
+
+  const composer = document.querySelector(".chat-composer-wrap");
+  if (composer) {
+    composer.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      composer.classList.add("drop-active");
+    });
+    composer.addEventListener("dragleave", () => composer.classList.remove("drop-active"));
+    composer.addEventListener("drop", (event) => {
+      event.preventDefault();
+      composer.classList.remove("drop-active");
+      addAttachments(event.dataTransfer.files);
+    });
+  }
 
   document.querySelectorAll(".ws-tab").forEach((tab) => {
     tab.addEventListener("click", () => {

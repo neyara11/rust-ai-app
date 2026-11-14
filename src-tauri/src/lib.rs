@@ -680,6 +680,13 @@ pub fn cli_chat(
         return 2;
     };
     let home = registry::home();
+    if let Some(level) = level {
+        let caps = config::load(&home).llm_capabilities;
+        if !caps.allows_variant(level) {
+            eprintln!("reasoning variant '{level}' is not enabled for the configured model");
+            return 2;
+        }
+    }
     let engine = match engine::Engine::start(app_id, &home, &config::workspace(&home, app_id)) {
         Ok(e) => e,
         Err(e) => {

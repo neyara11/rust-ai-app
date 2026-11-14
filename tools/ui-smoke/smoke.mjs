@@ -69,6 +69,23 @@ try {
   const stats = await page.locator("#chat-log").textContent();
   assert(stats.includes("58.4") || stats.includes("tok/s"), "chat statistics were not rendered");
 
+  const reasoningOptions = await page.locator("#chat-reasoning option").count();
+  assert(reasoningOptions === 4, `expected 4 reasoning options, got ${reasoningOptions}`);
+  assert(await page.locator("#chat-reasoning-wrap").isVisible(), "reasoning selector is hidden");
+
+  await page.setInputFiles("#chat-file-input", {
+    name: "notes.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("hello attachment"),
+  });
+  await page.waitForFunction(
+    () => document.querySelector("#chat-attachments")?.textContent.includes("notes.txt"),
+  );
+  const attachmentChips = await page.locator("#chat-attachments .chat-attachment-chip").count();
+  assert(attachmentChips === 1, `expected one attachment chip, got ${attachmentChips}`);
+  await page.locator("[data-remove-attachment]").click();
+  assert(await page.locator("#chat-attachments").isHidden(), "attachment chip was not removed");
+
   await page.selectOption("#app-switch", "doc-lookup");
   await page.waitForFunction(
     () => document.querySelector("#chat-list")?.textContent.includes("Tauri v2"),

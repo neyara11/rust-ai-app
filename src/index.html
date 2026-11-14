@@ -203,7 +203,7 @@
                   <span class="busy" id="chat-busy" hidden>думает…</span>
                 </div>
                 <div class="row-actions">
-                  <label class="inline-select-label">
+                  <label class="inline-select-label" id="chat-reasoning-wrap">
                     <span>Reasoning</span>
                     <select id="chat-reasoning" class="switch" title="Уровень размышлений модели">
                       <option value="">Авто</option>
@@ -219,7 +219,14 @@
               <div id="chat-log" class="chat-log"></div>
 
               <div class="chat-composer-wrap">
+                <div id="chat-attachments" class="chat-attachments" hidden></div>
                 <div class="chat-input">
+                  <label class="chat-attach-btn" title="Прикрепить изображение или текстовый файл">
+                    <input id="chat-file-input" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.csv,.log,.yaml,.yml,.xml,.html,.css,.js,.ts,.rs,.py,.toml,.ini" hidden />
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                    </svg>
+                  </label>
                   <textarea id="chat-text" placeholder="Попросите агента создать или поправить файл в рабочей папке либо сконвертировать markdown в Word… (Enter — отправить, Shift+Enter — новая строка)" rows="2"></textarea>
                   <div class="chat-input-actions">
                     <span class="kbd-hint mono">Enter ↵</span>
@@ -361,6 +368,16 @@
               <button class="ghost small" id="llm-key-delete" type="button">Удалить ключ</button>
               <span class="badge mono" id="llm-key-status">проверка…</span>
             </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="grid">
+            <label class="check-row"><input id="llm-vision" type="checkbox" /><span>Принимает изображения</span></label>
+            <label class="check-row"><input id="llm-reasoning" type="checkbox" /><span>Поддерживает рассуждения</span></label>
+            <label>Варианты reasoning (через запятую)<input id="llm-efforts" placeholder="low,medium,high" /></label>
+            <label>Контекст модели (токенов)<input id="llm-context" type="number" min="1000" placeholder="напр. 128000" /></label>
+            <label>Максимум вывода (токенов)<input id="llm-output" type="number" min="1" placeholder="напр. 32000" /></label>
           </div>
         </div>
 

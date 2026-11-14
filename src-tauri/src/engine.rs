@@ -36,6 +36,8 @@ pub struct ChatItem {
     pub kind: String,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_in: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_out: Option<u64>,
@@ -49,12 +51,163 @@ pub struct ChatItem {
     pub model: Option<String>,
 }
 
+/// Uploaded prompt content. `data` is standard base64 without a `data:` prefix;
+/// the engine builds the data URL and never writes the payload to disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentInput {
+    pub mime: String,
+    #[serde(default)]
+    pub filename: String,
+    pub data: String,
+}
+
+pub const MAX_ATTACHMENTS: usize = 3;
+pub const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_TEXT_BYTES: usize = 64 * 1024;
+
+fn normalized_mime(raw: &str) -> String {
+    let mime = raw.trim().to_lowercase();
+    if mime == "image/jpg" {
+        "image/jpeg".to_string()
+    } else {
+        mime
+    }
+}
+
+fn is_text_mime(mime: &str) -> bool {
+    mime.starts_with("text/")
+        || matches!(
+            mime,
+            "application/json"
+                | "application/xml"
+                | "application/x-yaml"
+                | "application/yaml"
+                | "application/toml"
+                | "application/javascript"
+                | "application/x-sh"
+        )
+}
+
+fn image_magic_matches(mime: &str, bytes: &[u8]) -> bool {
+    match mime {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => {
+            bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
+        }
+        _ => false,
+    }
+}
+
+fn safe_filename(raw: &str, mime: &str) -> String {
+    let name = raw
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(raw)
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(120)
+        .collect::<String>();
+    let name = name.trim();
+    if name.is_empty() {
+        let ext = mime.rsplit('/').next().unwrap_or("bin");
+        format!("attachment.{ext}")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Validates uploaded content before any engine call. Images require `vision`;
+/// text files are inlined as text parts and work with any model.
+pub fn validate_attachments(attachments: &[AttachmentInput], vision: bool) -> Result<()> {
+    if attachments.len() > MAX_ATTACHMENTS {
+        return msg(format!(
+            "too many attachments: {} > {MAX_ATTACHMENTS}",
+            attachments.len()
+        ));
+    }
+    for attachment in attachments {
+        let mime = normalized_mime(&attachment.mime);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(attachment.data.trim())
+            .map_err(|_| Error::Msg(format!("attachment '{}' is not valid base64", attachment.filename)))?;
+        if is_text_mime(&mime) {
+            if bytes.len() > MAX_TEXT_BYTES {
+                return msg(format!(
+                    "attachment '{}' exceeds {MAX_TEXT_BYTES} bytes",
+                    attachment.filename
+                ));
+            }
+            std::str::from_utf8(&bytes).map_err(|_| {
+                Error::Msg(format!(
+                    "attachment '{}' is not valid UTF-8 text",
+                    attachment.filename
+                ))
+            })?;
+        } else if mime.starts_with("image/") {
+            if !vision {
+                return msg("model is configured without image support");
+            }
+            if bytes.len() > MAX_IMAGE_BYTES {
+                return msg(format!(
+                    "attachment '{}' exceeds {MAX_IMAGE_BYTES} bytes",
+                    attachment.filename
+                ));
+            }
+            if !image_magic_matches(&mime, &bytes) {
+                return msg(format!(
+                    "attachment '{}' does not match declared type {mime}",
+                    attachment.filename
+                ));
+            }
+        } else {
+            return msg(format!(
+                "attachment '{}' has unsupported type {mime}",
+                attachment.filename
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn build_parts(text: &str, attachments: &[AttachmentInput]) -> Vec<Value> {
+    let mut parts = Vec::new();
+    if !text.is_empty() {
+        parts.push(json!({ "type": "text", "text": text }));
+    }
+    for attachment in attachments {
+        let mime = normalized_mime(&attachment.mime);
+        let name = safe_filename(&attachment.filename, &mime);
+        if is_text_mime(&mime) {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(attachment.data.trim())
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_default();
+            parts.push(json!({
+                "type": "text",
+                "text": format!("[attachment: {name}]\n\n{decoded}")
+            }));
+        } else {
+            parts.push(json!({
+                "type": "file",
+                "mime": mime,
+                "url": format!("data:{mime};base64,{}", attachment.data.trim()),
+                "filename": name
+            }));
+        }
+    }
+    parts
+}
+
 impl ChatItem {
     fn new(role: &str, kind: &str, text: String) -> Self {
         Self {
             role: role.to_string(),
             kind: kind.to_string(),
             text,
+            mime: None,
             tokens_in: None,
             tokens_out: None,
             reasoning_tokens: None,
@@ -402,6 +555,42 @@ fn http(
     }
 }
 
+/// Model metadata for the generated provider config. Opencode does not know
+/// capabilities of a custom gateway model, so they come from the platform
+/// config. Fields match the models.dev schema that opencode already consumes.
+fn model_entry(model_name: &str, caps: &config::ModelCapabilities) -> Value {
+    let mut model = serde_json::Map::new();
+    model.insert("name".to_string(), json!(model_name));
+    model.insert("attachment".to_string(), json!(caps.vision));
+    model.insert("reasoning".to_string(), json!(caps.reasoning));
+    model.insert("tool_call".to_string(), json!(true));
+    model.insert(
+        "modalities".to_string(),
+        json!({
+            "input": if caps.vision { vec!["text", "image"] } else { vec!["text"] },
+            "output": vec!["text"]
+        }),
+    );
+    if caps.context_tokens.is_some() || caps.output_tokens.is_some() {
+        let mut limit = serde_json::Map::new();
+        if let Some(context) = caps.context_tokens {
+            limit.insert("context".to_string(), json!(context));
+        }
+        if let Some(output) = caps.output_tokens {
+            limit.insert("output".to_string(), json!(output));
+        }
+        model.insert("limit".to_string(), Value::Object(limit));
+    }
+    let mut variants = serde_json::Map::new();
+    if caps.reasoning {
+        for effort in caps.efforts() {
+            variants.insert(effort.clone(), json!({ "reasoningEffort": effort }));
+        }
+    }
+    model.insert("variants".to_string(), Value::Object(variants));
+    Value::Object(model)
+}
+
 fn provider_config(
     cfg: &config::UserConfig,
     secrets: &SecretStore,
@@ -447,14 +636,7 @@ fn provider_config(
                 "headers": headers
             },
             "models": {
-                (model_name.clone()): {
-                    "name": model_name.clone(),
-                    "variants": {
-                        "low": { "reasoningEffort": "low" },
-                        "medium": { "reasoningEffort": "medium" },
-                        "high": { "reasoningEffort": "high" }
-                    }
-                }
+                (model_name.clone()): model_entry(&model_name, &cfg.llm_capabilities)
             }
         }
     });
@@ -1017,9 +1199,20 @@ impl ChatSession {
     /// Synchronous prompt: returns when the agent finishes the turn. Callers
     /// run it on a worker thread so the UI stays responsive.
     pub fn prompt(&self, text: &str, variant: Option<&str>) -> Result<()> {
+        self.prompt_with_attachments(text, variant, &[])
+    }
+
+    /// Same as `prompt`, with prompt attachments. Callers must validate them
+    /// with `validate_attachments` before starting the turn.
+    pub fn prompt_with_attachments(
+        &self,
+        text: &str,
+        variant: Option<&str>,
+        attachments: &[AttachmentInput],
+    ) -> Result<()> {
         let started = Instant::now();
         let request_id = identity::new_request_id();
-        let result = self.prompt_raw(text, variant);
+        let result = self.prompt_raw(text, variant, attachments);
         let took_ms = started.elapsed().as_millis() as u64;
         match &result {
             Ok(response) => self.audit_llm(&request_id, variant, took_ms, response, None),
@@ -1034,12 +1227,17 @@ impl ChatSession {
         result.map(|_| ())
     }
 
-    fn prompt_raw(&self, text: &str, variant: Option<&str>) -> Result<Value> {
+    fn prompt_raw(
+        &self,
+        text: &str,
+        variant: Option<&str>,
+        attachments: &[AttachmentInput],
+    ) -> Result<Value> {
         let agent = agent();
         let mut payload = json!({
             "model": { "providerID": self.provider_id, "modelID": self.model_id },
             "system": self.system,
-            "parts": [{ "type": "text", "text": text }]
+            "parts": build_parts(text, attachments)
         });
         if let Some(variant) = variant {
             if let Some(object) = payload.as_object_mut() {
@@ -1330,6 +1528,17 @@ impl ChatSession {
     }
 }
 
+fn inlined_attachment_name(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("[attachment: ")?;
+    let end = rest.find(']')?;
+    let name = rest[..end].trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
     let mut items = Vec::new();
     let Some(messages) = raw.as_array() else {
@@ -1346,16 +1555,35 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
         let mut text = String::new();
         let mut reasoning = String::new();
         let mut tools = Vec::new();
+        let mut files: Vec<(String, String)> = Vec::new();
         if let Some(parts) = message.get("parts").and_then(Value::as_array) {
             for part in parts {
                 match part.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         if let Some(t) = part.get("text").and_then(Value::as_str) {
+                            if let Some(name) = inlined_attachment_name(t) {
+                                files.push((name.to_string(), "text/plain".to_string()));
+                                continue;
+                            }
                             if !text.is_empty() {
                                 text.push('\n');
                             }
                             text.push_str(t);
                         }
+                    }
+                    Some("file") => {
+                        let filename = part
+                            .get("filename")
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.trim().is_empty())
+                            .unwrap_or("вложение")
+                            .to_string();
+                        let mime = part
+                            .get("mime")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        files.push((filename, mime));
                     }
                     Some("reasoning") => {
                         if let Some(t) = part.get("text").and_then(Value::as_str) {
@@ -1427,6 +1655,11 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
         }
         for tool in tools {
             items.push(ChatItem::new("tool", "tool", tool));
+        }
+        for (filename, mime) in files {
+            let mut item = ChatItem::new(&role, "file", filename);
+            item.mime = Some(mime).filter(|mime| !mime.is_empty());
+            items.push(item);
         }
     }
     items
@@ -1589,6 +1822,115 @@ mod tests {
         let items = state.items();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].text, "mine");
+    }
+
+    #[test]
+    fn model_entry_declares_capabilities() {
+        let caps = crate::config::ModelCapabilities {
+            vision: true,
+            reasoning: true,
+            reasoning_efforts: vec!["low".to_string(), "max".to_string()],
+            context_tokens: Some(128_000),
+            output_tokens: Some(32_000),
+        };
+        let entry = model_entry("vision-model", &caps);
+        assert_eq!(entry["attachment"], json!(true));
+        assert_eq!(entry["reasoning"], json!(true));
+        assert_eq!(entry["tool_call"], json!(true));
+        assert_eq!(entry["modalities"]["input"], json!(["text", "image"]));
+        assert_eq!(entry["limit"]["context"], json!(128_000));
+        assert_eq!(entry["limit"]["output"], json!(32_000));
+        assert_eq!(entry["variants"]["max"]["reasoningEffort"], json!("max"));
+        assert_eq!(entry["variants"]["low"]["reasoningEffort"], json!("low"));
+    }
+
+    #[test]
+    fn text_only_model_has_no_variants_or_limits() {
+        let caps = crate::config::ModelCapabilities {
+            reasoning: false,
+            ..Default::default()
+        };
+        let entry = model_entry("text-model", &caps);
+        assert_eq!(entry["attachment"], json!(false));
+        assert_eq!(entry["reasoning"], json!(false));
+        assert_eq!(entry["modalities"]["input"], json!(["text"]));
+        assert_eq!(entry["variants"], json!({}));
+        assert!(entry.get("limit").is_none());
+    }
+
+    #[test]
+    fn image_attachment_requires_vision_and_checks_magic() {
+        use base64::Engine as _;
+        let png = base64::engine::general_purpose::STANDARD
+            .encode(b"\x89PNG\r\n\x1a\nrest-of-file");
+        let input = AttachmentInput {
+            mime: "image/png".to_string(),
+            filename: "shot.png".to_string(),
+            data: png,
+        };
+        assert!(validate_attachments(std::slice::from_ref(&input), false).is_err());
+        assert!(validate_attachments(std::slice::from_ref(&input), true).is_ok());
+
+        let parts = build_parts("look", std::slice::from_ref(&input));
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1]["type"], json!("file"));
+        assert!(parts[1]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+
+        let fake = AttachmentInput {
+            mime: "image/png".to_string(),
+            filename: "fake.png".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"not a png"),
+        };
+        assert!(validate_attachments(&[fake], true).is_err());
+    }
+
+    #[test]
+    fn text_attachment_is_inlined_without_vision() {
+        use base64::Engine as _;
+        let input = AttachmentInput {
+            mime: "text/plain".to_string(),
+            filename: "notes.txt".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"hello"),
+        };
+        assert!(validate_attachments(std::slice::from_ref(&input), false).is_ok());
+        let parts = build_parts("", std::slice::from_ref(&input));
+        assert_eq!(parts.len(), 1);
+        let text = parts[0]["text"].as_str().unwrap();
+        assert!(text.contains("[attachment: notes.txt]"));
+        assert!(text.contains("hello"));
+    }
+
+    #[test]
+    fn history_parses_file_parts() {
+        let raw = json!([{
+            "info": { "role": "user" },
+            "parts": [
+                { "type": "text", "text": "what is this" },
+                { "type": "file", "mime": "image/png", "filename": "shot.png", "url": "data:..." }
+            ]
+        }]);
+        let items = parse_history(&raw);
+        assert!(items
+            .iter()
+            .any(|item| item.kind == "file"
+                && item.text == "shot.png"
+                && item.mime.as_deref() == Some("image/png")));
+    }
+
+    #[test]
+    fn history_hides_inlined_attachment_body() {
+        let raw = json!([{
+            "info": { "role": "user" },
+            "parts": [{ "type": "text", "text": "[attachment: notes.txt]\n\nsecret body" }]
+        }]);
+        let items = parse_history(&raw);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "file");
+        assert_eq!(items[0].text, "notes.txt");
+        assert!(!items.iter().any(|item| item.kind == "text"));
     }
 
     #[test]

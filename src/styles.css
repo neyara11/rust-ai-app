@@ -616,6 +616,20 @@ label {
   gap: 14px;
 }
 
+label.check-row {
+  flex-direction: row;
+  align-items: center;
+  align-self: end;
+  gap: 8px;
+  padding-bottom: 7px;
+  cursor: pointer;
+}
+
+label.check-row input {
+  width: auto;
+  margin: 0;
+}
+
 .form-actions {
   align-self: flex-end;
   padding-bottom: 1px;
@@ -1697,6 +1711,77 @@ button:focus-visible,
 .kbd-hint {
   color: var(--muted-2);
   font-size: 10.5px;
+}
+
+.chat-attach-btn {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  align-self: center;
+  width: 30px;
+  height: 30px;
+  color: var(--muted-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--speed) var(--ease), border-color var(--speed) var(--ease);
+}
+
+.chat-attach-btn:hover {
+  color: var(--accent-text);
+  border-color: var(--accent-line);
+}
+
+.chat-attach-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.chat-attachments[hidden] {
+  display: none;
+}
+
+.chat-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  padding: 4px 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-attachment-chip button {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: var(--muted-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat-attachment-chip button:hover {
+  color: var(--bad);
+}
+
+.chat-composer-wrap.drop-active {
+  outline: 2px dashed var(--accent);
+  outline-offset: -6px;
 }
 
 /* ── Documents Workspace ───────────────────────────────────────────────── */

@@ -208,9 +208,20 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
   при возврате подтягивается финальная история + busy. Возврат в каталог
   (`close_all_apps`) останавливает все движки; смена рабочей папки — только движок
   этого приложения.
-- Модель и endpoint — из настроек; ключ — из DPAPI. Поддержан вариант модели с
-  `reasoningEffort: low|medium|high` (передаётся как `variant`). Проверено на шлюзе:
+- Модель и endpoint — из настроек; ключ — из DPAPI. Возможности модели задаются
+  явно в `config.json` → `llm_capabilities` (`vision`, `reasoning`,
+  `reasoning_efforts`, `context_tokens`, `output_tokens`) и попадают в
+  model-блок провайдера (`attachment`, `reasoning`, `tool_call`, `modalities`,
+  `limit`, `variants`). Селектор Reasoning строится из `reasoning_efforts` и
+  скрывается для модели без рассуждений; неизвестный/выключенный вариант
+  отклоняется до вызова движка (и в CLI `--chat`). Проверено на шлюзе:
   длина reasoning меняется.
+- Вложения в промпт: до 3 файлов. Изображения (`png/jpeg/webp/gif`, ≤4 МиБ,
+  проверка магических байтов) уходят `file`-part'ом с data URL и требуют
+  `llm_capabilities.vision`; текстовые файлы (`text/*`, json/yaml/toml/xml/js,
+  ≤64 КиБ, UTF-8) вставляются text-part'ом с маркером `[attachment: name]` и
+  работают с любой моделью. UI: кнопка выбора файла, drag&drop, чипы с удалением;
+  история показывает вложения чипами, тело текстового файла в чат не выводится.
 - Чаты: список, создание, переключение, удаление; заголовок из первого сообщения;
   сессии сохраняются между запусками (проверено 11 → 12 при создании нового).
 - Прогресс: SSE `/global/event`, события `chat://stream|update|busy|error` с id сессии.
@@ -250,7 +261,7 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 `--unrevoke <app-id>`.
 
 ### Тесты
-`cargo test --manifest-path src-tauri/Cargo.toml` — 37 тестов: подпись/хеши/схема,
+`cargo test --manifest-path src-tauri/Cargo.toml` — 45 тестов: подпись/хеши/схема,
 path traversal, sweep артефактов, разбор MCP (JSON/SSE),
 лимит ответа, разбор endpoint, allow-list, file tools и path escape шлюза,
 allowlist (версии/revoked/TTL/две подписи) и ротация anchor.
@@ -308,7 +319,7 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   `sessions/s-test-artifacts/dumps.ndjson` (14486 байт); `--artifacts` и
   `--grep-artifacts doc-writer ARTIFACTNEEDLE` нашли запись, токены/тестовые
   файлы после проверки удалены.
-- `cargo test` — 37 тестов, включая detection/derive старых заголовков и схему
+- `cargo test` — 45 тестов, включая detection/derive старых заголовков и схему
   пакетного инструмента с `input`/`output`.
 - `eco-pack` (release, Authenticode `Valid`): `init` → `validate` (до build падает на
   непокрытых hashes) → `build` (zip) → `keygen` → `sign` → `verify` → `dev-install`
@@ -362,6 +373,10 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
 7. Нет OS-песочницы: движок и инструменты работают с правами пользователя.
    Встроенные tools выключены. Пакетные exe получают очищенный env, таймаут,
    лимит вывода и kill дерева, но это не изоляция ФС/сети.
+   **Решение 2026-11-14:** на этапе прототипа песочница не внедряется; вернуться
+   к AppContainer (сначала для `bin/*.exe`, затем движка) после приёмки прототипа.
+   До этого требуется риск-акцепт ИБ: только аудированные подписанные пакеты,
+   выделенный хост, EDR и egress-фильтрация.
 8. Нет маскирования ПДн/псевдонимизации. **Не требуется** на текущем этапе.
 9. ~~При смене приложения движок закрывается~~ — сделано (P7): движки живут до
    возврата в каталог, ход продолжается в фоне.
@@ -439,7 +454,8 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
 - `trusted.pub` — dev-anchor, отпечаток `48efcf9d72861a68`; действует только в
   debug-сборке или при `ECO_PLATFORM_DEV=1`. Release-сборка его игнорирует.
 - `config.json` — endpoint `https://routerai.ru/api/v1`, модель
-  `~deepseek/deepseek-v4-flash-latest`, `workspaces` (рабочие папки приложений).
+  `~deepseek/deepseek-v4-flash-latest`, `llm_capabilities` (vision/reasoning/
+  efforts/limits), `workspaces` (рабочие папки приложений).
 - `secrets/llm_api_key.bin` — ключ шлюза, импортирован из `auth.json` Kilo,
   значение в репозиторий и логи не попадало.
 - `apps/doc-writer`, `apps/doc-lookup` — установленные пакеты; у каждого свой
@@ -633,7 +649,7 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   browser-mock: каталог, allowlist-бейдж, запрет недоверенного пакета, рендер чата,
   переключение приложения).
 - Проверено: e2e создал `note.md` → `note.docx` (37 КБ, real LLM); `npm test` в
-  `tools/ui-smoke` — `ui smoke ok`; `cargo test` — 37 тестов.
+  `tools/ui-smoke` — `ui smoke ok`; `cargo test` — 45 тестов.
 
 ### P8. Standalone-утилита `eco-pack` — сделано (2026-11-14)
 
