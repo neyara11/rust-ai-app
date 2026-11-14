@@ -97,7 +97,7 @@ pub fn gateway_tool_names(app: &Manifest) -> Vec<String> {
 enum Route {
     Files,
     Remote { server: String, tool: String },
-    Package { tool: String, bin: String },
+    Package { tool: String, bin: String, argv: Vec<String> },
 }
 
 #[derive(Clone)]
@@ -213,11 +213,16 @@ impl Proxy {
                 eprintln!("eco-platform mcp proxy: duplicate tool {exposed}, skipped");
                 continue;
             }
+            if tool.argv.len() > 16 || tool.argv.iter().any(|arg| arg.is_empty() || arg.len() > 512) {
+                eprintln!("eco-platform mcp proxy: invalid argv for {exposed}, skipped");
+                continue;
+            }
             self.routes.insert(
                 exposed,
                 Route::Package {
                     tool: tool.tool.clone(),
                     bin,
+                    argv: tool.argv.clone(),
                 },
             );
             tools.push(package_spec(&tool));
@@ -343,10 +348,13 @@ impl Proxy {
         result
     }
 
-    fn package_call(&self, tool: &str, bin: &str, arguments: &Value) -> Result<Value> {
-        if tool != "docx_export" {
-            return msg(format!("package tool {tool} is not supported"));
-        }
+    fn package_call(
+        &self,
+        tool: &str,
+        bin: &str,
+        argv: &[String],
+        arguments: &Value,
+    ) -> Result<Value> {
         let input = text_arg(arguments, "input")?;
         let output = text_arg(arguments, "output")?;
         let input = resolve_path(&self.workspace, input, false)?;
@@ -357,11 +365,34 @@ impl Proxy {
 
         let converter = package_bin(&self.package_dir, bin)?;
         let mut command = Command::new(&converter);
+        if argv.is_empty() {
+            command
+                .arg("--input")
+                .arg(&input)
+                .arg("--output")
+                .arg(&output);
+        } else {
+            let mut uses_input = false;
+            let mut uses_output = false;
+            for raw in argv {
+                if raw.contains("{input}") {
+                    uses_input = true;
+                }
+                if raw.contains("{output}") {
+                    uses_output = true;
+                }
+                command.arg(
+                    raw.replace("{input}", &input.to_string_lossy())
+                        .replace("{output}", &output.to_string_lossy()),
+                );
+            }
+            if !uses_input || !uses_output {
+                return msg(format!(
+                    "package tool {tool} argv must reference both {{input}} and {{output}}"
+                ));
+            }
+        }
         command
-            .arg("--input")
-            .arg(&input)
-            .arg("--output")
-            .arg(&output)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -384,13 +415,13 @@ impl Proxy {
         let run = run_with_limits(&mut command, timeout, MAX_PACKAGE_OUTPUT)?;
         if run.timed_out {
             return msg(format!(
-                "docx converter timed out after {}s; process killed",
+                "package tool {tool} timed out after {}s; process killed",
                 timeout.as_secs()
             ));
         }
         if run.overflowed {
             return msg(format!(
-                "docx converter output exceeded {} KiB per stream; process killed",
+                "package tool {tool} output exceeded {} KiB per stream; process killed",
                 MAX_PACKAGE_OUTPUT / 1024
             ));
         }
@@ -409,12 +440,12 @@ impl Proxy {
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "?".to_string());
             if snippet.is_empty() {
-                return msg(format!("docx converter failed (exit {code})"));
+                return msg(format!("package tool {tool} failed (exit {code})"));
             }
-            return msg(format!("docx converter failed (exit {code}): {snippet}"));
+            return msg(format!("package tool {tool} failed (exit {code}): {snippet}"));
         }
         if !output.is_file() {
-            return msg("docx converter finished without creating the output file");
+            return msg(format!("package tool {tool} finished without creating the output file"));
         }
         Ok(json!({
             "input": input.display().to_string(),
@@ -462,7 +493,9 @@ impl Proxy {
             Route::Remote { server, tool } => {
                 self.remote_call(server, tool, arguments.clone(), &request_id)
             }
-            Route::Package { tool, bin } => self.package_call(tool, bin, &arguments),
+            Route::Package { tool, bin, argv } => {
+                self.package_call(tool, bin, argv, &arguments)
+            }
         };
 
         let (value, bytes, truncated) = match raw {
@@ -720,8 +753,19 @@ fn package_spec(tool: &ToolDef) -> Value {
     }
     json!({
         "name": normalize_tool_name(&tool.tool),
-        "description": format!("Инструмент приложения {}.", tool.tool),
-        "inputSchema": { "type": "object" }
+        "description": format!(
+            "Инструмент приложения {}. Пути input и output относительные и не могут выходить за рабочую папку.",
+            tool.tool
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input": { "type": "string" },
+                "output": { "type": "string" }
+            },
+            "required": ["input", "output"],
+            "additionalProperties": false
+        }
     })
 }
 
@@ -1118,6 +1162,20 @@ mod tests {
         .unwrap());
         let names = gateway_tool_names(&app);
         assert!(names.contains(&"docx_export".to_string()));
+    }
+
+    #[test]
+    fn package_tool_specs_expose_input_and_output() {
+        let tool: crate::manifest::ToolDef = serde_json::from_value(json!({
+            "tool": "convert",
+            "stream": "write",
+            "bin": "bin/convert.exe",
+            "argv": ["--in", "{input}", "--out", "{output}"]
+        }))
+        .unwrap();
+        let spec = package_spec(&tool);
+        assert_eq!(spec["inputSchema"]["required"], json!(["input", "output"]));
+        assert_eq!(spec["name"], "convert");
     }
 
     #[test]

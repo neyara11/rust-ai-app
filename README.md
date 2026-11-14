@@ -34,6 +34,11 @@ sidecar, интерфейс — Tauri v2 + WebView2.
 - **Версии.** Проверка `min_shell_version`, запрет downgrade, архив предыдущих версий,
   управляемый откат (`--rollback`/кнопка в UI) и сравнение пакета с установленной
   версией (`--check`).
+- **Доверие и allowlist.** Machine-scope anchor с ротацией до 4 ключей
+  (`--trust`/`--untrust`), подписанный allowlist/CRL с версиями, `revoked` и TTL;
+  проверка при установке, запуске и откате.
+- **Незавершённые ходы.** Переключение приложения не закрывает движок: ход
+  продолжается в фоне, старые чаты переименовываются из первого сообщения.
 
 Полный процесс разработки, тестирования, подписи ИБ и тиражирования —
 `docs/APP_LIFECYCLE.md`.
@@ -249,8 +254,15 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
 Покрыты подпись/хеши/схема, версии и downgrade, path traversal, file tools, разбор
-MCP (JSON/SSE), лимит ответа, endpoint, allowlist (версии/revoked/TTL/подписи) и
-ротация нескольких anchor.
+MCP (JSON/SSE), лимит ответа, endpoint, allowlist (версии/revoked/TTL/подписи),
+ротация нескольких anchor и ремонт старых заголовков чатов.
+
+E2E и UI-прогоны:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\e2e-docx.ps1   # реальный LLM
+cd tools\ui-smoke; npm install; npm test                        # mock UI
+```
 
 ## Карта репозитория
 
@@ -266,8 +278,11 @@ MCP (JSON/SSE), лимит ответа, endpoint, allowlist (версии/revok
 | `tools/vendor.ps1` | вендоринг движка в `vendor/engine` |
 | `tools/docx-export/` | исходник конвертера и PyInstaller-сборка |
 | `tools/stub-llm/` | локальная заглушка OpenAI-совместимого API |
+| `tools/e2e-docx.ps1` | e2e: реальный агент создаёт markdown и конвертирует в `.docx` |
+| `tools/ui-smoke/` | Playwright-прогон UI на встроенном browser-mock |
 | `HANDOFF.md` | состояние, ограничения и backlog для следующего агента |
 | `docs/APP_LIFECYCLE.md` | как разрабатывать, тестировать, подписывать и тиражировать мини-приложения |
+| `PLAN.md` | целевая архитектура и фазы |
 | `PLAN.md` | целевая архитектура и фазы |
 | `.data/` | рабочий профиль (gitignored) |
 | `vendor/` | артефакты дистрибутива (gitignored) |
@@ -278,8 +293,8 @@ MCP (JSON/SSE), лимит ответа, endpoint, allowlist (версии/revok
   проверки установки на чистой машине; вендоринг движка — скриптом
   `tools/vendor.ps1`, артефакты не в git.
 - Нет песочницы процессов; пакетный exe работает с правами пользователя.
-- Нет идентичности агента и аудита вызовов LLM; Observability отложена.
-- Docs-подсистема в backend осталась мёртвым кодом после перехода на файловый сценарий.
+- Доставка allowlist через GPO/Intune/SCCM и мониторинг на стороне ИБ пока
+  организационные: платформа проверяет файл, но сама его не распространяет.
 
 Подробнее — `HANDOFF.md` §6 и §11.
 

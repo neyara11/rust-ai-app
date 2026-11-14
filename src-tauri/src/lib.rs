@@ -36,6 +36,7 @@ pub fn run() {
             commands::secret_delete,
             commands::open_app,
             commands::close_app,
+            commands::close_all_apps,
             commands::choose_workspace,
             commands::artifacts_usage,
             commands::cleanup_artifacts,
@@ -62,11 +63,15 @@ pub fn run() {
         .expect("failed to run ECO AIOps platform");
 }
 
-/// Removes leftover staging directories and expired or orphaned session data.
+/// Removes leftover staging directories, orphaned engines from a previous
+/// crash, and expired or orphaned session data.
 pub fn startup_sweep(home: &std::path::Path) {
     identity::sweep(home);
     let policy = config::policy(home);
     for app in registry::list(home) {
+        // A hard crash leaves opencode.exe holding the app database; the pid
+        // file lets us kill only the exact recorded process.
+        let _ = engine::kill_leftover(home, &app.app_id);
         let root = artifacts::sessions_root(home, &app.app_id);
         let _ = artifacts::sweep(&root, &policy);
     }

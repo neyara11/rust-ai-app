@@ -181,6 +181,7 @@ const browserMock = (() => {
       case "choose_workspace":
         return `D:\\work\\${args.app_id}`;
       case "close_app":
+      case "close_all_apps":
       case "chat_stop":
       case "chat_abort":
         return null;
@@ -444,7 +445,8 @@ async function installApp() {
 
 async function openApp(appId) {
   await guard(async () => {
-    if (ctx.appId) await invoke("close_app", { app_id: ctx.appId });
+    // Keep the previous app's engine alive: a running turn continues in the
+    // background and streams into its own chat when the user switches back.
     const info = await invoke("open_app", { app_id: appId });
     ctx.appId = appId;
     ctx.appMeta = ctx.apps.find((a) => a.app_id === appId) || { tools: [], connections: [] };
@@ -508,6 +510,7 @@ async function closeApp() {
       await invoke("chat_stop", { app_id: ctx.appId });
       await invoke("close_app", { app_id: ctx.appId });
     }
+    await invoke("close_all_apps");
     ctx.appId = null;
     ctx.appMeta = null;
     $("apps-panel").hidden = false;

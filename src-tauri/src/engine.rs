@@ -245,6 +245,7 @@ pub struct Engine {
     pub workdir: PathBuf,
     pub home: PathBuf,
     pub app_id: String,
+    pub app_name: String,
     pub app_version: String,
     pub token_id: String,
     pid_file: PathBuf,
@@ -868,6 +869,7 @@ impl Engine {
             workdir: workdir.to_path_buf(),
             home: home.to_path_buf(),
             app_id: app.app_id.clone(),
+            app_name: app.name.clone(),
             app_version: app.version.clone(),
             token_id: token.token_id.clone(),
             pid_file,
@@ -925,6 +927,7 @@ impl Engine {
             system: self.system.clone(),
             home: self.home.clone(),
             app_id: self.app_id.clone(),
+            app_name: self.app_name.clone(),
             app_version: self.app_version.clone(),
             token_id: self.token_id.clone(),
         }
@@ -971,6 +974,7 @@ pub struct ChatSession {
     pub system: String,
     pub home: PathBuf,
     pub app_id: String,
+    pub app_name: String,
     pub app_version: String,
     pub token_id: String,
 }
@@ -1189,10 +1193,7 @@ impl ChatSession {
         if !empty {
             return;
         }
-        let mut title: String = text.lines().next().unwrap_or(text).trim().chars().take(60).collect();
-        if title.is_empty() {
-            title = "Новый диалог".to_string();
-        }
+        let title = title_from_text(text);
         let agent = agent();
         let _ = http(
             &agent,
@@ -1202,6 +1203,56 @@ impl ChatSession {
             &format!("/session/{}", self.session_id),
             Some(&json!({ "title": title })),
         );
+    }
+
+    /// Repairs chats created before titles came from the first message: the
+    /// old title is the app name, `chat`, or an empty string. Best-effort and
+    /// runs on a worker thread; failures leave the existing title untouched.
+    pub fn repair_generic_titles(&self) -> usize {
+        let agent = agent();
+        let Ok(raw) = http(&agent, &self.base, &self.auth, "GET", "/session", None) else {
+            return 0;
+        };
+        let mut repaired = 0;
+        for chat in parse_sessions(&raw) {
+            if !is_generic_title(&chat.title, &self.app_id, &self.app_name) {
+                continue;
+            }
+            let Ok(raw) = http(
+                &agent,
+                &self.base,
+                &self.auth,
+                "GET",
+                &format!("/session/{}/message", chat.id),
+                None,
+            ) else {
+                continue;
+            };
+            let items = parse_history(&raw);
+            let Some(first) = items
+                .iter()
+                .find(|item| item.role == "user" && item.kind == "text" && !item.text.trim().is_empty())
+            else {
+                continue;
+            };
+            let title = title_from_text(&first.text);
+            if title.is_empty() {
+                continue;
+            }
+            if http(
+                &agent,
+                &self.base,
+                &self.auth,
+                "PATCH",
+                &format!("/session/{}", chat.id),
+                Some(&json!({ "title": title })),
+            )
+            .is_ok()
+            {
+                repaired += 1;
+            }
+        }
+        repaired
     }
 
     pub fn history_raw(&self) -> Result<Value> {
@@ -1368,6 +1419,29 @@ fn existing_session(agent: &ureq::Agent, base: &str, auth: &str) -> Result<Optio
     Ok(sessions.first().map(|s| s.id.clone()))
 }
 
+fn is_generic_title(title: &str, app_id: &str, app_name: &str) -> bool {
+    let title = title.trim();
+    title.is_empty()
+        || matches!(title, "chat" | "Диалог" | "Новый диалог")
+        || title == app_id
+        || title == app_name
+}
+
+fn title_from_text(text: &str) -> String {
+    let mut title: String = text
+        .lines()
+        .next()
+        .unwrap_or(text)
+        .trim()
+        .chars()
+        .take(60)
+        .collect();
+    if title.is_empty() {
+        title = "Новый диалог".to_string();
+    }
+    title
+}
+
 pub fn parse_sessions(raw: &Value) -> Vec<ChatSummary> {
     let mut out = Vec::new();
     let Some(items) = raw.as_array() else {
@@ -1481,6 +1555,21 @@ mod tests {
         let items = state.items();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].text, "mine");
+    }
+
+    #[test]
+    fn legacy_chat_titles_are_recognized_and_derived() {
+        assert!(is_generic_title("", "doc-writer", "Документы и Word"));
+        assert!(is_generic_title("chat", "doc-writer", "Документы и Word"));
+        assert!(is_generic_title("Диалог", "doc-writer", "Документы и Word"));
+        assert!(is_generic_title("doc-writer", "doc-writer", "Документы и Word"));
+        assert!(is_generic_title("Документы и Word", "doc-writer", "Документы и Word"));
+        assert!(!is_generic_title("report.md → Word", "doc-writer", "Документы и Word"));
+        assert_eq!(
+            title_from_text("  Первая строка\nвторая"),
+            "Первая строка"
+        );
+        assert_eq!(title_from_text("   \n"), "Новый диалог");
     }
 }
 

@@ -224,6 +224,16 @@ pub fn close_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<()
     Ok(())
 }
 
+/// Closing the workspace returns to the catalog, so every app engine is
+/// stopped. Switching between apps keeps engines alive instead.
+#[tauri::command(rename_all = "snake_case")]
+pub fn close_all_apps(state: tauri::State<'_, AppState>) -> Result<()> {
+    if let Ok(mut engines) = state.engines.lock() {
+        engines.clear();
+    }
+    Ok(())
+}
+
 
 /// Lets the user pick the working folder for an app. The agent's file tools
 /// are confined to this folder.
@@ -242,8 +252,10 @@ pub async fn choose_workspace(
             return Ok(None);
         };
         config::set_workspace(&state.home, &app_id, &path)?;
+        // Only this app's engine is bound to the old folder; keep other apps'
+        // running turns alive.
         if let Ok(mut engines) = state.engines.lock() {
-            engines.clear();
+            engines.remove(&app_id);
         }
         Ok(Some(path.display().to_string()))
     })
@@ -478,7 +490,13 @@ fn chat_open_blocking(state: &AppState, app_id: String) -> Result<crate::engine:
         return Ok(existing.info());
     }
     let info = engine.info();
+    let repair = engine.snapshot();
     engines.insert(app_id, engine);
+    // Legacy chats still titled by app name are renamed from their first user
+    // message in the background; this never blocks opening the app.
+    std::thread::spawn(move || {
+        let _ = repair.repair_generic_titles();
+    });
     Ok(info)
 }
 #[tauri::command(rename_all = "snake_case")]
