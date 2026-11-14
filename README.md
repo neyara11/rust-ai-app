@@ -43,6 +43,10 @@ sidecar, интерфейс — Tauri v2 + WebView2.
 - **Группа скилов.** Пакет может содержать несколько `skills/<name>/SKILL.md` с
   ресурсами; модель загружает нужный скил через `platform_skill`, а не получает все
   тексты сразу. `bin`-инструментов может быть несколько.
+- **Переупаковщик агентов.** `dev-apps/agent-repacker` — мини-приложение на файловых
+  инструментах: раскладывает `source/` (`AGENTS.md`, скилы, скрипты, MCP) в пакет
+  схемы 2, пишет манифест, JSON-адаптеры, `SECRETS_REQUIRED.md`, `REPORT.md` и
+  `build.ps1`. Компиляцию exe и `eco-pack validate/build` выполняет автор снаружи.
 - **Незавершённые ходы.** Переключение приложения не закрывает движок: ход
   продолжается в фоне, старые чаты переименовываются из первого сообщения.
 - **Артефакты.** Крупные tool-результаты пишутся в NDJSON по сессиям с квотами и
@@ -229,13 +233,13 @@ powershell -File tools\build-installer.ps1 -Trust   # сборка + dev-под�
 - Для полностью офлайн-сборки нужны кеши Tauri
   `%LOCALAPPDATA%\tauri\{NSIS,WixTools314,x64}` (в `x64` — bootstrapper WebView2);
   вместо `offlineInstaller` можно указать `fixedRuntime` с папкой рантайма.
-- Результат: MSI ~286 МБ и NSIS ~267 МБ в `src-tauri/target/release/bundle/`;
-  административное извлечение MSI подтверждает `engine\opencode.exe` рядом с
-  `eco-platform.exe`.
+- Результат: NSIS-установщик `ECO AIOps_0.1.0_x64-setup.exe` ~280 МБ в
+  `src-tauri/target/release/bundle/nsis/`. `bundle.targets` — `["nsis"]`;
+  MSI в релиз не собирается.
 - Подпись Authenticode для dev-сборки:
   `powershell -File tools\build-installer.ps1 -Trust` создаёт self-signed
   code-signing сертификат `CN=ECO AIOps Dev` в `Cert:\CurrentUser\My`, подписывает
-  `eco-platform.exe`, MSI и NSIS (SHA-256). `-Trust` добавляет сертификат в
+  `eco-platform.exe` и NSIS (SHA-256). `-Trust` добавляет сертификат в
   `CurrentUser\Root` и `TrustedPublisher`, иначе статус будет `UntrustedRoot`.
   Для поставки подписывать сертификатом УЦ: `-Thumbprint <sha1>` (или свой
   `signCommand` для HSM/токена). Self-signed сертификат — только для dev.
@@ -262,6 +266,7 @@ powershell -File tools\build-installer.ps1 -Trust   # сборка + dev-под�
 --install <package>         установить пакет (downgrade отклоняется)
 --check <package>           сравнить версию пакета с установленной
 --mode <local|corporate> [developer|user]  выбрать окружение и роль
+--role <developer|user>     переключить роль без смены окружения
 --history <app>             сохранённые версии для отката
 --rollback <app> [version]  явный откат к сохранённой версии (в аудит)
 --list                      список установленных пакетов
@@ -300,7 +305,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 Покрыты подпись/хеши/схема, версии и downgrade, path traversal, file tools, разбор
 MCP (JSON/SSE), лимит ответа, endpoint, allowlist (версии/revoked/TTL/подписи),
-ротация нескольких anchor, ремонт старых заголовков чатов и квоты/grep NDJSON-дампов.
+ротация нескольких anchor, ремонт старых заголовков чатов, накопление live-элементов
+при смене assistant-сообщения и квоты/grep NDJSON-дампов.
 
 E2E и UI-прогоны:
 
@@ -315,7 +321,7 @@ cd tools\ui-smoke; npm install; npm test                        # mock UI
 |---|---|
 | `src-tauri/src/` | платформа: реестр, шлюз, движок, секреты, аудит, команды |
 | `src/` | статический UI без npm-сборки |
-| `dev-apps/` | подписанные пакеты-примеры |
+| `dev-apps/` | подписанные пакеты-примеры: `doc-writer`, `doc-lookup`, `agent-repacker` |
 | `tools/signer/` | genkey / sign / verify пакетов |
 | `tools/package.ps1` | сборка/подпись/установка пакета одной командой |
 | `tools/pack/` | `eco-pack`: офлайн-упаковка мини-приложений для авторов |
@@ -329,7 +335,8 @@ cd tools\ui-smoke; npm install; npm test                        # mock UI
 | `HANDOFF.md` | состояние, ограничения и backlog для следующего агента |
 | `docs/APP_LIFECYCLE.md` | как разрабатывать, тестировать, подписывать и тиражировать мини-приложения |
 | `docs/LOCAL_AND_CORPORATE.md` | режимы, seal, группа скилов и подготовка пакета |
-| `PLAN.md` | целевая архитектура и фазы |
+| `docs/REPACK_AGENT.md` | переупаковка внешнего агента в пакет |
+| `docs/MINIAPP_AUTHORING.md` | требования к исходникам и сборке мини-приложения |
 | `PLAN.md` | целевая архитектура и фазы |
 | `.data/` | рабочий профиль (gitignored) |
 | `vendor/` | артефакты дистрибутива (gitignored) |
