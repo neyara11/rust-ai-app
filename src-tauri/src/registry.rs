@@ -1,5 +1,5 @@
 ﻿use crate::error::{msg, Error, Result};
-use crate::manifest::{self, Capabilities, Connection, DocDef, Manifest, ToolDef};
+use crate::manifest::{self, Capabilities, Connection, Manifest, ToolDef};
 use ed25519_dalek::VerifyingKey;
 use serde::Serialize;
 use std::fs;
@@ -15,7 +15,6 @@ pub struct InstalledApp {
     pub path: String,
     pub trusted: bool,
     pub problems: Vec<String>,
-    pub docs: Vec<DocDef>,
     pub tools: Vec<ToolDef>,
     pub connections: Vec<Connection>,
     pub capabilities: Capabilities,
@@ -270,7 +269,6 @@ fn installed(
         path: path.display().to_string(),
         trusted: report.ok,
         problems: report.problems.clone(),
-        docs: manifest.docs.clone(),
         tools: manifest.tools.clone(),
         connections: manifest.connections.clone(),
         capabilities: manifest.capabilities.clone(),
@@ -303,7 +301,6 @@ pub fn list(home: &Path) -> Vec<InstalledApp> {
                 path: path.display().to_string(),
                 trusted: false,
                 problems: vec![format!("manifest unreadable: {e}")],
-                docs: Vec::new(),
                 tools: Vec::new(),
                 connections: Vec::new(),
                 capabilities: Capabilities::default(),

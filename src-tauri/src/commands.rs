@@ -1,17 +1,15 @@
 use crate::artifacts;
 use crate::config::{self, UserConfig};
-use crate::docs::{DocMeta, DocView, DocStore};
 use crate::error::{msg, Error, Result};
 use crate::manifest;
 use crate::mcp::{self, McpSession};
 use crate::registry;
 use crate::secrets::SecretStore;
-use crate::state::{AppState, Session};
+use crate::state::AppState;
 use serde::Serialize;
 use tauri::Manager;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
-use std::sync::MutexGuard;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Serialize)]
@@ -28,9 +26,7 @@ pub struct PlatformInfo {
 #[derive(Debug, Serialize)]
 pub struct SessionInfo {
     pub app_id: String,
-    pub dir: String,
     pub workspace: String,
-    pub docs: Vec<DocMeta>,
 }
 
 #[derive(Debug, Serialize)]
@@ -38,25 +34,6 @@ pub struct Probe {
     pub ok: bool,
     pub millis: u64,
     pub detail: String,
-}
-
-fn lock<'a>(state: &'a AppState) -> Result<MutexGuard<'a, std::collections::HashMap<String, Session>>> {
-    state
-        .sessions
-        .lock()
-        .map_err(|_| Error::Msg("session lock poisoned".to_string()))
-}
-
-fn with_session<T>(
-    state: &AppState,
-    app_id: &str,
-    f: impl FnOnce(&Session) -> Result<T>,
-) -> Result<T> {
-    let guard = lock(state)?;
-    let session = guard
-        .get(app_id)
-        .ok_or_else(|| Error::Msg(format!("app {app_id} is not open")))?;
-    f(session)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -96,11 +73,6 @@ pub fn remove_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<(
     if let Ok(mut engines) = state.engines.lock() {
         engines.remove(&app_id);
     }
-    let mut guard = lock(&state)?;
-    if let Some(session) = guard.remove(&app_id) {
-        artifacts::close_session(&session.dir);
-    }
-    drop(guard);
     registry::remove(&home, &app_id)
 }
 
@@ -119,11 +91,6 @@ pub fn rollback_app(
     if let Ok(mut engines) = state.engines.lock() {
         engines.remove(&app_id);
     }
-    let mut guard = lock(&state)?;
-    if let Some(session) = guard.remove(&app_id) {
-        artifacts::close_session(&session.dir);
-    }
-    drop(guard);
     registry::rollback(&home, &app_id, version.as_deref())
 }
 
@@ -222,48 +189,12 @@ pub fn secret_delete(state: tauri::State<'_, AppState>, name: String) -> Result<
 #[tauri::command(rename_all = "snake_case")]
 pub fn open_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<SessionInfo> {
     manifest::parse_id(&app_id, "app")?;
-    let app_path = registry::find(&state.home, &app_id)
-        .ok_or_else(|| Error::Msg(format!("app {app_id} is not installed")))?;
-
-    let trusted = registry::load_trusted_key(&state.home);
-    let report = manifest::verify_package(&app_path, trusted.as_ref());
-    if !report.ok {
-        return msg(format!(
-            "app {app_id} failed verification: {}",
-            report.problems.join("; ")
-        ));
-    }
-    let app_manifest = manifest::load(&app_path)?;
-
-    let policy = config::policy(&state.home);
-    let root = artifacts::sessions_root(&state.home, &app_id);
-    let _ = artifacts::sweep(&root, &policy);
-    let dir = artifacts::open_session(&root, &policy)?;
-    let docs = DocStore::new(dir.clone())?;
-
-    for def in &app_manifest.docs {
-        if docs.read(&def.id).is_err() {
-            let _ = docs.create(&def.id, "");
-        }
-    }
-    let doc_list = docs.list()?;
+    // Fail-closed: the package is re-verified on every open.
+    registry::verified_manifest(&state.home, &app_id)?;
     let workspace = config::workspace(&state.home, &app_id);
-
-    let mut guard = lock(&state)?;
-    guard.insert(
-        app_id.clone(),
-        Session {
-            dir: dir.clone(),
-            docs,
-            started_at: artifacts::now_secs(),
-        },
-    );
-
     Ok(SessionInfo {
         app_id,
-        dir: dir.display().to_string(),
         workspace: workspace.display().to_string(),
-        docs: doc_list,
     })
 }
 
@@ -272,111 +203,9 @@ pub fn close_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<()
     if let Ok(mut engines) = state.engines.lock() {
         engines.remove(&app_id);
     }
-    let mut guard = lock(&state)?;
-    if let Some(session) = guard.remove(&app_id) {
-        artifacts::close_session(&session.dir);
-    }
     Ok(())
 }
 
-#[tauri::command(rename_all = "snake_case")]
-pub fn list_docs(state: tauri::State<'_, AppState>, app_id: String) -> Result<Vec<DocMeta>> {
-    with_session(&state, &app_id, |s| s.docs.list())
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub fn read_doc(
-    state: tauri::State<'_, AppState>,
-    app_id: String,
-    doc_id: String,
-) -> Result<DocView> {
-    with_session(&state, &app_id, |s| s.docs.read(&doc_id))
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub fn create_doc(
-    state: tauri::State<'_, AppState>,
-    app_id: String,
-    doc_id: String,
-    markdown: String,
-) -> Result<DocView> {
-    with_session(&state, &app_id, |s| s.docs.create(&doc_id, &markdown))
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub fn write_doc(
-    state: tauri::State<'_, AppState>,
-    app_id: String,
-    doc_id: String,
-    markdown: String,
-    expected_revision: Option<String>,
-) -> Result<DocView> {
-    with_session(&state, &app_id, |s| {
-        s.docs
-            .write(&doc_id, &markdown, expected_revision.as_deref())
-    })
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub fn append_doc(
-    state: tauri::State<'_, AppState>,
-    app_id: String,
-    doc_id: String,
-    markdown: String,
-    expected_revision: Option<String>,
-) -> Result<DocView> {
-    with_session(&state, &app_id, |s| {
-        s.docs
-            .append(&doc_id, &markdown, expected_revision.as_deref())
-    })
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub fn insert_after_doc(
-    state: tauri::State<'_, AppState>,
-    app_id: String,
-    doc_id: String,
-    anchor: String,
-    markdown: String,
-    expected_revision: Option<String>,
-) -> Result<DocView> {
-    with_session(&state, &app_id, |s| {
-        s.docs.insert_after(
-            &doc_id,
-            &anchor,
-            &markdown,
-            expected_revision.as_deref(),
-        )
-    })
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub fn replace_block_doc(
-    state: tauri::State<'_, AppState>,
-    app_id: String,
-    doc_id: String,
-    anchor: String,
-    markdown: String,
-    expected_revision: Option<String>,
-) -> Result<DocView> {
-    with_session(&state, &app_id, |s| {
-        s.docs.replace_block(
-            &doc_id,
-            &anchor,
-            &markdown,
-            expected_revision.as_deref(),
-        )
-    })
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub fn finalize_doc(
-    state: tauri::State<'_, AppState>,
-    app_id: String,
-    doc_id: String,
-) -> Result<DocView> {
-    with_session(&state, &app_id, |s| s.docs.finalize(&doc_id))
-}
 
 /// Lets the user pick the working folder for an app. The agent's file tools
 /// are confined to this folder.
@@ -622,8 +451,7 @@ fn chat_open_blocking(state: &AppState, app_id: String) -> Result<crate::engine:
         }
     }
 
-    // The agent works in the user-chosen workspace; the artifacts session is
-    // still used for quotas and cleanup.
+    // The agent works in the user-chosen workspace.
     let workspace = config::workspace(&state.home, &app_id);
     let engine = crate::engine::Engine::start(&app_id, &state.home, &workspace)?;
 

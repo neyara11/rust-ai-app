@@ -369,6 +369,9 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
   локальный отзыв (`--tokens`, `--issue-token`, `--revoke`);
 - пакетные exe: очищенный env, таймаут 60 с, лимит 64 КиБ на поток, kill дерева
   и причина ошибки в аудите;
+- типизированная docs-подсистема и UI документов удалены; `doc-lookup` работает
+  через `file_scopes: ["workspace"]` и пишет `findings.md`; вкладка ручных
+  MCP-вызовов показывается только пакетам с `http-mcp`;
 - вендоринг движка и офлайн-запуск;
 - подпись установщиков self-signed сертификатом (dev).
 

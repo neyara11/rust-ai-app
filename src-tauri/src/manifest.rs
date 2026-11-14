@@ -54,14 +54,6 @@ pub struct Capabilities {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocDef {
-    pub id: String,
-    pub label: String,
-    #[serde(default)]
-    pub export: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactCfg {
     #[serde(default = "default_quota_mb")]
     pub quota_mb: u64,
@@ -103,8 +95,6 @@ pub struct Manifest {
     pub connections: Vec<Connection>,
     #[serde(default)]
     pub capabilities: Capabilities,
-    #[serde(default)]
-    pub docs: Vec<DocDef>,
     #[serde(default)]
     pub artifacts: ArtifactCfg,
     #[serde(default)]

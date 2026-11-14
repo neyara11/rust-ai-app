@@ -1,32 +1,4 @@
 const browserMock = (() => {
-  const mockDocs = {
-    "doc-writer": [
-      {
-        id: "document",
-        revision: "a4f912c0",
-        finalized: false,
-        markdown:
-          "# План проверки гипотезы\n\n<!-- id: summary -->\n## Кратко\nПроверяем деградацию БД после релиза.\n\n<!-- id: body -->\n## Шаги\n- Снять метрики за окно всплеска\n- Сверить таймауты пула соединений\n\n<!-- id: conclusion -->\n## Вывод\nПока не сформулирован.\n",
-      },
-      {
-        id: "notes",
-        revision: "7b3e01d8",
-        finalized: false,
-        markdown:
-          "# Заметки\n\n- Черновик вопросов к дежурному\n- Ссылки на дашборды\n",
-      },
-    ],
-    "doc-lookup": [
-      {
-        id: "findings",
-        revision: "e91c40a2",
-        finalized: false,
-        markdown:
-          "# Выжимка по документации Tauri v2\n\nИспользуйте `capabilities/default.json` для декларативного разграничения прав доступа команд.\n",
-      },
-    ],
-  };
-
   const mockApps = [
     {
       app_id: "doc-writer",
@@ -36,7 +8,6 @@ const browserMock = (() => {
       path: "D:\\git\\rust-ai-app\\.data\\apps\\doc-writer",
       trusted: true,
       problems: [],
-      docs: [],
       tools: [{ tool: "docx_export", bin: "bin/docx-export.exe", stream: "write" }],
       capabilities: { file_scopes: ["workspace"] },
       connections: [{ id: "llm", type: "llm", required: true }],
@@ -49,7 +20,6 @@ const browserMock = (() => {
       path: "D:\\git\\rust-ai-app\\.data\\apps\\doc-lookup",
       trusted: true,
       problems: [],
-      docs: [{ id: "findings", label: "Выжимка", export: ["md"] }],
       tools: [
         { tool: "resolve-library-id", argv: [], stream: "read" },
         { tool: "query-docs", argv: [], stream: "read" },
@@ -67,7 +37,6 @@ const browserMock = (() => {
       path: "D:\\git\\rust-ai-app\\.data\\apps\\incident-brief",
       trusted: false,
       problems: ["hash mismatch for prompt/system.md"],
-      docs: [],
       tools: [{ tool: "push-ticket", argv: [], stream: "write" }],
       connections: [{ id: "llm", type: "llm", required: true }],
     },
@@ -199,9 +168,7 @@ const browserMock = (() => {
       case "open_app":
         return {
           app_id: args.app_id,
-          dir: `D:\\git\\rust-ai-app\\.data\\apps\\${args.app_id}\\sessions\\9f81c2`,
           workspace: `D:\\work\\${args.app_id}`,
-          docs: mockDocs[args.app_id] || [],
         };
       case "choose_workspace":
         return `D:\\work\\${args.app_id}`;
@@ -209,42 +176,6 @@ const browserMock = (() => {
       case "chat_stop":
       case "chat_abort":
         return null;
-      case "list_docs":
-        return (mockDocs[args.app_id] || []).map((d) => ({
-          id: d.id,
-          revision: d.revision,
-          finalized: d.finalized,
-        }));
-      case "read_doc": {
-        const list = mockDocs[args.app_id] || [];
-        return list.find((d) => d.id === args.doc_id) || { id: args.doc_id, revision: "00000000", finalized: false, markdown: "" };
-      }
-      case "write_doc": {
-        const list = mockDocs[args.app_id] || [];
-        const doc = list.find((d) => d.id === args.doc_id);
-        if (doc) {
-          doc.markdown = args.markdown || "";
-          doc.revision = Math.random().toString(16).slice(2, 10);
-          return doc;
-        }
-        return { id: args.doc_id, revision: "newrev01", finalized: false, markdown: args.markdown || "" };
-      }
-      case "append_doc": {
-        const list = mockDocs[args.app_id] || [];
-        const doc = list.find((d) => d.id === args.doc_id);
-        if (doc) {
-          doc.markdown = (doc.markdown ? doc.markdown.trimEnd() + "\n\n" : "") + (args.markdown || "");
-          doc.revision = Math.random().toString(16).slice(2, 10);
-          return doc;
-        }
-        return { id: args.doc_id, revision: "newrev02", finalized: false, markdown: args.markdown || "" };
-      }
-      case "finalize_doc": {
-        const list = mockDocs[args.app_id] || [];
-        const doc = list.find((d) => d.id === args.doc_id);
-        if (doc) doc.finalized = true;
-        return doc || { id: args.doc_id, revision: "final001", finalized: true, markdown: "" };
-      }
       case "artifacts_usage":
         return { sessions: 2, bytes: 18454937, files: 6 };
       case "cleanup_artifacts":
@@ -500,7 +431,10 @@ async function openApp(appId) {
     if (ctx.appId) await invoke("close_app", { app_id: ctx.appId });
     const info = await invoke("open_app", { app_id: appId });
     ctx.appId = appId;
-    ctx.appMeta = ctx.apps.find((a) => a.app_id === appId) || { docs: [], tools: [], connections: [] };
+    ctx.appMeta = ctx.apps.find((a) => a.app_id === appId) || { tools: [], connections: [] };
+    const hasMcp = (ctx.appMeta.connections || []).some((c) => c.type === "http-mcp");
+    const toolsTab = document.querySelector('.ws-tab[data-ws="tools"]');
+    if (toolsTab) toolsTab.hidden = !hasMcp;
     try {
       $("chat-reasoning").value = localStorage.getItem(`reasoning:${appId}`) || "";
     } catch (_) {
@@ -545,11 +479,10 @@ async function openApp(appId) {
 
     $("ws-title").textContent = ctx.appMeta.name || appId;
     $("ws-title").hidden = true;
-    $("ws-dir").textContent = info.dir;
     const wsFolder = $("ws-folder");
     if (wsFolder) wsFolder.textContent = info.workspace || "—";
 
-    renderToolSelectors();
+    if (hasMcp) renderToolSelectors();
   });
 }
 
@@ -1424,7 +1357,7 @@ function bind() {
   document.querySelectorAll(".ws-tab").forEach((tab) => {
     tab.addEventListener("click", () => {
       document.querySelectorAll(".ws-tab").forEach((t) => t.classList.toggle("active", t === tab));
-      for (const name of ["chat", "docs", "tools"]) {
+      for (const name of ["chat", "tools"]) {
         const body = $(`ws-${name}`);
         if (body) body.hidden = name !== tab.dataset.ws;
       }

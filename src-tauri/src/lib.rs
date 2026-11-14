@@ -1,7 +1,6 @@
 pub mod artifacts;
 pub mod commands;
 pub mod config;
-pub mod docs;
 pub mod engine;
 pub mod error;
 pub mod identity;
@@ -36,14 +35,6 @@ pub fn run() {
             commands::secret_delete,
             commands::open_app,
             commands::close_app,
-            commands::list_docs,
-            commands::read_doc,
-            commands::create_doc,
-            commands::write_doc,
-            commands::append_doc,
-            commands::insert_after_doc,
-            commands::replace_block_doc,
-            commands::finalize_doc,
             commands::choose_workspace,
             commands::artifacts_usage,
             commands::cleanup_artifacts,

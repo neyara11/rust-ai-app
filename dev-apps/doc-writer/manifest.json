@@ -31,7 +31,6 @@
     ],
     "external_writes": []
   },
-  "docs": [],
   "artifacts": {
     "quota_mb": 50,
     "ttl_hours": 72

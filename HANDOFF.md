@@ -47,14 +47,13 @@ eco-platform.exe --anchor                       # проверить source/fing
 |---|---|
 | `src-tauri/src/manifest.rs` | манифест пакета, Ed25519-подпись, sha256, schema |
 | `src-tauri/src/registry.rs` | установка/удаление, fail-closed, список, trust anchor |
-| `src-tauri/src/docs.rs` | md-документы: ревизии, якоря, append/insert/replace/finalize |
 | `src-tauri/src/artifacts.rs` | сессии, квоты, TTL, sweep осиротевших |
 | `src-tauri/src/identity.rs` | короткоживущие токены приложений, отзыв, псевдоним пользователя |
 | `src-tauri/src/secrets.rs` | DPAPI (CryptProtectData) |
 | `src-tauri/src/mcp.rs` | MCP-клиент (streamable HTTP + SSE), лимит 64 КиБ |
 | `src-tauri/src/proxy.rs` | stdio-MCP шлюз: allow-list, file tools в рабочей папке, пакетные exe, аудит |
 | `src-tauri/src/engine.rs` | opencode sidecar: конфиг, запуск, сессии, чат, варианты |
-| `src-tauri/src/commands.rs` | 30+ Tauri-команд |
+| `src-tauri/src/commands.rs` | Tauri-команды платформы и чата |
 | `src-tauri/src/lib.rs` | сборка приложения, startup sweep, CLI |
 | `src/app.js`, `src/index.html`, `src/styles.css` | интерфейс, без npm и сборки |
 | `tools/signer` | genkey / sign / verify для пакетов |
@@ -97,9 +96,9 @@ eco-platform.exe --anchor                       # проверить source/fing
   манифест объявил `capabilities.file_scopes: ["workspace"]`.
 - Все пути относительные; абсолютные, `..` и выход за папку (включая symlink/junction)
   отклоняются после канонизации. Чтение ≤ 64 КиБ, запись ≤ 1 МиБ, листинг ≤ 200 записей.
-- Старая подсистема типизированных документов (`docs.rs`) осталась в коде, но её UI и
-  инструменты агенту больше не выдаются: `doc-writer` работает с обычными файлами.
 - Квоты/TTL артефактов сессии сохраняются; рабочая папка пользователя не удаляется.
+- Типизированная docs-подсистема удалена (P6): нет `docs.rs`, doc-команд, поля `docs`
+  в манифесте/реестре и UI документов. `doc-lookup` переведён на файловый сценарий.
 
 ### Пакетные инструменты и Word
 - `tools[]` манифеста может указывать `bin` — исполняемый файл внутри подписанного
@@ -213,8 +212,8 @@ eco-platform.exe --anchor                       # проверить source/fing
 `--unrevoke <app-id>`.
 
 ### Тесты
-`cargo test --manifest-path src-tauri/Cargo.toml` — 19 тестов: подпись/хеши/схема,
-ревизии и якоря документов, path traversal, sweep артефактов, разбор MCP (JSON/SSE),
+`cargo test --manifest-path src-tauri/Cargo.toml` — 23 теста: подпись/хеши/схема,
+path traversal, sweep артефактов, разбор MCP (JSON/SSE),
 лимит ответа, разбор endpoint, allow-list, file tools и path escape шлюза.
 
 ## 5. Что проверено вживую
@@ -398,7 +397,9 @@ eco-platform.exe --anchor                       # проверить source/fing
 5. ~~Таймауты/лимиты пакетных инструментов и изоляция процессов~~ — сделано (P5):
    таймаут 60 с, лимит 64 КиБ на поток, kill дерева, очищенный env, причина в
    аудите. Полной OS-песочницы по-прежнему нет.
-6. Чистка мёртвой docs-подсистемы, `doc-lookup` и вкладки ручных MCP-вызовов (P6).
+6. ~~Чистка мёртвой docs-подсистемы, `doc-lookup` и вкладки ручных MCP-вызовов~~ —
+   сделано (P6): docs-модуль/команды/поле удалены, `doc-lookup` переведён на файлы,
+   вкладка MCP скрывается без `http-mcp`.
 7. ~~Standalone `eco-pack` для авторов мини-приложений~~ — сделано: `tools/pack`,
    сборка/подпись `tools/build-pack.ps1` (P8).
 8. Ужесточение доверия (P9) — сделано: Machine-scope anchor, release игнорирует
@@ -434,8 +435,9 @@ eco-platform.exe --anchor                       # проверить source/fing
   инструменты не выходят за неё. Не возвращай файловый доступ без scope-проверки.
 - `docx-export.exe` — часть подписанного пакета `dev-apps/doc-writer/bin`, а не
   платформы. Платформа не ищет конвертер по глобальным путям.
-- UI документов и платформенный экспорт удалены. `docs.rs` и doc-команды остались
-  мёртвым кодом — их не нужно подключать обратно без явной задачи.
+- UI документов и платформенный экспорт удалены вместе с `docs.rs` (P6); не возвращать
+  их без явной задачи. `doc-lookup` теперь файловый пакет (`file_scopes: ["workspace"]`)
+  и сохраняет выжимку в `findings.md`.
 - Контур закрытый: нельзя рассчитывать на crates.io, npm и PyPI. Всё внешнее нужно
   вендорить; сборка конвертера офлайн — через wheelhouse.
 - Перед изменениями: `cargo test --manifest-path src-tauri/Cargo.toml`, затем
@@ -527,16 +529,19 @@ eco-platform.exe --anchor                       # проверить source/fing
 - Осталось: нет OS-песочницы (job object/AppContainer), пакетный exe всё ещё с
   правами пользователя и доступом к ФС вне рабочей папки.
 
-### P6. Чистка после смены курса
+### P6. Чистка после смены курса — сделано (2026-11-14)
 
-- Удалить или явно пометить мёртвую docs-подсистему: `docs.rs`, doc-команды в
-  `commands.rs`, создание документов в `open_app`.
-- `doc-lookup` остался без docs UI и без doc tools; либо удалить, либо перевести на
-  `file_scopes: ["workspace"]` и файловый сценарий.
-- Вкладка ручных MCP-вызовов не нужна `doc-writer`; скрывать её для пакетов без
-  `http-mcp` или убрать из UI.
-- `dev-apps/doc-writer/bin/docx-export.exe` (~13.4 МБ) лежит в git; решить, хранить
-  ли его в LFS/релизном артефакте или собирать в пайплайне.
+- Удалены `docs.rs`, все doc-команды Tauri, `DocStore`, `Session`/`state.sessions`,
+  поле `docs` из манифеста и `InstalledApp`, создание документов в `open_app`.
+  `cargo test` — 23 теста (минус 5 тестов docs).
+- `doc-lookup` переведён на файловый сценарий: версия `0.1.1`,
+  `file_scopes: ["workspace"]`, skill пишет `findings.md` через `write_file`,
+  манифест пересчитан и подписан dev-ключом. Вживую: context7 → `findings.md`.
+- Вкладка «MCP-инструменты» показывается только пакетам с `http-mcp`; у
+  `doc-writer` она скрыта, у `doc-lookup` доступна.
+- `dev-apps/doc-writer/bin/docx-export.exe` оставлен в git как dev-артефакт для
+  воспроизводимого локального теста (13.4 МБ); для поставки exe собирается в CI
+  и входит в подписанный пакет. LFS не вводим.
 
 ### P7. Мелочи
 
@@ -593,8 +598,8 @@ eco-platform.exe --anchor                       # проверить source/fing
    администратора (HKLM), для dev — debug-сборка или `ECO_PLATFORM_DEV=1`.
 6. Для разработки мини-приложений внешними авторами: `tools\build-pack.ps1` →
    `vendor/pack/eco-pack.exe` (P8 сделано); проверить на машине без Rust/Node/Python.
-7. P5 сделано; взять P6: чистка мёртвой docs-подсистемы, `doc-lookup` и вкладки
-   ручных MCP-вызовов.
+7. P6 сделано; взять P7: мелочи (смена приложения/папки, осиротевшие движки,
+   старые заголовки чатов, `tools[].argv`, e2e/Playwright).
 8. Проверить идентичность: `--issue-token doc-writer 1` → `--tokens` →
    `--revoke <token_id>`; для app-отзыва: `--revoke doc-writer` →
    `--issue-token doc-writer` (должен отказать) → `--unrevoke doc-writer`;
