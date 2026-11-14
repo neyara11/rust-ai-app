@@ -62,6 +62,7 @@ eco-platform.exe --trust dev\keys\trusted.pub
 | `tools/docx-export` | Python-скрипт markdown → docx, PyInstaller-сборка, README |
 | `tools/stub-llm/server.js` | локальная заглушка OpenAI-совместимого API (порт 4098) |
 | `dev-apps/*` | подписанные пакеты-примеры: `doc-writer`, `doc-lookup` |
+| `docs/APP_LIFECYCLE.md` | процесс: разработка, тесты, подпись ИБ, тиражирование, разграничение ролей |
 | `.data/` (gitignored) | рабочий профиль: пакеты, секреты, аудит, конфиг |
 
 ## 4. Что реализовано
@@ -363,6 +364,8 @@ eco-platform.exe --trust dev\keys\trusted.pub
 ### Контекст и инварианты
 
 - Платформа Tauri v2, движок opencode sidecar; агент видит один MCP-сервер `platform`.
+- Процесс разработки/тестов/подписи/тиражирования — `docs/APP_LIFECYCLE.md`;
+  prod-подпись только у ИБ, у пользователя и разработчика prod-ключа быть не должно.
 - Рабочая папка задаётся на приложение (`config.json` → `workspaces`), файловые
   инструменты не выходят за неё. Не возвращай файловый доступ без scope-проверки.
 - `docx-export.exe` — часть подписанного пакета `dev-apps/doc-writer/bin`, а не
