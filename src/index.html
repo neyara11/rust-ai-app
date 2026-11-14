@@ -36,7 +36,6 @@
           <span class="brand-title">ECO AIOps</span>
           <span class="brand-tag">DESKTOP SHELL</span>
         </div>
-        <div class="brand-sub" id="version">v0.1.0</div>
       </div>
     </div>
 
@@ -50,19 +49,15 @@
         </svg>
         <span>Каталог и рабочая среда</span>
       </button>
-      <button class="tab" data-tab="settings" type="button">
+      <button class="tab icon-only" data-tab="settings" type="button" aria-label="Контур и секреты" title="Контур и секреты">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="3" />
           <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.9 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 8.9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z" />
         </svg>
-        <span>Контур и секреты</span>
       </button>
     </nav>
 
     <div class="header-meta">
-      <span id="trust" class="badge bad" title="Статус корневого ключа проверки Ed25519-подписи пакетов">trust anchor: НЕТ</span>
-      <span id="allowlist" class="badge" title="Подписанный allowlist одобренных мини-приложений">allowlist: нет</span>
-      <span class="path-chip mono" id="home" title="Рабочий каталог платформы"></span>
       <button id="theme-toggle" class="icon-btn" type="button" aria-label="Переключить тему" title="Переключить тему">
         <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="4" />
@@ -309,6 +304,28 @@
       </div>
 
       <div class="settings-grid">
+        <div class="panel">
+          <div class="panel-icon-head">
+            <div class="panel-badge-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z" />
+                <path d="M9 12l2 2 4-4" />
+              </svg>
+            </div>
+            <div>
+              <h2>Контур доверия</h2>
+              <p class="panel-desc">Корневой ключ подписи, allowlist и профиль платформы. Эти параметры задаются администратором и ИБ.</p>
+            </div>
+          </div>
+
+          <div class="policy-note">
+            <div class="sec-row"><span>Trust anchor</span><strong id="trust" class="badge bad">trust anchor: НЕТ</strong></div>
+            <div class="sec-row"><span>Allowlist</span><strong id="allowlist" class="badge">allowlist: нет</strong></div>
+            <div class="sec-row"><span>Платформа</span><strong id="version" class="mono">v0.1.0 · schema 2</strong></div>
+            <div class="sec-row"><span>Профиль</span><strong id="home" class="mono"></strong></div>
+          </div>
+        </div>
+
         <div class="panel">
           <div class="panel-icon-head">
             <div class="panel-badge-icon">
