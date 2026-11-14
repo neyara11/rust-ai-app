@@ -57,6 +57,7 @@ eco-platform.exe --trust dev\keys\trusted.pub
 | `src/app.js`, `src/index.html`, `src/styles.css` | интерфейс, без npm и сборки |
 | `tools/signer` | genkey / sign / verify для пакетов |
 | `tools/package.ps1` | одна команда: сборка конвертера → hashes → подпись → `--verify` → `--install` |
+| `tools/vendor.ps1` | вендоринг движка в `vendor/engine` (opencode + models.json + хеши) |
 | `tools/docx-export` | Python-скрипт markdown → docx, PyInstaller-сборка, README |
 | `tools/stub-llm/server.js` | локальная заглушка OpenAI-совместимого API (порт 4098) |
 | `dev-apps/*` | подписанные пакеты-примеры: `doc-writer`, `doc-lookup` |
@@ -98,6 +99,14 @@ eco-platform.exe --trust dev\keys\trusted.pub
 - Конвертер является частью мини-приложения, а не платформы. Платформа не ищет его
   по глобальным путям и не запускает свои экспорты.
 - Пересборка и подпись пакета — `tools/package.ps1` (см. §7).
+
+### Дистрибутив и закрытый контур
+- `tools/vendor.ps1` собирает `vendor/engine` (`opencode.exe` + `models.json`),
+  Tauri-бандл кладёт его в `engine/` рядом с `eco-platform.exe`.
+- `bundle.active: true`: NSIS `perMachine`, WebView2 `offlineInstaller`.
+- Движок запускается с `OPENCODE_DISABLE_MODELS_FETCH`, `..._DEFAULT_PLUGINS`,
+  `..._LSP_DOWNLOAD`; провайдер встроен в бинарь, npm в рантайме не нужен.
+- Установщик пока не подписан Authenticode.
 
 ### Секреты
 - DPAPI (per-user) в `<home>\secrets\<name>.bin`, в конфиг не попадают.
@@ -187,15 +196,22 @@ eco-platform.exe --trust dev\keys\trusted.pub
 - doc-writer: агент создал `note.md` в выбранной папке и сконвертировал в `note.docx`;
   обратное чтение Word совпало с markdown. `--chat-async` использует ту же папку.
 - Отсутствие осиротевших движков после перезапуска.
+- Офлайн-движок: vendored `opencode.exe` + `models.json`, мёртвый прокси, чат через
+  `--chat-async` завершился (`prompt finished`), внешних TCP-соединений у движка нет,
+  npm/node_modules в профиле не создаются.
 
 ## 6. Что НЕ реализовано (важно)
 
 ### Блокеры для «настоящего» продукта
-1. **Нет сборки инсталлятора.** `bundle.active: false`, нет Authenticode-подписи,
-   установки в `Program Files`, WebView2-бандла, CI, SBOM, SAST/SCA.
-2. **opencode не вендорен в дистрибутив**: бинарь 211 МБ лежит в `tools/oc`
-   (gitignored), провайдер `@ai-sdk/openai-compatible` opencode ставит сам через npm
-   при первом старте. Для закрытого контура это недопустимо — нужен vendor.
+1. **Инсталлятор собран, но не подписан.** `bundle.active: true`, NSIS `perMachine`,
+   WebView2 `offlineInstaller`; Authenticode-сертификата нет, CI, SBOM, SAST/SCA нет.
+   Для офлайн-сборки нужны локальные NSIS/WiX и bootstrapper WebView2 (или
+   `fixedRuntime` с локальной папкой рантайма).
+2. **opencode вендорен скриптом, а не артефактом в git.** `tools/vendor.ps1` кладёт
+   `opencode.exe` и `models.json` в `vendor/engine` (gitignored); платформа ищет бинарь
+   в `<home>/engine`, рядом с exe (`engine/opencode.exe`) и `tools/oc`. С флагами
+   `OPENCODE_DISABLE_MODELS_FETCH`/`DEFAULT_PLUGINS`/`LSP_DOWNLOAD` движок не ходит
+   в сеть и не требует npm: провайдер `@ai-sdk/openai-compatible` встроен в бинарь.
 
 ### Функциональные пробелы
 3. Нет полной матрицы совместимости платформа × пакет, реестра версий и отката.
@@ -232,12 +248,19 @@ eco-platform.exe --trust dev\keys\trusted.pub
 - Windows 10/11, rustc/cargo 1.97.1, MSVC Build Tools 2022, WebView2 157,
   Node 22 (npm работает только через `npm.cmd`; `npm.ps1` блокируется
   ExecutionPolicy), Python не требуется.
+- Tauri CLI на dev-машине не установлен, поэтому `cargo tauri build` и сам
+  инсталлятор здесь не проверялись; конфиг бандла собирается `cargo build`.
 - crates.io и registry.npmjs.org доступны **на этой машине**. В целевом контуре —
   нет, нужен vendor/mirror.
 - **rustls не проходит** к `mcp.context7.com` (таймаут 60 с), Schannel проходит.
   Поэтому `ureq` собран с `native-tls`.
-- opencode требует `@ai-sdk/openai-compatible`; при старте ставит его в
-  `<engine>\config\opencode\node_modules` (нужен npm).
+- opencode **не требует npm на старте**, если заданы офлайн-флаги: провайдер
+  `@ai-sdk/openai-compatible` и его зависимости встроены в бинарь. Проверено: чат через
+  vendored `opencode.exe` при мёртвом прокси и нулевых внешних соединениях.
+- Дистрибутив движка: `tools/vendor.ps1` → `vendor/engine` (`opencode.exe`,
+  `models.json`, `VERSION.txt`, `sha256.json`). Платформа передаёт
+  `OPENCODE_MODELS_PATH`, если `models.json` лежит рядом с бинарём; иначе модели
+  берутся встроенные, без похода на models.dev.
 - Шлюз инструментов — тот же `eco-platform.exe` с `--mcp-proxy <app> <workspace>`; у
   движка подменены `HOME`/`XDG_*`, поэтому рабочая папка и home передаются абсолютными
   (`canonicalize`, на Windows с префиксом `\\?\`).
@@ -280,7 +303,8 @@ eco-platform.exe --trust dev\keys\trusted.pub
 Подробный backlog с критериями приёмки — §11. Краткий порядок:
 
 1. ~~Скрипт сборки/подписи пакета~~ — сделано: `tools/package.ps1` (P1).
-2. Инсталлятор и вендоринг opencode/npm/WebView2 для закрытого контура (P2).
+2. Инсталлятор и вендоринг opencode/npm/WebView2 для закрытого контура (P2) —
+   частично: бандл и офлайн-движок готовы, нет Authenticode и проверки на чистой машине.
 3. Реестр версий, матрица совместимости и управляемый откат (P3).
 4. Идентичность агента и аудит вызовов LLM (Observability отложена) (P4).
 5. Таймауты/лимиты пакетных инструментов и изоляция процессов (P5).
@@ -334,13 +358,20 @@ eco-platform.exe --trust dev\keys\trusted.pub
   вернул `ok: true`, установка прошла; повторный прогон без изменений не меняет
   манифест; подмена хеша в копии пакета исправляется прогоном.
 
-### P2. Инсталлятор и вендоринг (блокер закрытого контура)
+### P2. Инсталлятор и вендоринг — сделано частично (2026-11-14)
 
-- `bundle.active: false`: нет per-machine установки, Authenticode, офлайн-WebView2.
-- opencode 1.19.5 (~211 МБ) и `@ai-sdk/openai-compatible` не вендорены: opencode
-  ставит провайдер через npm при первом старте.
-- **Приёмка:** установка на чистую машину без Python/Node/npm; запуск и чат работают
-  без сети; бинарь и провайдер лежат в поставке.
+- `bundle.active: true`: NSIS `perMachine`, WebView2 `offlineInstaller`, ресурс
+  `vendor/engine` → `engine/` рядом с `eco-platform.exe`.
+- `tools/vendor.ps1` собирает вендоренный движок (`opencode.exe`, `models.json`,
+  `VERSION.txt`, `sha256.json`); `vendor/` gitignored.
+- Рантайм без сети и npm: флаги `OPENCODE_DISABLE_MODELS_FETCH`,
+  `..._DEFAULT_PLUGINS`, `..._LSP_DOWNLOAD`, `OPENCODE_MODELS_PATH`. Провайдер
+  `@ai-sdk/openai-compatible` встроен в бинарь opencode.
+- Проверено: `--chat-async` с vendored бинарём и мёртвым прокси завершился успешно,
+  внешних соединений 0, `node_modules`/`package.json` в профиле не создаются.
+- Осталось: Authenticode-подпись установщика (нужен сертификат); офлайн-сборка
+  требует локальных NSIS/WiX и bootstrapper WebView2 (или `fixedRuntime`); CI, SBOM,
+  SAST/SCA; проверка установки на чистой машине.
 
 ### P3. Реестр версий и откат
 
@@ -394,4 +425,5 @@ eco-platform.exe --trust dev\keys\trusted.pub
 1. Прочитать §1–§8, запустить приложение по §2.
 2. Проверить `--list`, `--verify dev-apps/doc-writer`, `--chat-async doc-writer ...`.
 3. Пересобрать пакет через `powershell -File tools\package.ps1` (P1 сделано).
-4. Взять P2: инсталлятор и вендоринг для закрытого контура.
+4. Собрать дистрибутив: `powershell -File tools\vendor.ps1`, затем `cargo tauri build`
+   (P2 частично; см. §6 и §7).

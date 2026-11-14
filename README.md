@@ -57,8 +57,9 @@ sidecar, интерфейс — Tauri v2 + WebView2.
 
 ## Быстрый старт (dev)
 
-Требования: Windows 10/11, Rust/MSVC, Node.js (для opencode), WebView2.
-Python нужен только для пересборки `docx-export.exe`.
+Требования: Windows 10/11, Rust/MSVC, Node.js (чтобы поставить opencode в
+`tools/oc`), WebView2. Python нужен только для пересборки `docx-export.exe`.
+Собранному дистрибутиву Node/npm/Python не нужны.
 
 ```powershell
 $env:ECO_PLATFORM_HOME="D:\git\rust-ai-app\.data"   # профиль разработки
@@ -114,6 +115,26 @@ powershell -File tools\package.ps1 -SkipConverter   # только hashes/sign/v
 Ключ `-Wheelhouse <dir>` передаёт офлайн-зависимости в сборку конвертера, `-NoInstall`
 оставляет только сборку и проверку пакета. Для закрытого контура см.
 `tools/docx-export/README.md`.
+
+## Сборка дистрибутива
+
+```powershell
+powershell -File tools\vendor.ps1     # vendor/engine: opencode.exe + models.json + хеши
+cargo tauri build                     # NSIS per-machine, WebView2 offlineInstaller
+```
+
+Для `cargo tauri build` нужен Tauri CLI 2 (`cargo install tauri-cli --version "^2"`).
+
+- `bundle.active: true`; `vendor/engine` попадает в `engine/` рядом с
+  `eco-platform.exe` (ресурсы Tauri).
+- Движок не ходит в сеть и не требует npm: включены
+  `OPENCODE_DISABLE_MODELS_FETCH`/`..._DEFAULT_PLUGINS`/`..._LSP_DOWNLOAD`, а
+  провайдер `@ai-sdk/openai-compatible` встроен в бинарь opencode.
+- Порядок поиска движка: `ECO_OPENCODE_BIN` → `<home>/engine/opencode.exe` →
+  `engine/opencode.exe` рядом с платформой → `tools/oc` (dev).
+- Для полностью офлайн-сборки нужны локальные NSIS/WiX и bootstrapper WebView2;
+  вместо `offlineInstaller` можно указать `fixedRuntime` с папкой рантайма.
+- Authenticode-подпись установщика пока не настроена (нужен сертификат).
 
 ## Файловые инструменты
 
@@ -173,15 +194,19 @@ MCP (JSON/SSE), лимит ответа, endpoint.
 | `src/` | статический UI без npm-сборки |
 | `dev-apps/` | подписанные пакеты-примеры |
 | `tools/signer/` | genkey / sign / verify пакетов |
+| `tools/package.ps1` | сборка/подпись/установка пакета одной командой |
+| `tools/vendor.ps1` | вендоринг движка в `vendor/engine` |
 | `tools/docx-export/` | исходник конвертера и PyInstaller-сборка |
 | `tools/stub-llm/` | локальная заглушка OpenAI-совместимого API |
 | `HANDOFF.md` | состояние, ограничения и backlog для следующего агента |
 | `PLAN.md` | целевая архитектура и фазы |
 | `.data/` | рабочий профиль (gitignored) |
+| `vendor/` | артефакты дистрибутива (gitignored) |
 
 ## Ограничения
 
-- Нет инсталлятора и Authenticode; opencode и npm-провайдер не вендорены.
+- Нет Authenticode и проверки установки на чистой машине; вендоринг движка —
+  скриптом `tools/vendor.ps1`, артефакты не в git.
 - Нет песочницы процессов; пакетный exe работает с правами пользователя.
 - Нет идентичности агента и аудита вызовов LLM; Observability отложена.
 - Docs-подсистема в backend осталась мёртвым кодом после перехода на файловый сценарий.

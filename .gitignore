@@ -13,3 +13,4 @@ tools/docx-export/*.spec
 Thumbs.db
 .vscode/
 .idea/
+/vendor

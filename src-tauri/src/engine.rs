@@ -271,6 +271,15 @@ fn find_binary(home: &Path) -> Result<PathBuf> {
     if bundled.is_file() {
         return Ok(bundled);
     }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for candidate in [dir.join("engine").join("opencode.exe"), dir.join("opencode.exe")] {
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
     let dev = PathBuf::from("tools")
         .join("oc")
         .join("node_modules")
@@ -280,7 +289,7 @@ fn find_binary(home: &Path) -> Result<PathBuf> {
     if dev.is_file() {
         return Ok(dev);
     }
-    msg("opencode binary not found: set ECO_OPENCODE_BIN or place it in <home>/engine/opencode.exe")
+    msg("opencode binary not found: set ECO_OPENCODE_BIN, place it in <home>/engine/opencode.exe, or ship it in the install dir as engine/opencode.exe")
 }
 
 fn basic_auth(password: &str) -> String {
@@ -567,6 +576,10 @@ impl Engine {
         }
 
         let binary = find_binary(home)?;
+        let models = binary
+            .parent()
+            .map(|dir| dir.join("models.json"))
+            .filter(|path| path.is_file());
         let port = free_port()?;
         let base = format!("http://127.0.0.1:{port}");
         let password = format!(
@@ -589,9 +602,18 @@ impl Engine {
             .env("XDG_CACHE_HOME", engine_home.join("cache"))
             .env("OPENCODE_SERVER_PASSWORD", &password)
             .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
+            // Closed contour: the engine must not fetch models, npm plugins or
+            // LSP servers at runtime. The provider packages it needs are
+            // bundled in the opencode binary; models.json is vendored next to it.
+            .env("OPENCODE_DISABLE_MODELS_FETCH", "1")
+            .env("OPENCODE_DISABLE_DEFAULT_PLUGINS", "1")
+            .env("OPENCODE_DISABLE_LSP_DOWNLOAD", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if let Some(models) = &models {
+            command.env("OPENCODE_MODELS_PATH", models);
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
