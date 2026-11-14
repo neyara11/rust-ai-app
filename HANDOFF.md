@@ -37,7 +37,8 @@ cargo run --manifest-path src-tauri/Cargo.toml
 Перед первой установкой нужен trust anchor:
 
 ```powershell
-eco-platform.exe --trust dev\keys\trusted.pub
+eco-platform.exe --trust dev\keys\trusted.pub   # debug: dev-anchor в профиле
+eco-platform.exe --anchor                       # проверить source/fingerprint
 ```
 
 ## 3. Карта репозитория
@@ -75,7 +76,9 @@ eco-platform.exe --trust dev\keys\trusted.pub
   версия схемы. Любая проблема — отказ (fail-closed).
 - Установка из папки и zip (защита от zip-slip), удаление, компактный переключатель
   приложений в шапке.
-- Trust anchor отдельным файлом `trusted.pub`; в UI показывается его отпечаток.
+- Trust anchor: Machine-scope в `HKLM\SOFTWARE\EcoAIOps\TrustedPub` (пишет только
+  администратор), dev-fallback — `<home>\trusted.pub` только в debug-сборке или при
+  `ECO_PLATFORM_DEV=1`. В UI виден отпечаток и источник (`machine`/`dev`).
 - `min_shell_version` проверяется при установке и при каждом запуске (формат `x.y.z`,
   префикс `-suffix` игнорируется). Понижение версии запрещено; установка той же версии
   разрешена как обновление контента.
@@ -172,7 +175,7 @@ eco-platform.exe --trust dev\keys\trusted.pub
   `platform_write_file` и `platform_docx_export`; файлы появились в рабочей папке.
 
 ### CLI
-`--verify`, `--install`, `--list`, `--trust`, `--secret-add`, `--import-auth`,
+`--verify`, `--install`, `--list`, `--trust`, `--anchor`, `--secret-add`, `--import-auth`,
 `--mcp-probe`, `--mcp-call`, `--mcp-add`, `--mcp-call-app`,
 `--chat <app> <text> [low|medium|high]`, `--chat-async`, `--chat-sessions`.
 
@@ -216,6 +219,9 @@ eco-platform.exe --trust dev\keys\trusted.pub
 - Authenticode: self-signed `CN=ECO AIOps Dev`; `Get-AuthenticodeSignature` даёт
   `Valid` для `eco-platform.exe`, MSI и NSIS (сертификат добавлен в
   `CurrentUser\Root`/`TrustedPublisher`). В MSI-раскладке exe тоже подписан.
+- Доверие: release-сборка игнорирует `<home>\trusted.pub` (`--anchor` → `ok:false`),
+  `--trust` без прав администратора отклоняется, `ECO_PLATFORM_DEV=1` включает
+  dev-anchor; установка и отказ по хешам пишутся в `audit/<app>.jsonl`.
 
 ## 6. Что НЕ реализовано (важно)
 
@@ -313,7 +319,8 @@ eco-platform.exe --trust dev\keys\trusted.pub
 
 ## 8. Данные в dev-профиле (`.data`, gitignored)
 
-- `trusted.pub` — anchor, отпечаток `48efcf9d72861a68`.
+- `trusted.pub` — dev-anchor, отпечаток `48efcf9d72861a68`; действует только в
+  debug-сборке или при `ECO_PLATFORM_DEV=1`. Release-сборка его игнорирует.
 - `config.json` — endpoint `https://routerai.ru/api/v1`, модель
   `~deepseek/deepseek-v4-flash-latest`, `workspaces` (рабочие папки приложений).
 - `secrets/llm_api_key.bin` — ключ шлюза, импортирован из `auth.json` Kilo,
@@ -341,6 +348,8 @@ eco-platform.exe --trust dev\keys\trusted.pub
 6. Чистка мёртвой docs-подсистемы, `doc-lookup` и вкладки ручных MCP-вызовов (P6).
 7. Standalone `eco-pack` для авторов мини-приложений — офлайн-утилита без
    Rust/Node/Python на машине разработчика (P8).
+8. Ужесточение доверия (P9) — сделано: Machine-scope anchor, release игнорирует
+   пользовательский anchor, `--trust` только с elevation, аудит установок.
 
 ## 10. Известные баги/шероховатости
 
@@ -478,6 +487,19 @@ eco-platform.exe --trust dev\keys\trusted.pub
   `build` даёт zip, который ИБ подписывает без изменения содержимого; сам `eco-pack`
   подписан Authenticode и лежит в доверенном хранилище.
 
+### P9. Ужесточение доверия — сделано (2026-11-14)
+
+- Anchor в Machine-scope: `HKLM\SOFTWARE\EcoAIOps\TrustedPub` (hex ключа);
+  пользовательский `<home>\trusted.pub` — только dev-fallback.
+- Release-сборка игнорирует пользовательский anchor; `--trust` без elevation
+  возвращает ошибку и ничего не пишет.
+- dev-режим: debug-сборка или явный `ECO_PLATFORM_DEV=1`; `--anchor` показывает
+  `source` (`machine`/`dev`), отпечаток, `elevated`, `dev_mode`; UI показывает
+  источник anchor (dev — жёлтый бейдж).
+- Аудит: `action: install` (`ok:true/false`, `reason: verification|downgrade`) и
+  `action: open` при отказе в проверке пакета.
+- Осталось: подписанный allowlist/CRL, ротация ключей (несколько активных anchor).
+
 ### С чего начать
 
 1. Прочитать §1–§8, запустить приложение по §2.
@@ -486,5 +508,7 @@ eco-platform.exe --trust dev\keys\trusted.pub
 4. Собрать дистрибутив: `powershell -File tools\vendor.ps1`, затем
    `powershell -File tools\build-installer.ps1 -Trust` (P2 сделано с dev-подписью;
    для поставки — сертификат УЦ, см. §6 и §7).
-5. Для запуска разработки мини-приложений внешними авторами — P8 (`eco-pack`).
-6. Взять P4: идентичность агента и аудит вызовов LLM.
+5. Доверие: `eco-platform.exe --anchor`; для prod — установить anchor из-под
+   администратора (HKLM), для dev — debug-сборка или `ECO_PLATFORM_DEV=1`.
+6. Для запуска разработки мини-приложений внешними авторами — P8 (`eco-pack`).
+7. Взять P4: идентичность агента и аудит вызовов LLM.

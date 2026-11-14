@@ -13,6 +13,7 @@ fn main() {
         )),
         Some("--check") => std::process::exit(eco_platform_lib::cli_check(args.get(1))),
         Some("--trust") => std::process::exit(eco_platform_lib::cli_trust(args.get(1))),
+        Some("--anchor") => std::process::exit(eco_platform_lib::cli_anchor()),
         Some("--secret-add") => std::process::exit(eco_platform_lib::cli_secret_add(args.get(1), args.get(2))),
         Some("--import-auth") => std::process::exit(eco_platform_lib::cli_import_auth(args.get(1), args.get(2), args.get(3))),
         Some("--chat-sessions") => std::process::exit(eco_platform_lib::cli_chat_sessions(args.get(1))),

@@ -77,10 +77,15 @@ cargo run --manifest-path src-tauri/Cargo.toml
 
 ```powershell
 $exe = "src-tauri\target\debug\eco-platform.exe"
-& $exe --trust dev\keys\trusted.pub
+& $exe --trust dev\keys\trusted.pub   # debug/dev: пишет в профиль
 & $exe --install dev-apps\doc-writer
 & $exe --install dev-apps\doc-lookup
+& $exe --anchor                       # источник anchor и отпечаток
 ```
+
+Release-сборка принимает anchor только machine-wide:
+`HKLM\SOFTWARE\EcoAIOps\TrustedPub` (ставить из-под администратора; GPO/установщик).
+Пользовательский anchor действует только при `ECO_PLATFORM_DEV=1` или в debug-сборке.
 
 Движок ищется в `ECO_OPENCODE_BIN`, затем в `<home>\engine\opencode.exe`, затем в
 `tools\oc\node_modules\opencode-ai\bin\opencode.exe` (dev-путь).
@@ -176,7 +181,8 @@ cargo tauri build                     # NSIS per-machine, WebView2 offlineInstal
 --history <app>             сохранённые версии для отката
 --rollback <app> [version]  явный откат к сохранённой версии (в аудит)
 --list                      список установленных пакетов
---trust <trusted.pub>       установить trust anchor
+--trust <trusted.pub>       установить trust anchor (release: только с админом)
+--anchor                    источник, отпечаток и dev/elevated
 --secret-add <name> <v>     сохранить секрет в DPAPI
 --import-auth <name> <json> <provider>
 --mcp-probe <url>

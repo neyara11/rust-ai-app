@@ -21,6 +21,8 @@ pub struct PlatformInfo {
     pub schema: u32,
     pub trusted_anchor: bool,
     pub anchor_fingerprint: Option<String>,
+    pub anchor_source: Option<String>,
+    pub dev_mode: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,12 +61,15 @@ fn with_session<T>(
 
 #[tauri::command(rename_all = "snake_case")]
 pub fn platform_info(state: tauri::State<'_, AppState>) -> PlatformInfo {
+    let anchor = registry::trusted_anchor(&state.home);
     PlatformInfo {
         home: state.home.display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         schema: manifest::SUPPORTED_SCHEMA,
-        trusted_anchor: registry::load_trusted_key(&state.home).is_some(),
+        trusted_anchor: anchor.is_some(),
         anchor_fingerprint: registry::anchor_fingerprint(&state.home),
+        anchor_source: anchor.map(|(_, source)| source.as_str().to_string()),
+        dev_mode: registry::dev_mode(),
     }
 }
 

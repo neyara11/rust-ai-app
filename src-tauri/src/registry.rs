@@ -58,11 +58,202 @@ pub fn trusted_pub_path(home: &Path) -> PathBuf {
     home.join("trusted.pub")
 }
 
+/// Machine-wide anchor lives in HKLM: only administrators can write it, unlike
+/// a ProgramData file that a regular user could create in some configurations.
+pub const MACHINE_ANCHOR_LABEL: &str = "HKLM\\SOFTWARE\\EcoAIOps\\TrustedPub";
+
+/// Development mode allows a per-user anchor fallback. A release build is
+/// production-only unless `ECO_PLATFORM_DEV=1` is set explicitly.
+pub fn dev_mode() -> bool {
+    cfg!(debug_assertions)
+        || std::env::var("ECO_PLATFORM_DEV")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
+/// Where the trusted signing key comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorSource {
+    Machine,
+    Dev,
+}
+
+impl AnchorSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AnchorSource::Machine => "machine",
+            AnchorSource::Dev => "dev",
+        }
+    }
+}
+
+#[cfg(windows)]
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn machine_anchor_bytes() -> Option<[u8; 32]> {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ,
+    };
+
+    let sub = wide("SOFTWARE\\EcoAIOps");
+    let name = wide("TrustedPub");
+    unsafe {
+        let mut key: HKEY = std::ptr::null_mut();
+        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, sub.as_ptr(), 0, KEY_READ, &mut key) != 0 {
+            return None;
+        }
+        let mut kind: u32 = 0;
+        let mut len: u32 = 0;
+        if RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            std::ptr::null_mut(),
+            &mut len,
+        ) != 0
+            || kind != REG_SZ
+            || len == 0
+            || len > 256
+        {
+            RegCloseKey(key);
+            return None;
+        }
+        let mut buf = vec![0u8; len as usize];
+        if RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            buf.as_mut_ptr(),
+            &mut len,
+        ) != 0
+        {
+            RegCloseKey(key);
+            return None;
+        }
+        RegCloseKey(key);
+        let raw = String::from_utf8_lossy(&buf);
+        let bytes = hex::decode(raw.trim().trim_end_matches('\0')).ok()?;
+        bytes.try_into().ok()
+    }
+}
+
+#[cfg(not(windows))]
+fn machine_anchor_bytes() -> Option<[u8; 32]> {
+    None
+}
+
+#[cfg(windows)]
+fn write_machine_anchor(hex_key: &str) -> Result<()> {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE,
+        REG_OPTION_NON_VOLATILE, REG_SZ,
+    };
+
+    let sub = wide("SOFTWARE\\EcoAIOps");
+    let name = wide("TrustedPub");
+    let mut data: Vec<u8> = hex_key.as_bytes().to_vec();
+    data.push(0);
+    unsafe {
+        let mut key: HKEY = std::ptr::null_mut();
+        let mut disposition: u32 = 0;
+        let rc = RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            sub.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            std::ptr::null(),
+            &mut key,
+            &mut disposition,
+        );
+        if rc != 0 {
+            return msg(format!("cannot open HKLM\\SOFTWARE\\EcoAIOps (error {rc})"));
+        }
+        let rc = RegSetValueExW(
+            key,
+            name.as_ptr(),
+            0,
+            REG_SZ,
+            data.as_ptr(),
+            data.len() as u32,
+        );
+        RegCloseKey(key);
+        if rc != 0 {
+            return msg(format!("cannot write machine trust anchor (error {rc})"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn write_machine_anchor(_hex_key: &str) -> Result<()> {
+    msg("machine trust anchor is only supported on Windows")
+}
+
+/// Resolves the anchor and its bytes. Machine scope wins; the per-user anchor
+/// is a dev fallback only.
+fn resolve_anchor(home: &Path) -> Option<(String, AnchorSource, [u8; 32])> {
+    if !cfg!(test) {
+        if let Some(bytes) = machine_anchor_bytes() {
+            return Some((MACHINE_ANCHOR_LABEL.to_string(), AnchorSource::Machine, bytes));
+        }
+    }
+    if dev_mode() {
+        let path = trusted_pub_path(home);
+        if path.is_file() {
+            let raw = fs::read_to_string(&path).ok()?;
+            let bytes: [u8; 32] = hex::decode(raw.trim()).ok()?.try_into().ok()?;
+            return Some((path.display().to_string(), AnchorSource::Dev, bytes));
+        }
+    }
+    None
+}
+
+pub fn trusted_anchor(home: &Path) -> Option<(String, AnchorSource)> {
+    resolve_anchor(home).map(|(label, source, _)| (label, source))
+}
+
 pub fn load_trusted_key(home: &Path) -> Option<VerifyingKey> {
-    let raw = fs::read_to_string(trusted_pub_path(home)).ok()?;
-    let bytes = hex::decode(raw.trim()).ok()?;
-    let arr: [u8; 32] = bytes.try_into().ok()?;
-    VerifyingKey::from_bytes(&arr).ok()
+    let (_, _, bytes) = resolve_anchor(home)?;
+    VerifyingKey::from_bytes(&bytes).ok()
+}
+
+#[cfg(windows)]
+pub fn is_elevated() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        let mut elevation: TOKEN_ELEVATION = std::mem::zeroed();
+        let mut len: u32 = 0;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut elevation as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        );
+        CloseHandle(token);
+        ok != 0 && elevation.TokenIsElevated != 0
+    }
+}
+
+#[cfg(not(windows))]
+pub fn is_elevated() -> bool {
+    false
 }
 
 fn installed(
@@ -323,6 +514,19 @@ pub fn verified_manifest(home: &Path, app_id: &str) -> Result<Manifest> {
     let trusted = load_trusted_key(home);
     let report = manifest::verify_package(&path, trusted.as_ref());
     if !report.ok {
+        crate::commands::audit(
+            home,
+            app_id,
+            serde_json::json!({
+                "ts": now_secs(),
+                "source": "user",
+                "action": "open",
+                "app_id": app_id,
+                "ok": false,
+                "reason": "verification",
+                "problems": report.problems
+            }),
+        );
         return msg(format!(
             "app {app_id} failed verification: {}",
             report.problems.join("; ")
@@ -366,6 +570,20 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
     let trusted = load_trusted_key(home);
     let report = manifest::verify_package(&staging, trusted.as_ref());
     if !report.ok {
+        crate::commands::audit(
+            home,
+            &manifest.app_id,
+            serde_json::json!({
+                "ts": now_secs(),
+                "source": "user",
+                "action": "install",
+                "app_id": manifest.app_id,
+                "version": manifest.version,
+                "ok": false,
+                "reason": "verification",
+                "problems": report.problems
+            }),
+        );
         let _ = fs::remove_dir_all(&staging);
         return msg(format!(
             "package rejected (fail-closed): {}",
@@ -377,6 +595,20 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
     if dest.exists() {
         if let Ok(existing) = manifest::load(&dest) {
             if let Err(e) = manifest::ensure_not_downgrade(&existing.version, &manifest.version) {
+                crate::commands::audit(
+                    home,
+                    &manifest.app_id,
+                    serde_json::json!({
+                        "ts": now_secs(),
+                        "source": "user",
+                        "action": "install",
+                        "app_id": manifest.app_id,
+                        "version": manifest.version,
+                        "installed": existing.version,
+                        "ok": false,
+                        "reason": "downgrade"
+                    }),
+                );
                 let _ = fs::remove_dir_all(&staging);
                 return Err(e);
             }
@@ -392,6 +624,18 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
     fs::create_dir_all(apps_dir(home))?;
     fs::rename(&staging, &dest)?;
 
+    crate::commands::audit(
+        home,
+        &manifest.app_id,
+        serde_json::json!({
+            "ts": now_secs(),
+            "source": "user",
+            "action": "install",
+            "app_id": manifest.app_id,
+            "version": manifest.version,
+            "ok": true
+        }),
+    );
     Ok(installed(home, &dest, &manifest, &report))
 }
 
@@ -450,17 +694,51 @@ pub fn extract_zip_public(src: &Path, dest: &Path) -> Result<()> {
 
 /// Installs the trust anchor (public signing key) into the platform home.
 /// In production this is done by the installer under an admin account.
-pub fn install_trust_anchor(home: &std::path::Path, src: &std::path::Path) -> Result<String> {
+#[derive(Debug, Clone, Serialize)]
+pub struct TrustAnchorInstalled {
+    pub fingerprint: String,
+    pub path: String,
+    pub source: String,
+    pub public_key: String,
+}
+
+/// Installs the trust anchor. Machine-wide when elevated; in a release build
+/// without elevation this fails, so a user cannot pin their own signing key.
+pub fn install_trust_anchor(home: &std::path::Path, src: &std::path::Path) -> Result<TrustAnchorInstalled> {
     let raw = fs::read_to_string(src)?;
     let bytes = hex::decode(raw.trim())?;
     let arr: [u8; 32] = bytes
         .try_into()
         .map_err(|_| Error::Msg("public key must be 32 bytes".to_string()))?;
-    VerifyingKey::from_bytes(&arr)
+    let key = VerifyingKey::from_bytes(&arr)
         .map_err(|e| Error::Msg(format!("invalid public key: {e}")))?;
-    fs::create_dir_all(home)?;
-    fs::write(trusted_pub_path(home), hex::encode(arr))?;
-    Ok(hex::encode(arr))
+
+    let (dest, source) = if is_elevated() && !cfg!(test) {
+        (MACHINE_ANCHOR_LABEL.to_string(), AnchorSource::Machine)
+    } else if dev_mode() {
+        (
+            trusted_pub_path(home).display().to_string(),
+            AnchorSource::Dev,
+        )
+    } else {
+        return msg("administrator rights are required: the trust anchor must be installed machine-wide");
+    };
+
+    let hex_key = hex::encode(arr);
+    if source == AnchorSource::Machine {
+        write_machine_anchor(&hex_key)?;
+    } else {
+        fs::create_dir_all(home)?;
+        fs::write(trusted_pub_path(home), &hex_key)?;
+    }
+
+    let digest = manifest::sha256_hex(&key.to_bytes());
+    Ok(TrustAnchorInstalled {
+        fingerprint: digest[..16].to_string(),
+        path: dest,
+        source: source.as_str().to_string(),
+        public_key: hex_key,
+    })
 }
 
 /// Short fingerprint of the installed trust anchor, so a human can compare it
@@ -551,6 +829,27 @@ mod tests {
         let audit = fs::read_to_string(home.join("audit").join("demo.jsonl")).unwrap();
         assert!(audit.contains("\"action\":\"rollback\""), "{audit}");
         assert!(audit.contains("\"source\":\"admin\""), "{audit}");
+        assert!(audit.contains("\"action\":\"install\""), "{audit}");
+        assert!(audit.contains("\"reason\":\"downgrade\""), "{audit}");
+        assert!(audit.contains("\"ok\":true"), "{audit}");
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn trust_anchor_installs_into_the_dev_profile_in_tests() {
+        let home = std::env::temp_dir().join(format!("eco-registry-anchor-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+
+        let key = SigningKey::from_bytes(&[13u8; 32]);
+        let pub_path = home.join("pub.txt");
+        fs::write(&pub_path, hex::encode(key.verifying_key().to_bytes())).unwrap();
+
+        let info = install_trust_anchor(&home, &pub_path).unwrap();
+        assert_eq!(info.source, "dev");
+        assert!(Path::new(&info.path).is_file());
+        assert!(load_trusted_key(&home).is_some());
 
         let _ = fs::remove_dir_all(home);
     }

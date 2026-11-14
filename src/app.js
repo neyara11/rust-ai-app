@@ -147,6 +147,8 @@ const browserMock = (() => {
           schema: 2,
           trusted_anchor: true,
           anchor_fingerprint: "48efcf9d72861a68",
+          anchor_source: "dev",
+          dev_mode: true,
         };
       case "list_apps":
         return mockApps;
@@ -1456,10 +1458,11 @@ async function init() {
     $("home").textContent = info.home;
     $("version").textContent = `v${info.version} · schema ${info.schema}`;
     const trust = $("trust");
+    const anchorSource = info.anchor_source === "machine" ? "machine" : info.anchor_source === "dev" ? "dev" : null;
     trust.textContent = info.trusted_anchor
-      ? "trust anchor: " + (info.anchor_fingerprint || "установлен")
+      ? `trust anchor: ${info.anchor_fingerprint || "установлен"}${anchorSource ? ` (${anchorSource})` : ""}`
       : "trust anchor: НЕТ";
-    trust.className = "badge " + (info.trusted_anchor ? "ok" : "bad");
+    trust.className = "badge " + (info.trusted_anchor ? (anchorSource === "dev" ? "warn" : "ok") : "bad");
     await loadConfig();
     await refreshLlmKeyStatus();
     await refreshApps();

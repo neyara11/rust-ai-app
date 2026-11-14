@@ -444,6 +444,7 @@ pub fn cli_mcp_call_app(
 }
 
 /// `--trust <trusted.pub>`: installs the package signing trust anchor.
+/// Machine-wide with elevation; a release build refuses without admin rights.
 pub fn cli_trust(arg: Option<&String>) -> i32 {
     let Some(path) = arg else {
         eprintln!("usage: eco-platform --trust <trusted.pub>");
@@ -451,11 +452,13 @@ pub fn cli_trust(arg: Option<&String>) -> i32 {
     };
     let home = registry::home();
     match registry::install_trust_anchor(&home, &std::path::PathBuf::from(path)) {
-        Ok(key) => {
-            println!("trust anchor installed in {}", home.display());
-            println!("public key: {key}");
-            if let Some(fp) = registry::anchor_fingerprint(&home) {
-                println!("fingerprint: {fp}");
+        Ok(info) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&info).unwrap_or_default()
+            );
+            if info.source == "dev" {
+                eprintln!("warning: dev anchor in the user profile; release builds ignore it");
             }
             0
         }
@@ -463,6 +466,33 @@ pub fn cli_trust(arg: Option<&String>) -> i32 {
             println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
             1
         }
+    }
+}
+
+/// `--anchor`: shows which trust anchor the platform would use.
+pub fn cli_anchor() -> i32 {
+    let home = registry::home();
+    let out = match registry::trusted_anchor(&home) {
+        Some((path, source)) => serde_json::json!({
+            "ok": true,
+            "path": path,
+            "source": source.as_str(),
+            "fingerprint": registry::anchor_fingerprint(&home),
+            "dev_mode": registry::dev_mode(),
+            "elevated": registry::is_elevated()
+        }),
+        None => serde_json::json!({
+            "ok": false,
+            "source": "none",
+            "dev_mode": registry::dev_mode(),
+            "elevated": registry::is_elevated()
+        }),
+    };
+    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+    if out["ok"].as_bool().unwrap_or(false) {
+        0
+    } else {
+        1
     }
 }
 

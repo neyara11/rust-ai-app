@@ -265,8 +265,10 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 1. Подписанный архив и `manifest.sig` публикуются в доверенном хранилище
    (внутренний файловый сервер/репозиторий), публикуется sha256 архива.
 2. На машинах один раз ставится платформа (NSIS per-machine, WebView2 offline).
-3. Trust anchor ИБ раскатывается **в Machine-scope** (GPO/установщик), не в
-   пользовательский профиль.
+3. Trust anchor ИБ раскатывается **в Machine-scope** (HKLM
+   `SOFTWARE\EcoAIOps\TrustedPub`, GPO/установщик), не в пользовательский профиль.
+   Пользовательский anchor действует только в dev-режиме (`debug`-сборка или
+   `ECO_PLATFORM_DEV=1`); release-сборка его игнорирует.
 4. Пользователь ставит пакет из хранилища; платформа проверяет подпись и хеши.
 5. Обновление: новая подписанная версия; платформа архивирует предыдущую,
    `--rollback` — только явным действием администратора (пишется в аудит).
@@ -302,11 +304,12 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 
 - Prod-ключ только в HSM/офлайн; в дистрибутив и на машины пользователей
   `signer` и приватные ключи не попадают.
-- Release-сборка платформы должна доверять **только Machine-scope anchor** и
-  отклонять `--trust` без elevation. **Сейчас:** `--trust` доступен обычному
-  пользователю и пишет в его профиль — это главный пробел.
-- dev-режим — только debug/явный флаг профиля, с бейджем «dev-подпись» в UI;
-  dev-anchor не должен действовать в prod.
+- Release-сборка доверяет **только Machine-scope anchor** (`HKLM\SOFTWARE\EcoAIOps\
+  TrustedPub`) и отклоняет `--trust` без elevation. Пользовательский anchor
+  (`<home>\trusted.pub`) используется только в dev-режиме. Проверка:
+  `eco-platform --anchor` показывает `source` и `fingerprint`.
+- dev-режим — `debug`-сборка или явный `ECO_PLATFORM_DEV=1`; в UI источник anchor
+  виден (`machine`/`dev`), dev-anchor не действует в prod.
 - Опционально allowlist: подписанный ИБ файл в `%ProgramData%\EcoAIOps\`;
   платформа проверяет его подпись и разрешает только перечисленные `app_id`/
   версии. Обновление allowlist не требует обновления платформы.
@@ -329,9 +332,13 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 Работает:
 
 - подпись/проверка Ed25519, хеши, fail-closed, проверка при каждом запуске;
+- Machine-scope anchor в `HKLM\SOFTWARE\EcoAIOps\TrustedPub`; release-сборка
+  игнорирует пользовательский anchor, `--trust` без прав администратора отклоняется,
+  `--anchor` показывает источник и отпечаток;
 - `tools/package.ps1` (hashes → sign → verify → install) с параметрами ключей;
 - dev-ключи, отдельные профили, `--verify`, `--list`, `--check`, `--history`,
   `--rollback`, `--chat-async`;
+- аудит установок и отказов по подписи в `audit/<app>.jsonl`;
 - вендоринг движка и офлайн-запуск;
 - подпись установщиков self-signed сертификатом (dev).
 
@@ -339,13 +346,10 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 
 - standalone-утилиты `eco-pack` для авторов мини-приложений (сейчас упаковка
   требует репозитория платформы и Rust-окружения);
-- trust anchor в Machine-scope и запрет пользовательского `--trust` в release;
 - разделение `prepare`/`sign` в инструментах подписи;
 - allowlist и отзыв (CRL) как подписанные файлы;
 - провенанс/CI/SBOM и подпись артефакта из CI;
 - ротация ключей и несколько активных anchor;
-- аудит установок и отказов по подписи (сейчас аудитится откат и вызовы
-  инструментов);
 - production-сертификат Authenticode (сейчас dev self-signed).
 
 ## 11. Шпаргалка
@@ -380,6 +384,9 @@ powershell -File tools\package.ps1 -PackageDir C:\sign\<app> `
 
 ```powershell
 # установка платформы (per-machine) и anchor — через установщик/GPO
+# anchor: HKLM\SOFTWARE\EcoAIOps\TrustedPub (или `--trust` из-под администратора)
+eco-platform.exe --trust C:\keys\prod.pub   # elevated
+eco-platform.exe --anchor                   # source=machine, fingerprint
 # пакеты — из доверенного хранилища; проверка:
 eco-platform.exe --verify <package-dir>
 eco-platform.exe --install <package-dir>
