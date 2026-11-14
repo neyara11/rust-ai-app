@@ -99,6 +99,7 @@ const browserMock = (() => {
   let activeSession = { "doc-writer": "ses-301", "doc-lookup": "ses-201" };
   let secrets = ["llm_api_key"];
   let mcpServers = ["context7"];
+  let packManifest = false;
   let config = {
     llm_endpoint: "https://routerai.ru/api/v1",
     llm_model: "~deepseek/deepseek-v4-flash-latest",
@@ -212,6 +213,78 @@ const browserMock = (() => {
         return { dir: "D:\\exports", files: args.session ? 1 : 2, bytes: args.session ? 14486 : 6305942 };
       case "cleanup_artifacts":
         return { removed: 1, bytes_freed: 6291456 };
+      case "pack_tool_info":
+        return {
+          available: true,
+          path: "D:\\git\\rust-ai-app\\vendor\\pack\\eco-pack.exe",
+          version: "eco-pack 0.1.0",
+          default_key: "D:\\git\\rust-ai-app\\.data\\dev\\keys\\dev.key",
+        };
+      case "pack_files":
+        return [
+          { path: "manifest.json", bytes: 640 },
+          { path: "prompt/system.md", bytes: 220 },
+          { path: "skills/main/SKILL.md", bytes: 180 },
+        ];
+      case "pack_scan":
+        return {
+          has_manifest: packManifest,
+          prompt: packManifest ? "prompt/system.md" : null,
+          agents_md: true,
+          root_skill: true,
+          skills: [],
+          bins: [],
+          mcp: [{ id: "context7", source: ".mcp.json" }],
+          env_files: [],
+        };
+      case "pack_import":
+        packManifest = true;
+        return {
+          ok: true,
+          output: "AGENTS.md -> prompt/system.md\nSKILL.md -> skills/main/SKILL.md\nmanifest.json created",
+        };
+      case "pack_apply_template":
+        return {
+          ok: true,
+          output: `file_scopes: ${args.template === "files" ? "workspace" : "none"}\nmanifest updated; rebuild and re-sign the package`,
+        };
+      case "pack_set_mcp":
+        return {
+          ok: true,
+          output: `MCP '${args.id}': http-mcp, запись ${args.write ? "разрешена" : "выключена"}\nURL и токен задаются в Настройках`,
+        };
+      case "pack_read_text":
+        if (args.path === "manifest.json") {
+          return JSON.stringify(
+            {
+              schema_version: 2,
+              app_id: "demo-app",
+              name: "Demo App",
+              version: "0.1.0",
+              connections: [
+                { id: "llm", type: "llm", required: true },
+                { id: "context7", type: "http-mcp", required: false },
+              ],
+              capabilities: { file_scopes: ["workspace"], external_writes: [] },
+            },
+            null,
+            2
+          );
+        }
+        return `# ${args.path}\n\nMock file content.\n`;
+      case "pack_write_text":
+      case "pack_pick_folder":
+        return args.title && args.title.includes("ключ") ? "D:\\keys\\me" : "D:\\apps\\demo-app";
+      case "pack_init":
+        packManifest = true;
+        return { ok: true, output: "created package skeleton" };
+      case "pack_validate":
+      case "pack_build":
+      case "pack_sign":
+      case "pack_keygen":
+        return { ok: true, output: `eco-pack ${args.__cmd || "ok"}` };
+      case "install_app":
+        return { app_id: args.path ? "demo-app" : "unknown", name: "Demo App", version: "0.1.0" };
       case "chat_open":
         return {
           model: config.llm_model,
@@ -1448,6 +1521,319 @@ async function cleanupArtifacts() {
   });
 }
 
+/* ---------- package wizard ---------- */
+
+async function refreshPackTool() {
+  const info = await invoke("pack_tool_info");
+  ctx.packInfo = info;
+  const badge = $("pack-status");
+  if (info.available) {
+    badge.textContent = info.version || "eco-pack готов";
+    badge.className = "badge mono ok";
+    badge.title = info.path || "";
+  } else {
+    badge.textContent = "eco-pack: не найден";
+    badge.className = "badge mono bad";
+    badge.title = "Соберите tools\\build-pack.ps1 или задайте ECO_PACK_BIN";
+  }
+  if (info.default_key && !$("pack-key").value) {
+    $("pack-key").value = info.default_key;
+  }
+}
+
+function packLog(text, ok) {
+  const box = $("pack-log");
+  box.hidden = false;
+  box.textContent = text || "";
+  box.className = "pack-log" + (ok === false ? " error" : "");
+}
+
+function packDirValue() {
+  return ($("pack-dir").value || ctx.packDir || "").trim();
+}
+
+function renderPackFiles() {
+  const box = $("pack-files");
+  box.innerHTML = "";
+  if (!(ctx.packFiles || []).length) {
+    box.innerHTML = '<span class="muted small">файлов нет; создайте каркас</span>';
+    return;
+  }
+  for (const file of ctx.packFiles) {
+    const row = document.createElement("div");
+    row.className = "pack-file" + (file.path === ctx.packFile ? " active" : "");
+    row.dataset.packFile = file.path;
+    row.innerHTML = `<span>${esc(file.path)}</span><span class="muted small">${file.bytes} Б</span>`;
+    box.appendChild(row);
+  }
+}
+
+async function renderPackMcp() {
+  const box = $("pack-mcp");
+  if (!box) return;
+  box.innerHTML = "";
+  const manifest = ctx.packManifest;
+  if (!manifest) {
+    box.innerHTML = '<span class="muted small">сначала загрузите или создайте манифест</span>';
+    return;
+  }
+  let servers = [];
+  try {
+    servers = await invoke("mcp_servers");
+  } catch (_) {
+    servers = [];
+  }
+  const connections = (manifest.connections || []).filter(
+    (connection) => connection.type === "http-mcp"
+  );
+  const writes = (manifest.capabilities && manifest.capabilities.external_writes) || [];
+  if (!connections.length) {
+    box.innerHTML =
+      '<span class="muted small">MCP не объявлены; endpoint и токен задаются в Настройках</span>';
+    return;
+  }
+  for (const connection of connections) {
+    const known = servers.includes(connection.id);
+    const row = document.createElement("div");
+    row.className = "pack-file";
+    row.innerHTML = `
+      <span>${esc(connection.id)}</span>
+      <span class="badge ${known ? "ok" : "warn"}">${known ? "сервер настроен" : "нет в настройках"}</span>
+      <label class="check-row"><input type="checkbox" data-mcp-write="${esc(connection.id)}" ${writes.includes(connection.id) ? "checked" : ""}/><span>запись</span></label>`;
+    box.appendChild(row);
+  }
+}
+
+async function addPackMcp() {
+  const dir = packDirValue();
+  const id = $("pack-mcp-id").value.trim();
+  if (!dir) return toast("Укажите папку пакета", true);
+  if (!id) return toast("Укажите id MCP-подключения", true);
+  await guard(async () => {
+    const result = await invoke("pack_set_mcp", {
+      dir,
+      id,
+      write: $("pack-mcp-write").checked,
+    });
+    if (!result.ok) {
+      packLog(result.output, false);
+      return toast("Не удалось добавить MCP", true);
+    }
+    $("pack-mcp-id").value = "";
+    $("pack-mcp-write").checked = false;
+    await loadPack();
+    packLog(result.output, true);
+    toast("MCP-подключение добавлено");
+  });
+}
+
+async function selectPackFile(path, silent) {
+  const dir = packDirValue();
+  if (!dir) return;
+  await guard(async () => {
+    const text = await invoke("pack_read_text", { dir, path });
+    ctx.packFile = path;
+    $("pack-editor").value = text;
+    $("pack-editor-path").textContent = path;
+    renderPackFiles();
+    if (!silent) packLog(`Открыт ${path}`, true);
+  });
+}
+
+async function loadPack() {
+  const dir = packDirValue();
+  if (!dir) return toast("Укажите папку пакета", true);
+  await guard(async () => {
+    const [files, scan] = await Promise.all([
+      invoke("pack_files", { dir }),
+      invoke("pack_scan", { dir }),
+    ]);
+    ctx.packDir = dir;
+    ctx.packFiles = files;
+    ctx.packScan = scan;
+    renderPackFiles();
+
+    const folder = dir.split(/[\\/]/).filter(Boolean).pop() || "";
+    const slug = folder
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    if (slug && !$("pack-app-id").value) $("pack-app-id").value = slug;
+    if (folder && !$("pack-name").value) $("pack-name").value = folder;
+
+    if (files.some((file) => file.path === "manifest.json")) {
+      await selectPackFile("manifest.json", true);
+      try {
+        const manifest = JSON.parse($("pack-editor").value);
+        ctx.packManifest = manifest;
+        if (manifest.app_id) $("pack-app-id").value = manifest.app_id;
+        if (manifest.name) $("pack-name").value = manifest.name;
+      } catch (_) {
+        ctx.packManifest = null;
+      }
+    } else {
+      ctx.packFile = null;
+      ctx.packManifest = null;
+      $("pack-editor").value = "";
+      $("pack-editor-path").textContent = "";
+    }
+    await renderPackMcp();
+
+    const parts = [
+      `AGENTS.md: ${scan.agents_md ? "найден" : "нет"}`,
+      `навыков: ${scan.skills.length}${scan.root_skill ? " + корневой SKILL.md" : ""}`,
+      `bin: ${scan.bins.length}`,
+      `MCP: ${scan.mcp.length}`,
+      `секреты (.env): ${scan.env_files.length}`,
+      `manifest.json: ${scan.has_manifest ? "есть" : "нет"}`,
+    ];
+    if (!scan.has_manifest) {
+      parts.push(
+        "Манифеста нет. Проверьте app_id/название и нажмите «Создать манифест из исходников»."
+      );
+    }
+    packLog(parts.join("\n"), scan.has_manifest);
+  });
+}
+
+async function importPack() {
+  const dir = packDirValue();
+  const appId = $("pack-app-id").value.trim();
+  if (!dir) return toast("Укажите папку пакета", true);
+  if (!appId) return toast("Укажите app_id", true);
+  await guard(async () => {
+    const result = await invoke("pack_import", {
+      dir,
+      app_id: appId,
+      name: $("pack-name").value.trim() || appId,
+      template: $("pack-template").value,
+    });
+    packLog(result.output, result.ok);
+    if (!result.ok) return toast("Не удалось создать манифест", true);
+    await loadPack();
+    packLog(
+      `${result.output}\n\nСледующий шаг — «Собрать zip»: он пересчитает hashes и создаст архив.`,
+      true
+    );
+    toast("Манифест создан");
+  });
+}
+
+async function pickPackFolder() {
+  await guard(async () => {
+    const dir = await invoke("pack_pick_folder", { title: "Папка мини-приложения" });
+    if (!dir) return;
+    $("pack-dir").value = dir;
+    await loadPack();
+  });
+}
+
+async function initPack() {
+  const dir = packDirValue();
+  const appId = $("pack-app-id").value.trim();
+  if (!dir || !appId) return toast("Папка и app_id обязательны", true);
+  await guard(async () => {
+    const result = await invoke("pack_init", {
+      dir,
+      app_id: appId,
+      name: $("pack-name").value.trim() || appId,
+      template: $("pack-template").value,
+    });
+    packLog(result.output, result.ok);
+    if (!result.ok) return toast("eco-pack init завершился с ошибкой", true);
+    await loadPack();
+    toast("Каркас создан");
+  });
+}
+
+async function runPackAction(action) {
+  const dir = packDirValue();
+  if (!dir) return toast("Укажите папку пакета", true);
+  const args = { dir };
+  if (action === "sign") {
+    args.key = $("pack-key").value.trim();
+    if (!args.key) return toast("Укажите dev-ключ", true);
+  }
+  await guard(async () => {
+    const result = await invoke(`pack_${action}`, args);
+    packLog(result.output, result.ok);
+    if (result.ok) {
+      toast(action === "build" ? "Архив собран. Следующий шаг — «Подписать»" : "Готово");
+      return;
+    }
+    if (action === "validate" && /not covered by hashes/i.test(result.output)) {
+      toast("Сначала «Собрать zip»: он пересчитает hashes", true);
+      return;
+    }
+    toast("eco-pack вернул ошибку", true);
+  });
+}
+
+async function savePackFile() {
+  const dir = packDirValue();
+  const path = ctx.packFile;
+  if (!dir || !path) return toast("Файл не выбран", true);
+  await guard(async () => {
+    await invoke("pack_write_text", { dir, path, text: $("pack-editor").value });
+    packLog(`Сохранён ${path}`, true);
+    ctx.packFiles = await invoke("pack_files", { dir });
+    renderPackFiles();
+  });
+}
+
+async function createPackFile() {
+  const dir = packDirValue();
+  const path = $("pack-new-file").value.trim();
+  if (!dir) return toast("Укажите папку пакета", true);
+  if (!path) return toast("Укажите путь файла", true);
+  await guard(async () => {
+    await invoke("pack_write_text", { dir, path, text: "" });
+    $("pack-new-file").value = "";
+    ctx.packFiles = await invoke("pack_files", { dir });
+    await selectPackFile(path, true);
+    packLog(`Создан ${path}`, true);
+  });
+}
+
+async function keygenPack() {
+  await guard(async () => {
+    const out = await invoke("pack_pick_folder", { title: "Папка для dev-ключа" });
+    if (!out) return;
+    const result = await invoke("pack_keygen", { out_dir: out });
+    packLog(result.output, result.ok);
+    if (!result.ok) return toast("Не удалось создать ключ", true);
+    $("pack-key").value = `${out.replace(/[\\/]+$/, "")}\\dev.key`;
+    toast("Dev-ключ создан");
+  });
+}
+
+async function installPack() {
+  const dir = packDirValue();
+  if (!dir) return toast("Укажите папку пакета", true);
+  await guard(async () => {
+    const app = await invoke("install_app", { path: dir });
+    toast(`Установлено: ${app.name} ${app.version}`);
+    await refreshApps();
+  });
+}
+
+async function applyPackTemplate() {
+  const dir = packDirValue();
+  const template = $("pack-template").value;
+  if (!dir) return toast("Укажите папку пакета", true);
+  await guard(async () => {
+    const result = await invoke("pack_apply_template", { dir, template });
+    packLog(result.output, result.ok);
+    if (!result.ok) return toast("Не удалось применить шаблон", true);
+    await loadPack();
+    packLog(
+      `${result.output}\n\nПересоберите zip и подпишите пакет заново, затем установите.`,
+      true
+    );
+    toast("Шаблон применён");
+  });
+}
+
 /* ---------- settings & secrets ---------- */
 
 const EFFORT_LABELS = {
@@ -1619,6 +2005,7 @@ function bind() {
         .querySelectorAll(".tab-body")
         .forEach((b) => b.classList.toggle("active", b.id === `tab-${tab.dataset.tab}`));
       if (tab.dataset.tab === "settings") guard(refreshArtifacts);
+      if (tab.dataset.tab === "dev") guard(refreshPackTool);
     });
   });
 
@@ -1650,6 +2037,38 @@ function bind() {
   $("ws-folder-pick").addEventListener("click", pickWorkspace);
 
   $("settings-save").addEventListener("click", saveConfig);
+  $("pack-pick").addEventListener("click", pickPackFolder);
+  $("pack-load").addEventListener("click", loadPack);
+  $("pack-import").addEventListener("click", importPack);
+  $("pack-apply-template").addEventListener("click", applyPackTemplate);
+  $("pack-init").addEventListener("click", initPack);
+  $("pack-validate").addEventListener("click", () => runPackAction("validate"));
+  $("pack-build").addEventListener("click", () => runPackAction("build"));
+  $("pack-sign").addEventListener("click", () => runPackAction("sign"));
+  $("pack-keygen").addEventListener("click", keygenPack);
+  $("pack-install").addEventListener("click", installPack);
+  $("pack-mcp-add").addEventListener("click", addPackMcp);
+  $("pack-mcp").addEventListener("change", (event) => {
+    const checkbox = event.target.closest("[data-mcp-write]");
+    if (!checkbox) return;
+    const dir = packDirValue();
+    if (!dir) return;
+    guard(async () => {
+      const result = await invoke("pack_set_mcp", {
+        dir,
+        id: checkbox.dataset.mcpWrite,
+        write: checkbox.checked,
+      });
+      await loadPack();
+      packLog(result.output, result.ok);
+    });
+  });
+  $("pack-save").addEventListener("click", savePackFile);
+  $("pack-new").addEventListener("click", createPackFile);
+  $("pack-files").addEventListener("click", (event) => {
+    const row = event.target.closest("[data-pack-file]");
+    if (row) selectPackFile(row.dataset.packFile);
+  });
   $("artifact-refresh").addEventListener("click", () => guard(refreshArtifacts));
   $("artifact-search").addEventListener("click", searchArtifacts);
   $("artifact-export").addEventListener("click", exportArtifacts);
@@ -1831,6 +2250,7 @@ async function init() {
     await refreshLlmKeyStatus();
     await refreshApps();
     await refreshArtifacts();
+    await refreshPackTool();
     await refreshSecrets();
     await refreshMcpServers();
   });

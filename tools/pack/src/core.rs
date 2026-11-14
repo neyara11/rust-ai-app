@@ -310,6 +310,39 @@ fn check_text_secrets(path: &Path, report: &mut Report) {
     }
 }
 
+fn env_name_ok(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn secret_name_ok(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+fn is_secret_file(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    name == ".env"
+        || name.starts_with(".env.")
+        || name.ends_with(".pem")
+        || name.ends_with(".key")
+        || name.ends_with(".p12")
+        || name.ends_with(".pfx")
+        || name.starts_with("id_rsa")
+        || name.starts_with("id_ed25519")
+        || name == "credentials"
+        || name == "credentials.json"
+}
+
 fn walk_content_files(dir: &Path, output: &mut Vec<PathBuf>) {
     let excluded_dirs = ["engine", "sessions", ".git", "target"];
     let Ok(entries) = fs::read_dir(dir) else {
@@ -423,6 +456,65 @@ pub fn validate(dir: &Path) -> Result<Report> {
                         .push(format!("tool {name}: bin is missing: {bin}"));
                 }
             }
+            let io = tool
+                .get("io")
+                .and_then(Value::as_str)
+                .unwrap_or("files")
+                .to_lowercase();
+            if io != "files" && io != "json" {
+                report
+                    .errors
+                    .push(format!("tool {name}: io must be files or json"));
+            }
+            if io == "json" {
+                if let Some(parameters) = tool.get("parameters") {
+                    if !parameters.is_object() {
+                        report
+                            .errors
+                            .push(format!("tool {name}: parameters must be a JSON object"));
+                    }
+                }
+                if let Some(argv) = tool.get("argv").and_then(Value::as_array) {
+                    if argv.iter().any(|arg| {
+                        arg.as_str()
+                            .map(|arg| arg.contains("{input}") || arg.contains("{output}"))
+                            .unwrap_or(false)
+                    }) {
+                        report.errors.push(format!(
+                            "tool {name}: io=json must not use {{input}}/{{output}} in argv"
+                        ));
+                    }
+                }
+            }
+            if let Some(secrets) = tool.get("secrets") {
+                let Some(secrets) = secrets.as_object() else {
+                    report
+                        .errors
+                        .push(format!("tool {name}: secrets must be an object"));
+                    continue;
+                };
+                if secrets.len() > 16 {
+                    report
+                        .errors
+                        .push(format!("tool {name}: too many secrets (max 16)"));
+                }
+                for (env, secret) in secrets {
+                    if !env_name_ok(env) {
+                        report.errors.push(format!(
+                            "tool {name}: invalid env name in secrets: {env}"
+                        ));
+                    }
+                    match secret.as_str() {
+                        Some(secret) if secret_name_ok(secret) => {}
+                        Some(_) => report.errors.push(format!(
+                            "tool {name}: invalid secret name for {env}"
+                        )),
+                        None => report
+                            .errors
+                            .push(format!("tool {name}: secret for {env} must be a string")),
+                    }
+                }
+            }
         }
     } else if manifest.get("tools").is_some() {
         report.errors.push("tools must be an array".to_string());
@@ -516,6 +608,12 @@ pub fn validate(dir: &Path) -> Result<Report> {
             continue;
         };
         let rel = rel.to_string_lossy().replace('\\', "/");
+        if is_secret_file(path) {
+            report.errors.push(format!(
+                "secret material must not be packaged: {rel}; use tools[].secrets with platform DPAPI"
+            ));
+            continue;
+        }
         if declared.contains(&rel) {
             continue;
         }
@@ -667,6 +765,27 @@ mod tests {
         let dir = temp(tag);
         init(&dir.join("app"), "demo-app", "Demo App", TEMPLATE_MINIMAL).unwrap();
         dir.join("app")
+    }
+
+    #[test]
+    fn secret_names_follow_env_rules() {
+        assert!(env_name_ok("SERVICE_TOKEN"));
+        assert!(!env_name_ok("service_token"));
+        assert!(secret_name_ok("svc.token"));
+        assert!(!secret_name_ok("svc token"));
+    }
+
+    #[test]
+    fn secret_files_are_rejected() {
+        let app = make_package("secret-file");
+        fs::write(app.join(".env"), "SERVICE_TOKEN=abc\n").unwrap();
+        recompute_hashes(&app).unwrap();
+        let report = validate(&app).unwrap();
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("secret material must not be packaged")));
+        let _ = fs::remove_dir_all(app.parent().unwrap());
     }
 
     #[test]

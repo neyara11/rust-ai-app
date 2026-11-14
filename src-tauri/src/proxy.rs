@@ -35,6 +35,22 @@ docx_export с относительными путями input и output.";
 
 /// opencode normalizes tool names to letters, numbers, `_` and `-`. Do the same
 /// so permission entries in the generated config match exactly.
+fn env_name_ok(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn secret_name_ok(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
 pub fn normalize_tool_name(raw: &str) -> String {
     raw.chars()
         .map(|c| {
@@ -99,7 +115,14 @@ pub fn gateway_tool_names(app: &Manifest) -> Vec<String> {
 enum Route {
     Files,
     Remote { server: String, tool: String },
-    Package { tool: String, bin: String, argv: Vec<String> },
+    Package {
+        tool: String,
+        bin: String,
+        argv: Vec<String>,
+        io: String,
+        parameters: Value,
+        secrets: std::collections::BTreeMap<String, String>,
+    },
 }
 
 #[derive(Clone)]
@@ -222,12 +245,38 @@ impl Proxy {
                 eprintln!("eco-platform mcp proxy: invalid argv for {exposed}, skipped");
                 continue;
             }
+            if tool.secrets.len() > 16
+                || tool
+                    .secrets
+                    .iter()
+                    .any(|(env, secret)| !env_name_ok(env) || !secret_name_ok(secret))
+            {
+                eprintln!("eco-platform mcp proxy: invalid secrets mapping for {exposed}, skipped");
+                continue;
+            }
+            let io = tool.io.to_lowercase();
+            if io != "files" && io != "json" {
+                eprintln!("eco-platform mcp proxy: invalid io mode for {exposed}, skipped");
+                continue;
+            }
+            if io == "json" && tool.argv.iter().any(|arg| arg.contains("{input}") || arg.contains("{output}")) {
+                eprintln!("eco-platform mcp proxy: json tool {exposed} must not use {{input}}/{{output}} argv");
+                continue;
+            }
+            let parameters = tool
+                .parameters
+                .clone()
+                .filter(Value::is_object)
+                .unwrap_or_else(|| json!({ "type": "object", "additionalProperties": true }));
             self.routes.insert(
                 exposed,
                 Route::Package {
                     tool: tool.tool.clone(),
                     bin,
                     argv: tool.argv.clone(),
+                    io,
+                    parameters,
+                    secrets: tool.secrets.clone(),
                 },
             );
             tools.push(package_spec(&tool));
@@ -358,47 +407,75 @@ impl Proxy {
         tool: &str,
         bin: &str,
         argv: &[String],
+        io: &str,
+        secrets: &std::collections::BTreeMap<String, String>,
         arguments: &Value,
     ) -> Result<Value> {
-        let input = text_arg(arguments, "input")?;
-        let output = text_arg(arguments, "output")?;
-        let input = resolve_path(&self.workspace, input, false)?;
-        let output = resolve_path(&self.workspace, output, true)?;
-        if !input.is_file() {
-            return msg(format!("input file does not exist: {}", input.display()));
-        }
+        let files_mode = io != "json";
+        let (input, output) = if files_mode {
+            let input = text_arg(arguments, "input")?;
+            let output = text_arg(arguments, "output")?;
+            let input = resolve_path(&self.workspace, input, false)?;
+            let output = resolve_path(&self.workspace, output, true)?;
+            if !input.is_file() {
+                return msg(format!("input file does not exist: {}", input.display()));
+            }
+            (Some(input), Some(output))
+        } else {
+            (None, None)
+        };
 
         let converter = package_bin(&self.package_dir, bin)?;
         let mut command = Command::new(&converter);
-        if argv.is_empty() {
-            command
-                .arg("--input")
-                .arg(&input)
-                .arg("--output")
-                .arg(&output);
-        } else {
-            let mut uses_input = false;
-            let mut uses_output = false;
-            for raw in argv {
-                if raw.contains("{input}") {
-                    uses_input = true;
+        let mut stdin_payload: Option<Vec<u8>> = None;
+
+        if files_mode {
+            let input = input.as_ref().unwrap();
+            let output = output.as_ref().unwrap();
+            if argv.is_empty() {
+                command
+                    .arg("--input")
+                    .arg(input)
+                    .arg("--output")
+                    .arg(output);
+            } else {
+                let mut uses_input = false;
+                let mut uses_output = false;
+                for raw in argv {
+                    if raw.contains("{input}") {
+                        uses_input = true;
+                    }
+                    if raw.contains("{output}") {
+                        uses_output = true;
+                    }
+                    command.arg(
+                        raw.replace("{input}", &input.to_string_lossy())
+                            .replace("{output}", &output.to_string_lossy()),
+                    );
                 }
-                if raw.contains("{output}") {
-                    uses_output = true;
+                if !uses_input || !uses_output {
+                    return msg(format!(
+                        "package tool {tool} argv must reference both {{input}} and {{output}}"
+                    ));
                 }
-                command.arg(
-                    raw.replace("{input}", &input.to_string_lossy())
-                        .replace("{output}", &output.to_string_lossy()),
-                );
             }
-            if !uses_input || !uses_output {
+            command.stdin(Stdio::null());
+        } else {
+            for raw in argv {
+                command.arg(raw);
+            }
+            let payload = serde_json::to_vec(arguments)
+                .map_err(|e| Error::Msg(format!("cannot serialize tool arguments: {e}")))?;
+            if payload.len() > 256 * 1024 {
                 return msg(format!(
-                    "package tool {tool} argv must reference both {{input}} and {{output}}"
+                    "package tool {tool} arguments exceed 256 KiB"
                 ));
             }
+            stdin_payload = Some(payload);
+            command.stdin(Stdio::piped());
         }
+
         command
-            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // The package tool is untrusted app code: it must not inherit the
@@ -410,6 +487,21 @@ impl Proxy {
                 command.env(key, value);
             }
         }
+        if !secrets.is_empty() {
+            let store = SecretStore::new(&self.home);
+            for (env_name, secret_name) in secrets {
+                match store.load(secret_name)? {
+                    Some(value) if !value.is_empty() => {
+                        command.env(env_name, value);
+                    }
+                    _ => {
+                        return msg(format!(
+                            "package tool {tool} needs secret '{secret_name}' for {env_name}; add it in Settings → Secrets"
+                        ));
+                    }
+                }
+            }
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -417,7 +509,12 @@ impl Proxy {
         }
 
         let timeout = package_timeout();
-        let run = run_with_limits(&mut command, timeout, MAX_PACKAGE_OUTPUT)?;
+        let run = run_with_limits(
+            &mut command,
+            timeout,
+            MAX_PACKAGE_OUTPUT,
+            stdin_payload.as_deref(),
+        )?;
         if run.timed_out {
             return msg(format!(
                 "package tool {tool} timed out after {}s; process killed",
@@ -449,6 +546,17 @@ impl Proxy {
             }
             return msg(format!("package tool {tool} failed (exit {code}): {snippet}"));
         }
+
+        if !files_mode {
+            let text = String::from_utf8_lossy(&run.stdout).trim().to_string();
+            if text.is_empty() {
+                return Ok(json!({ "ok": true }));
+            }
+            return Ok(serde_json::from_str::<Value>(&text).unwrap_or_else(|_| json!(text)));
+        }
+
+        let input = input.unwrap();
+        let output = output.unwrap();
         if !output.is_file() {
             return msg(format!("package tool {tool} finished without creating the output file"));
         }
@@ -498,9 +606,14 @@ impl Proxy {
             Route::Remote { server, tool } => {
                 self.remote_call(server, tool, arguments.clone(), &request_id)
             }
-            Route::Package { tool, bin, argv } => {
-                self.package_call(tool, bin, argv, &arguments)
-            }
+            Route::Package {
+                tool,
+                bin,
+                argv,
+                io,
+                secrets,
+                ..
+            } => self.package_call(tool, bin, argv, io, secrets, &arguments),
         };
 
         let (value, bytes, truncated) = match raw {
@@ -677,11 +790,27 @@ fn kill_tree(child: &mut Child) {
 
 /// Runs a package-provided executable with a hard timeout and bounded output.
 /// The caller interprets `timed_out` / `overflowed` and `status`.
-fn run_with_limits(command: &mut Command, timeout: Duration, cap: usize) -> Result<BoundedRun> {
+fn run_with_limits(
+    command: &mut Command,
+    timeout: Duration,
+    cap: usize,
+    input: Option<&[u8]>,
+) -> Result<BoundedRun> {
     let mut child = command
         .spawn()
         .map_err(|e| Error::Msg(format!("cannot start package tool: {e}")))?;
     let overflow = Arc::new(AtomicBool::new(false));
+
+    let stdin_handle = match (input, child.stdin.take()) {
+        (Some(data), Some(mut stdin)) => {
+            let data = data.to_vec();
+            Some(std::thread::spawn(move || {
+                let _ = stdin.write_all(&data);
+                let _ = stdin.flush();
+            }))
+        }
+        _ => None,
+    };
 
     let stdout_handle = child.stdout.take().map(|stdout| {
         let flag = overflow.clone();
@@ -712,6 +841,10 @@ fn run_with_limits(command: &mut Command, timeout: Duration, cap: usize) -> Resu
             }
         }
     };
+
+    if let Some(handle) = stdin_handle {
+        let _ = handle.join();
+    }
 
     let (stdout, _bytes_out) = stdout_handle
         .and_then(|handle| handle.join().ok())
@@ -785,9 +918,25 @@ fn file_specs() -> Vec<Value> {
 }
 
 fn package_spec(tool: &ToolDef) -> Value {
+    let name = normalize_tool_name(&tool.tool);
+    if tool.io.eq_ignore_ascii_case("json") {
+        let schema = tool
+            .parameters
+            .clone()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({ "type": "object", "additionalProperties": true }));
+        return json!({
+            "name": name,
+            "description": format!(
+                "Инструмент приложения {}. Аргументы передаются JSON-объектом по схеме инструмента; секреты и сеть настраиваются платформой.",
+                tool.tool
+            ),
+            "inputSchema": schema
+        });
+    }
     if tool.tool == "docx_export" {
         return json!({
-            "name": normalize_tool_name(&tool.tool),
+            "name": name,
             "description": "Конвертировать markdown-файл из рабочей папки в Word .docx. Пути input и output относительные, вне рабочей папки запрещены.",
             "inputSchema": {
                 "type": "object",
@@ -801,7 +950,7 @@ fn package_spec(tool: &ToolDef) -> Value {
         });
     }
     json!({
-        "name": normalize_tool_name(&tool.tool),
+        "name": name,
         "description": format!(
             "Инструмент приложения {}. Пути input и output относительные и не могут выходить за рабочую папку.",
             tool.tool
@@ -1261,12 +1410,70 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn secret_env_mapping_rules() {
+        assert!(env_name_ok("SERVICE_TOKEN"));
+        assert!(env_name_ok("API_URL_2"));
+        assert!(!env_name_ok("service_token"));
+        assert!(!env_name_ok("SERVICE-TOKEN"));
+        assert!(!env_name_ok(""));
+        assert!(secret_name_ok("svc_token"));
+        assert!(secret_name_ok("svc.token"));
+        assert!(!secret_name_ok("svc token"));
+        assert!(!secret_name_ok(""));
+    }
+
+    #[test]
+    fn run_with_limits_feeds_stdin() {
+        let mut command = Command::new("cmd");
+        command
+            .args(["/C", "findstr ."])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let run = run_with_limits(
+            &mut command,
+            Duration::from_secs(5),
+            4096,
+            Some(b"{\"query\":\"hello\"}\n"),
+        )
+        .unwrap();
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(stdout.contains("hello"), "stdout was: {stdout}");
+    }
+
+    #[test]
+    fn package_spec_uses_json_parameters() {
+        let tool: ToolDef = serde_json::from_value(json!({
+            "tool": "crm_lookup",
+            "bin": "bin/crm.exe",
+            "io": "json",
+            "parameters": {
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"]
+            }
+        }))
+        .unwrap();
+        let spec = package_spec(&tool);
+        assert_eq!(spec["inputSchema"]["properties"]["query"]["type"], "string");
+        assert_eq!(spec["inputSchema"]["required"], json!(["query"]));
+
+        let files: ToolDef = serde_json::from_value(json!({
+            "tool": "docx_export",
+            "bin": "bin/docx-export.exe"
+        }))
+        .unwrap();
+        let spec = package_spec(&files);
+        assert_eq!(spec["inputSchema"]["required"], json!(["input", "output"]));
+    }
+
+    #[test]
     fn package_runner_enforces_timeout_and_captures_output() {
         let mut ok = Command::new("cmd");
         ok.args(["/C", "echo", "hi"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let run = run_with_limits(&mut ok, Duration::from_secs(5), 1024).unwrap();
+        let run = run_with_limits(&mut ok, Duration::from_secs(5), 1024, None).unwrap();
         assert!(run.status.success());
         assert!(String::from_utf8_lossy(&run.stdout).contains("hi"));
 
@@ -1274,7 +1481,7 @@ mod tests {
         slow.args(["/C", "ping -n 20 127.0.0.1 >nul"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let run = run_with_limits(&mut slow, Duration::from_millis(200), 1024).unwrap();
+        let run = run_with_limits(&mut slow, Duration::from_millis(200), 1024, None).unwrap();
         assert!(run.timed_out);
     }
 }

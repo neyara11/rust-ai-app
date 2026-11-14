@@ -26,8 +26,24 @@ pub struct ToolDef {
     /// app-provided tools such as the docx converter.
     #[serde(default)]
     pub bin: Option<String>,
+    /// `files` (default): input/output paths in the workspace.
+    /// `json`: the model's arguments are sent to stdin as JSON and stdout is
+    /// returned as the tool result.
+    #[serde(default = "io_files")]
+    pub io: String,
+    /// JSON Schema for `io: json`. Falls back to a free-form object.
+    #[serde(default)]
+    pub parameters: Option<serde_json::Value>,
+    /// Env var -> DPAPI secret name. The platform injects values only into the
+    /// package process for this call; secrets never live in the package.
+    #[serde(default)]
+    pub secrets: BTreeMap<String, String>,
     #[serde(default = "stream_read")]
     pub stream: String,
+}
+
+fn io_files() -> String {
+    "files".to_string()
 }
 
 fn stream_read() -> String {

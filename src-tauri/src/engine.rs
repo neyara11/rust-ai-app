@@ -236,6 +236,21 @@ struct StreamState {
     changed: bool,
 }
 
+const TOOL_MARKUP_NOTE: &str = "Модель попыталась вызвать недоступный инструмент; служебная разметка скрыта. Проверьте, что пакету разрешены нужные tools/file_scopes.";
+
+fn has_tool_markup(text: &str) -> bool {
+    let lowered = text.to_lowercase();
+    lowered.contains("<||dsml||") || lowered.contains("<|dsml|")
+}
+
+fn clean_text(text: String) -> String {
+    if has_tool_markup(&text) {
+        TOOL_MARKUP_NOTE.to_string()
+    } else {
+        text
+    }
+}
+
 impl StreamState {
     fn part(&mut self, id: &str) -> &mut StreamPart {
         if let Some(index) = self.parts.iter().position(|part| part.id == id) {
@@ -269,7 +284,7 @@ impl StreamState {
             items.push(ChatItem::new("assistant", "reasoning", reasoning));
         }
         if !text.is_empty() {
-            items.push(ChatItem::new("assistant", "text", text));
+            items.push(ChatItem::new("assistant", "text", clean_text(text)));
         }
         for part in self.parts.iter().filter(|part| part.kind == "tool") {
             let status = if part.status.is_empty() {
@@ -1071,6 +1086,24 @@ impl Engine {
             system.push_str("\n\n---\n\n");
             system.push_str(&skill);
         }
+        let has_file_tools = app
+            .capabilities
+            .file_scopes
+            .iter()
+            .any(|scope| scope == "workspace");
+        let has_package_tools = app
+            .tools
+            .iter()
+            .any(|tool| tool.bin.as_deref().map(|bin| !bin.trim().is_empty()).unwrap_or(false));
+        let has_remote_tools = app
+            .connections
+            .iter()
+            .any(|connection| connection.kind == "http-mcp");
+        if !has_file_tools && !has_package_tools && !has_remote_tools {
+            system.push_str(
+                "\n\n---\n\n## Ограничения среды\n\nУ пакета нет доступных инструментов. Не вызывай инструменты и не выводи служебную разметку вызовов (tool call, DSML). Если задача требует файлов или команд, объясни ограничение и попроси включить нужные возможности в манифесте (file_scopes, tools, http-mcp).\n",
+            );
+        }
 
         artifact_guard.armed = false;
         Ok(Self {
@@ -1644,7 +1677,7 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
             items.push(ChatItem::new(&role, "reasoning", reasoning));
         }
         if !text.is_empty() {
-            let mut item = ChatItem::new(&role, "text", text);
+            let mut item = ChatItem::new(&role, "text", clean_text(text));
             item.tokens_in = tokens_in;
             item.tokens_out = tokens_out;
             item.reasoning_tokens = reasoning_tokens;
@@ -1931,6 +1964,14 @@ mod tests {
         assert_eq!(items[0].kind, "file");
         assert_eq!(items[0].text, "notes.txt");
         assert!(!items.iter().any(|item| item.kind == "text"));
+    }
+
+    #[test]
+    fn raw_tool_markup_is_replaced_with_a_notice() {
+        assert_eq!(clean_text("обычный ответ".to_string()), "обычный ответ");
+        let cleaned = clean_text("<||DSML|| calls><||DSML|| invoke name=\"bash\">".to_string());
+        assert!(cleaned.contains("недоступный инструмент"));
+        assert!(!cleaned.contains("DSML"));
     }
 
     #[test]

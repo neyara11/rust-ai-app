@@ -7,6 +7,7 @@ pub mod error;
 pub mod identity;
 pub mod manifest;
 pub mod mcp;
+pub mod pack;
 pub mod proxy;
 pub mod registry;
 pub mod secrets;
@@ -43,6 +44,20 @@ pub fn run() {
             commands::artifact_grep,
             commands::export_artifacts,
             commands::cleanup_artifacts,
+            pack::pack_tool_info,
+            pack::pack_scan,
+            pack::pack_import,
+            pack::pack_apply_template,
+            pack::pack_set_mcp,
+            pack::pack_init,
+            pack::pack_validate,
+            pack::pack_build,
+            pack::pack_sign,
+            pack::pack_keygen,
+            pack::pack_files,
+            pack::pack_read_text,
+            pack::pack_write_text,
+            pack::pack_pick_folder,
             commands::mcp_servers,
             commands::mcp_server_get,
             commands::mcp_server_save,

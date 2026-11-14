@@ -108,9 +108,44 @@ try {
   const hitText = await page.locator("#artifact-results").textContent();
   assert(hitText.includes("mock hit"), `artifact search did not render hits: ${hitText}`);
 
+  await page.click('.tab[data-tab="dev"]');
+  await page.waitForSelector("#tab-dev.active");
+  const packStatus = await page.locator("#pack-status").textContent();
+  assert(packStatus.includes("eco-pack"), `unexpected eco-pack status: ${packStatus}`);
+  await page.fill("#pack-dir", "D:\\apps\\demo-app");
+  await page.click("#pack-load");
+  await page.waitForFunction(
+    () => document.querySelectorAll("#pack-files .pack-file").length >= 2,
+  );
+  const manifestText = await page.locator("#pack-editor").inputValue();
+  assert(manifestText.includes("demo-app"), "manifest editor was not loaded");
+  const scanLog = await page.locator("#pack-log").textContent();
+  assert(scanLog.includes("AGENTS.md: найден"), `scan summary missing: ${scanLog}`);
+  await page.waitForFunction(
+    () => document.querySelector("#pack-mcp")?.textContent.includes("context7"),
+  );
+  const mcpText = await page.locator("#pack-mcp").textContent();
+  assert(mcpText.includes("сервер настроен"), `unexpected MCP status: ${mcpText}`);
+  await page.locator('[data-mcp-write="context7"]').click();
+  await page.waitForFunction(
+    () => document.querySelector("#pack-log")?.textContent.includes("запись разрешена"),
+  );
+  await page.click("#pack-import");
+  await page.waitForFunction(
+    () => document.querySelector("#pack-log")?.textContent.includes("manifest.json created"),
+  );
+  await page.click("#pack-apply-template");
+  await page.waitForFunction(
+    () => document.querySelector("#pack-log")?.textContent.includes("file_scopes"),
+  );
+  await page.click("#pack-validate");
+  await page.waitForFunction(
+    () => document.querySelector("#pack-log")?.textContent.includes("eco-pack"),
+  );
+
   assert(pageErrors.length === 0, `page errors: ${pageErrors.join("; ")}`);
   console.log(
-    "ui smoke ok: catalog, allowlist badge, trust gating, chat render, app switch, artifact search",
+    "ui smoke ok: catalog, allowlist, chat, artifacts, attachments, package import",
   );
 } finally {
   await browser.close();

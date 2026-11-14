@@ -52,6 +52,7 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 | `src-tauri/src/manifest.rs` | манифест пакета, Ed25519-подпись, sha256, schema |
 | `src-tauri/src/allowlist.rs` | подписанный allowlist/CRL одобренных приложений и версий |
 | `src-tauri/src/registry.rs` | установка/удаление, fail-closed, список, trust anchor |
+| `src-tauri/src/pack.rs` | «Мастер пакета»: init/validate/build/sign, редактирование prompt/skills/manifest |
 | `src-tauri/src/artifacts.rs` | сессии, NDJSON-дампы, grep, квоты, TTL, sweep |
 | `src-tauri/src/identity.rs` | короткоживущие токены приложений, отзыв, псевдоним пользователя |
 | `src-tauri/src/secrets.rs` | DPAPI (CryptProtectData) |
@@ -73,6 +74,11 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 | `tools/e2e-docx.ps1` | e2e: агент создаёт markdown и конвертирует в `.docx` |
 | `tools/ui-smoke` | Playwright-прогон UI на встроенном browser-mock |
 | `dev-apps/*` | подписанные пакеты-примеры: `doc-writer`, `doc-lookup` |
+| `examples/file-notes` | исходники примера: навыки + работа с файлами |
+| `examples/skill-only` | готовый dev-пример: `file_scopes: workspace`, hashes и подпись |
+| `examples/skill-only-source` | только `AGENTS.md` + `SKILL.md` для проверки генерации манифеста |
+| `docs/MINIAPP_AUTHORING.md` | требования к исходникам мини-приложения и порядок сборки/передачи |
+| `docs/REPACK_AGENT.md` | runbook для агента: переупаковка скилов, MCP и `.env`-скриптов |
 | `docs/APP_LIFECYCLE.md` | процесс: разработка, тесты, подпись ИБ, тиражирование, разграничение ролей |
 | `.data/` (gitignored) | рабочий профиль: пакеты, секреты, аудит, конфиг |
 
@@ -113,6 +119,41 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
   Отдельный статус `incomplete` — доставлен `allowlist.json` без `.sig`.
   `--allowlist`, `--allowlist-verify <file>`, `--allowlist-check <app> [version]`.
 
+### Мастер пакета (разработка мини-приложений)
+- Вкладка «Мастер пакета» в платформе: папка автора, `app_id`/название/шаблон,
+  «Создать манифест из исходников» (импорт `AGENTS.md`/навыка), «Создать каркас»
+  (`eco-pack init`), «Проверить» (`validate`), «Собрать zip» (`build`), dev-подпись
+  (`sign`) и установка папки в профиль через обычный `install_app` (нужен anchor).
+- Импорт: `pack_scan` показывает `AGENTS.md`, навыки (`skills/<name>/SKILL.md` и
+  корневой `SKILL.md`), `bin/*.exe` и наличие манифеста; `pack_import` создаёт
+  `manifest.json` (schema 2, версия 0.1.0, `llm`, `file_scopes` для шаблона `files`,
+  `artifacts`, пустые `hashes`), переносит `AGENTS.md` → `prompt/system.md` и
+  `SKILL.md` → `skills/main/SKILL.md` (перенос, не копия), существующий манифест
+  не перезаписывается, `bin`-tools нужно объявить вручную. Кнопка «Применить шаблон
+  к манифесту» (`pack_apply_template`) меняет `capabilities.file_scopes` без
+  пересоздания пакета; после этого нужны новый `build` и `sign`.
+- MCP: импорт ищет `.mcp.json`, `mcp.json`, `.vscode/mcp.json`, `opencode.json(c)`
+  и добавляет id как `http-mcp` (URL/токены не переносятся); в разделе
+  «MCP-подключения» видно «сервер настроен / нет в настройках» и переключатель
+  записи (`pack_set_mcp` → `capabilities.external_writes`). Endpoint и токен
+  задаются в «Настройках → Реестр MCP-серверов» (DPAPI).
+- Утилита ищется в `ECO_PACK_BIN`, `<home>\pack\eco-pack.exe`, рядом с платформой
+  (`pack\`), затем dev-пути `tools\pack\target\{release,debug}` и `vendor\pack`.
+  Статус и версия видны бейджем; если бинаря нет — подсказка про `build-pack.ps1`.
+- Редактирование файлов пакета ограничено `manifest.json`, `prompt/**`, `skills/**`
+  (и корневыми `*.md`): чтение/запись ≤256 КиБ, UTF-8, пути только относительные,
+  выход за папку пакета (включая symlink) отклоняется. Файлы больше лимита и
+  бинарники в редакторе не показываются.
+- Дерево файлов, редактор, создание файла и лог вывода `eco-pack` — в одном экране.
+  Команды: `pack_tool_info`, `pack_scan`, `pack_import`, `pack_apply_template`, `pack_set_mcp`, `pack_init`,
+  `pack_validate`, `pack_build`, `pack_sign`, `pack_keygen`, `pack_files`,
+  `pack_read_text`, `pack_write_text`, `pack_pick_folder`.
+- Осталось: app-forge (мини-приложение, вызывающее `bin/pack-tool.exe`) и общее ядро
+  `pack-core` вместо вызова CLI; сейчас мастер использует `eco-pack.exe`.
+- Проверочные примеры: `examples/file-notes` (готовые исходники с навыками и файлами)
+  и `examples/skill-only` (собранный/подписанный пример с file access) / `examples/skill-only-source` (только `AGENTS.md` + `SKILL.md` для проверки генерации
+  манифеста); инструкции — `docs/MINIAPP_AUTHORING.md` и `docs/REPACK_AGENT.md`.
+
 ### Рабочая папка и файлы
 - У каждого приложения своя рабочая папка: `config.json` → `workspaces.<app_id>`.
   Если не задана — `<home>\workspaces\<app_id>`. В шапке UI есть путь и кнопка «Выбрать».
@@ -142,6 +183,17 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
   фиксированным cwd, таймаутом 60 с (override `ECO_PACKAGE_TOOL_TIMEOUT_SECS`),
   лимитом 64 КиБ на stdout/stderr и kill дерева процессов; причина ошибки
   пишется в аудит (`problem`).
+- `tools[].io`: `files` (по умолчанию; `input`/`output` в рабочей папке) или
+  `json` — аргументы модели уходят JSON-объектом в stdin, stdout возвращается как
+  результат (JSON парсится, иначе текст); `parameters` задаёт JSON Schema
+  аргументов. Режим `json` не принимает `{input}`/`{output}` в `argv`.
+- `tools[].secrets` — карта `ENV_NAME -> имя секрета DPAPI`: значения
+  подставляются только в env этого процесса на время вызова; отсутствующий секрет
+  даёт fail-closed. Скрипты в `skills/` не исполняются, только читается текст
+  `SKILL.md`; исполняемый код оформляется как `tools[].bin`.
+- `.env`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `credentials*` в пакете
+  запрещены: `eco-pack validate/build` возвращает ошибку; секреты — только через
+  DPAPI (`tools[].secrets` или MCP-подключение).
 - Конвертер является частью мини-приложения, а не платформы. Платформа не ищет его
   по глобальным путям и не запускает свои экспорты.
 - Пересборка и подпись пакета — `tools/package.ps1` (см. §7).
@@ -216,6 +268,10 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
   скрывается для модели без рассуждений; неизвестный/выключенный вариант
   отклоняется до вызова движка (и в CLI `--chat`). Проверено на шлюзе:
   длина reasoning меняется.
+- Если у пакета нет ни `file_scopes`, ни `bin`-tools, ни `http-mcp`, движок
+  добавляет в системный промпт явное ограничение «инструменты недоступны». Сырая
+  разметка вызова инструмента (DSML) в ответе модели заменяется предупреждением,
+  а не отображается как текст.
 - Вложения в промпт: до 3 файлов. Изображения (`png/jpeg/webp/gif`, ≤4 МиБ,
   проверка магических байтов) уходят `file`-part'ом с data URL и требуют
   `llm_capabilities.vision`; текстовые файлы (`text/*`, json/yaml/toml/xml/js,
@@ -261,7 +317,7 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 `--unrevoke <app-id>`.
 
 ### Тесты
-`cargo test --manifest-path src-tauri/Cargo.toml` — 45 тестов: подпись/хеши/схема,
+`cargo test --manifest-path src-tauri/Cargo.toml` — 54 теста: подпись/хеши/схема,
 path traversal, sweep артефактов, разбор MCP (JSON/SSE),
 лимит ответа, разбор endpoint, allow-list, file tools и path escape шлюза,
 allowlist (версии/revoked/TTL/две подписи) и ротация anchor.
@@ -319,7 +375,7 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   `sessions/s-test-artifacts/dumps.ndjson` (14486 байт); `--artifacts` и
   `--grep-artifacts doc-writer ARTIFACTNEEDLE` нашли запись, токены/тестовые
   файлы после проверки удалены.
-- `cargo test` — 45 тестов, включая detection/derive старых заголовков и схему
+- `cargo test` — 54 теста, включая detection/derive старых заголовков и схему
   пакетного инструмента с `input`/`output`.
 - `eco-pack` (release, Authenticode `Valid`): `init` → `validate` (до build падает на
   непокрытых hashes) → `build` (zip) → `keygen` → `sign` → `verify` → `dev-install`
@@ -649,7 +705,7 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   browser-mock: каталог, allowlist-бейдж, запрет недоверенного пакета, рендер чата,
   переключение приложения).
 - Проверено: e2e создал `note.md` → `note.docx` (37 КБ, real LLM); `npm test` в
-  `tools/ui-smoke` — `ui smoke ok`; `cargo test` — 45 тестов.
+  `tools/ui-smoke` — `ui smoke ok`; `cargo test` — 54 теста.
 
 ### P8. Standalone-утилита `eco-pack` — сделано (2026-11-14)
 
@@ -667,9 +723,11 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   (Authenticode dev-сертификатом, статус `Valid`).
 - Проверено: init → validate (до build падает на непокрытых hashes) → build →
   validate ok → keygen/sign/verify → dev-install в отдельный профиль; пакет виден
-  в `--list` как `trusted`, запись установки в аудите; `cargo test` — 9/9.
+  в `--list` как `trusted`, запись установки в аудите; `cargo test` — 10/10.
 - Осталось: положить подписанный `eco-pack.exe` в доверенное хранилище и проверить
-  на машине без Rust/Node/Python (сейчас проверено на dev-машине).
+  на машине без Rust/Node/Python (сейчас проверено на dev-машине). Встроенный
+  «Мастер пакета» (вкладка платформы) использует этот же exe; общее ядро `pack-core`
+  и app-forge пока не выделены.
 
 ### P9. Ужесточение доверия — сделано (2026-11-14)
 

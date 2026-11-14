@@ -1,0 +1,33 @@
+{
+  "schema_version": 2,
+  "app_id": "file-notes",
+  "name": "Заметки в рабочей папке",
+  "version": "0.1.0",
+  "min_shell_version": "0.1.0",
+  "publisher": "",
+  "profile": {
+    "system_prompt": "prompt/system.md",
+    "model_hint": "gateway-default",
+    "max_steps": 20
+  },
+  "tools": [],
+  "connections": [
+    {
+      "id": "llm",
+      "type": "llm",
+      "required": true
+    }
+  ],
+  "capabilities": {
+    "index_allowlist": [],
+    "file_scopes": [
+      "workspace"
+    ],
+    "external_writes": []
+  },
+  "artifacts": {
+    "quota_mb": 50,
+    "ttl_hours": 72
+  },
+  "hashes": {}
+}

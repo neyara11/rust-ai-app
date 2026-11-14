@@ -49,6 +49,14 @@
         </svg>
         <span>Каталог и рабочая среда</span>
       </button>
+      <button class="tab" data-tab="dev" type="button" aria-label="Мастер пакета" title="Мастер пакета">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 8l-9-5-9 5 9 5 9-5z" />
+          <path d="M3 8v8l9 5 9-5V8" />
+          <path d="M12 13v8" />
+        </svg>
+        <span>Мастер пакета</span>
+      </button>
       <button class="tab icon-only" data-tab="settings" type="button" aria-label="Контур и секреты" title="Контур и секреты">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="3" />
@@ -292,6 +300,122 @@
                 <div id="tool-empty-result" class="tool-empty-result muted small">Выполните вызов инструмента, чтобы увидеть ответ MCP-сервера и размер полезной нагрузки.</div>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Package Wizard View -->
+    <section id="tab-dev" class="tab-body">
+      <div class="settings-header">
+        <div>
+          <div class="eyebrow">РАЗРАБОТКА МИНИ-ПРИЛОЖЕНИЙ</div>
+          <h1>Мастер пакета</h1>
+          <p class="panel-desc">Каркас, редактирование prompt/skills/manifest, проверка, сборка zip и dev-подпись через офлайн-утилиту eco-pack.</p>
+        </div>
+        <div class="row-actions">
+          <span id="pack-status" class="badge mono">eco-pack: проверка…</span>
+        </div>
+      </div>
+
+      <div class="dev-grid">
+        <div class="panel">
+          <div class="panel-icon-head">
+            <div class="panel-badge-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3l9 5-9 5-9-5 9-5z" />
+                <path d="M3 13l9 5 9-5" />
+              </svg>
+            </div>
+            <div>
+              <h2>1. Пакет</h2>
+              <p class="panel-desc">Достаточно <code class="mono">AGENTS.md</code> и навыка: «Создать манифест из исходников» соберёт <code class="mono">manifest.json</code> сам. «Создать каркас» — пустой шаблон.</p>
+            </div>
+          </div>
+
+          <div class="grid">
+            <label>Папка пакета<input id="pack-dir" placeholder="D:\apps\my-app" /></label>
+            <div class="row-actions form-actions">
+              <button class="ghost small" id="pack-pick" type="button">Выбрать…</button>
+              <button class="ghost small" id="pack-load" type="button">Загрузить</button>
+            </div>
+            <label>app_id<input id="pack-app-id" placeholder="my-app" /></label>
+            <label>Название<input id="pack-name" placeholder="My App" /></label>
+            <label>Шаблон<select id="pack-template">
+              <option value="minimal">minimal — только prompt и skill</option>
+              <option value="files">files — доступ к рабочей папке</option>
+            </select></label>
+            <div class="row-actions form-actions">
+              <button class="ghost small" id="pack-apply-template" type="button">Применить шаблон к манифесту</button>
+            </div>
+          </div>
+
+          <div class="row-actions">
+            <button class="small" id="pack-import" type="button">Создать манифест из исходников</button>
+            <button class="ghost small" id="pack-init" type="button">Создать каркас</button>
+            <button class="ghost small" id="pack-validate" type="button">Проверить</button>
+            <button class="ghost small" id="pack-build" type="button">Собрать zip</button>
+            <button class="ghost small" id="pack-install" type="button">Установить</button>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="sidebar-label">MCP-подключения</div>
+          <div class="policy-note">
+            <div class="sec-row"><span>Endpoint и токен</span><strong class="mono">Настройки → Реестр MCP-серверов</strong></div>
+            <div class="sec-row"><span>В манифесте</span><strong class="mono">только id подключения</strong></div>
+          </div>
+          <div id="pack-mcp" class="pack-files"></div>
+          <div class="row-actions">
+            <input id="pack-mcp-id" class="pack-new-file" placeholder="context7" />
+            <label class="check-row"><input id="pack-mcp-write" type="checkbox" /><span>разрешить запись</span></label>
+            <button class="ghost small" id="pack-mcp-add" type="button">Добавить MCP</button>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="grid">
+            <label>Dev-ключ<input id="pack-key" placeholder="D:\keys\me\dev.key" /></label>
+            <div class="row-actions form-actions">
+              <button class="ghost small" id="pack-keygen" type="button">Создать ключ…</button>
+              <button class="small" id="pack-sign" type="button">Подписать</button>
+            </div>
+          </div>
+
+          <div class="policy-note">
+            <div class="sec-row"><span>Порядок для ИБ</span><strong class="mono">build → sign (prod) → allowlist</strong></div>
+            <div class="sec-row"><span>Dev-ключ</span><strong class="mono">только для локального теста</strong></div>
+          </div>
+
+          <pre id="pack-log" class="pack-log" hidden></pre>
+        </div>
+
+        <div class="panel">
+          <div class="panel-icon-head">
+            <div class="panel-badge-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+              </svg>
+            </div>
+            <div>
+              <h2>2. Файлы пакета</h2>
+              <p class="panel-desc">Редактируются manifest.json, prompt/** и skills/**. Остальные файлы — через папку пакета.</p>
+            </div>
+          </div>
+
+          <div id="pack-files" class="pack-files"></div>
+
+          <div class="row-actions">
+            <input id="pack-new-file" class="pack-new-file" placeholder="skills/new/SKILL.md" />
+            <button class="ghost small" id="pack-new" type="button">Создать файл</button>
+          </div>
+
+          <textarea id="pack-editor" class="pack-editor" spellcheck="false" placeholder="Выберите файл слева или создайте новый"></textarea>
+
+          <div class="row-actions">
+            <button class="small" id="pack-save" type="button">Сохранить файл</button>
+            <span id="pack-editor-path" class="muted small mono"></span>
           </div>
         </div>
       </div>

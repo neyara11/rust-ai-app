@@ -163,6 +163,18 @@ eco-pack dev-install D:\apps\my-app `
 ```
 
 - `validate` до первого `build` падает: файлы ещё не покрыты `hashes`.
+- Пример исходников с навыком и работой с файлами — `examples/file-notes`,
+  минимальный набор без манифеста — `examples/skill-only`; требования к исходникам —
+  `docs/MINIAPP_AUTHORING.md`. Переупаковка готового агента с MCP и `.env` —
+  `docs/REPACK_AGENT.md`. Мастер пакета умеет собрать `manifest.json` из
+  `AGENTS.md` и навыка, писать манифест вручную не обязательно.
+- В платформе есть вкладка **«Мастер пакета»**: создание каркаса, редактирование
+  `manifest.json`/`prompt/**`/`skills/**`, `validate`, `build`, dev-подпись и
+  установка в профиль. MCP-подключения объявляются в манифесте по id (URL и токен —
+  в «Настройках → Реестр MCP-серверов», DPAPI); мастер находит `.mcp.json`,
+  `mcp.json`, `.vscode/mcp.json`, `opencode.json(c)` и умеет включать запись.
+  Она вызывает тот же `eco-pack.exe` (ищется в `ECO_PACK_BIN`,
+  `<profile>\pack`, рядом с платформой, `tools\pack\target\*`, `vendor\pack`).
 - `dev-install` подписывает пакет dev-ключом, кладёт anchor в указанный dev-профиль и
   ставит пакет через установленную платформу (`ECO_PLATFORM_DEV=1`). Machine-anchor
   prod-машины имеет приоритет, поэтому там dev-install не пройдёт.
