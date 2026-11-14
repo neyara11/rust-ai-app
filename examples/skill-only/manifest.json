@@ -1,0 +1,36 @@
+{
+  "schema_version": 2,
+  "app_id": "skill-only",
+  "name": "skill-only",
+  "version": "0.1.0",
+  "min_shell_version": "0.1.0",
+  "publisher": "",
+  "profile": {
+    "system_prompt": "prompt/system.md",
+    "model_hint": "gateway-default",
+    "max_steps": 20
+  },
+  "tools": [],
+  "connections": [
+    {
+      "id": "llm",
+      "type": "llm",
+      "required": true
+    }
+  ],
+  "capabilities": {
+    "index_allowlist": [],
+    "file_scopes": [
+      "workspace"
+    ],
+    "external_writes": []
+  },
+  "artifacts": {
+    "quota_mb": 50,
+    "ttl_hours": 72
+  },
+  "hashes": {
+    "prompt/system.md": "sha256:75f9a9928ba83730f67420369cf83f87ab081f783af5608aa7e51c11a6377110",
+    "skills/main/SKILL.md": "sha256:e7d10e2bf149e3d91ba7521217cf5db8ece527654dc68d9e416aa8652b2f4d91"
+  }
+}
