@@ -166,7 +166,8 @@ eco-pack dev-install D:\apps\my-app `
 - Пример исходников с навыком и работой с файлами — `examples/file-notes`,
   минимальный набор без манифеста — `examples/skill-only`; требования к исходникам —
   `docs/MINIAPP_AUTHORING.md`. Переупаковка готового агента с MCP и `.env` —
-  `docs/REPACK_AGENT.md`. Мастер пакета умеет собрать `manifest.json` из
+  `docs/REPACK_AGENT.md`; тестирование без готовых ключей — `docs/CLOSED_CONTOUR_TEST.md`.
+  Мастер пакета умеет собрать `manifest.json` из
   `AGENTS.md` и навыка, писать манифест вручную не обязательно.
 - В платформе есть вкладка **«Мастер пакета»**: создание каркаса, редактирование
   `manifest.json`/`prompt/**`/`skills/**`, `validate`, `build`, dev-подпись и
