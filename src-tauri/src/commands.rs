@@ -264,9 +264,18 @@ pub async fn choose_workspace(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn artifacts_usage(state: tauri::State<'_, AppState>, app_id: String) -> artifacts::Usage {
-    let root = artifacts::sessions_root(&state.home, &app_id);
-    artifacts::usage(&root)
+pub async fn artifacts_usage(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+) -> Result<artifacts::Usage> {
+    manifest::parse_id(&app_id, "app")?;
+    let home = state.home.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = artifacts::sessions_root(&home, &app_id);
+        Ok(artifacts::usage(&root))
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("artifact usage scan failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -292,13 +301,18 @@ pub async fn artifact_grep(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn artifact_dumps(
+pub async fn artifact_dumps(
     state: tauri::State<'_, AppState>,
     app_id: String,
 ) -> Result<Vec<artifacts::DumpFile>> {
     manifest::parse_id(&app_id, "app")?;
-    let root = artifacts::sessions_root(&state.home, &app_id);
-    Ok(artifacts::list_dumps(&root))
+    let home = state.home.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = artifacts::sessions_root(&home, &app_id);
+        Ok(artifacts::list_dumps(&root))
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("artifact dump scan failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]

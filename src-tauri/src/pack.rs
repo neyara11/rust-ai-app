@@ -617,8 +617,8 @@ fn default_dev_key(home: &Path) -> Option<PathBuf> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn pack_tool_info(state: tauri::State<'_, AppState>) -> PackToolInfo {
-    let bin = pack_bin(&state.home);
+fn tool_info(home: &Path) -> PackToolInfo {
+    let bin = pack_bin(home);
     let version = bin.as_ref().and_then(|path| {
         Command::new(path)
             .arg("--version")
@@ -627,13 +627,21 @@ pub fn pack_tool_info(state: tauri::State<'_, AppState>) -> PackToolInfo {
             .filter(|output| output.status.success())
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
     });
-    let default_key = default_dev_key(&state.home).map(|path| path.display().to_string());
+    let default_key = default_dev_key(home).map(|path| path.display().to_string());
     PackToolInfo {
         available: bin.is_some(),
         path: bin.map(|path| path.display().to_string()),
         version,
         default_key,
     }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn pack_tool_info(state: tauri::State<'_, AppState>) -> Result<PackToolInfo> {
+    let home = state.home.clone();
+    tauri::async_runtime::spawn_blocking(move || tool_info(&home))
+        .await
+        .map_err(|e| Error::Msg(format!("eco-pack lookup failed: {e}")))
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -846,12 +854,16 @@ pub fn pack_keygen(state: tauri::State<'_, AppState>, out_dir: String) -> Result
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn pack_files(dir: String) -> Result<Vec<PackFile>> {
-    let root = package_dir(&dir)?;
-    let mut out = Vec::new();
-    walk(&root, &root, &mut out, 0);
-    out.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(out)
+pub async fn pack_files(dir: String) -> Result<Vec<PackFile>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = package_dir(&dir)?;
+        let mut out = Vec::new();
+        walk(&root, &root, &mut out, 0);
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("package file scan failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]

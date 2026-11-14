@@ -1523,9 +1523,7 @@ async function cleanupArtifacts() {
 
 /* ---------- package wizard ---------- */
 
-async function refreshPackTool() {
-  const info = await invoke("pack_tool_info");
-  ctx.packInfo = info;
+function renderPackStatus(info) {
   const badge = $("pack-status");
   if (info.available) {
     badge.textContent = info.version || "eco-pack готов";
@@ -1539,6 +1537,16 @@ async function refreshPackTool() {
   if (info.default_key && !$("pack-key").value) {
     $("pack-key").value = info.default_key;
   }
+}
+
+async function refreshPackTool(force) {
+  if (ctx.packInfo && !force) {
+    renderPackStatus(ctx.packInfo);
+    return;
+  }
+  const info = await invoke("pack_tool_info");
+  ctx.packInfo = info;
+  renderPackStatus(info);
 }
 
 function packLog(text, ok) {
@@ -2250,7 +2258,7 @@ async function init() {
     await refreshLlmKeyStatus();
     await refreshApps();
     await refreshArtifacts();
-    await refreshPackTool();
+    await refreshPackTool(true);
     await refreshSecrets();
     await refreshMcpServers();
   });
