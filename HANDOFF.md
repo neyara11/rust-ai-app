@@ -58,6 +58,7 @@ eco-platform.exe --trust dev\keys\trusted.pub
 | `tools/signer` | genkey / sign / verify для пакетов |
 | `tools/package.ps1` | одна команда: сборка конвертера → hashes → подпись → `--verify` → `--install` |
 | `tools/vendor.ps1` | вендоринг движка в `vendor/engine` (opencode + models.json + хеши) |
+| `tools/build-installer.ps1` | `cargo tauri build` + dev-подпись (self-signed или `-Thumbprint`) |
 | `tools/docx-export` | Python-скрипт markdown → docx, PyInstaller-сборка, README |
 | `tools/stub-llm/server.js` | локальная заглушка OpenAI-совместимого API (порт 4098) |
 | `dev-apps/*` | подписанные пакеты-примеры: `doc-writer`, `doc-lookup` |
@@ -110,7 +111,8 @@ eco-platform.exe --trust dev\keys\trusted.pub
 - `bundle.active: true`: NSIS `perMachine`, WebView2 `offlineInstaller`.
 - Движок запускается с `OPENCODE_DISABLE_MODELS_FETCH`, `..._DEFAULT_PLUGINS`,
   `..._LSP_DOWNLOAD`; провайдер встроен в бинарь, npm в рантайме не нужен.
-- Установщик пока не подписан Authenticode.
+- Установщик подписывается dev self-signed сертификатом (`tools/build-installer.ps1`);
+  для поставки нужен сертификат УЦ/ИБ.
 
 ### Секреты
 - DPAPI (per-user) в `<home>\secrets\<name>.bin`, в конфиг не попадают.
@@ -210,14 +212,19 @@ eco-platform.exe --trust dev\keys\trusted.pub
 - Версии: установка 0.1.0 → 0.2.0 архивирует 0.1.0; повторная установка 0.1.0
   отклонена; `--rollback` вернул 0.1.0, `--history` показывает 0.2.0/0.1.0,
   в `audit/doc-writer.jsonl` появилось событие `rollback` с `source: admin`.
+- Authenticode: self-signed `CN=ECO AIOps Dev`; `Get-AuthenticodeSignature` даёт
+  `Valid` для `eco-platform.exe`, MSI и NSIS (сертификат добавлен в
+  `CurrentUser\Root`/`TrustedPublisher`). В MSI-раскладке exe тоже подписан.
 
 ## 6. Что НЕ реализовано (важно)
 
 ### Блокеры для «настоящего» продукта
-1. **Установщик не подписан.** `bundle.active: true`, NSIS `perMachine`, WebView2
-   `offlineInstaller`; MSI/NSIS собираются. Authenticode-сертификата нет, CI, SBOM,
-   SAST/SCA нет, установка на чистую машину не проверялась. Для офлайн-сборки нужны
-   кеши Tauri: `%LOCALAPPDATA%\tauri\{NSIS,WixTools314,x64}` (там bootstrapper
+1. **Подпись есть, но dev-сертификатом.** `bundle.active: true`, NSIS `perMachine`,
+   WebView2 `offlineInstaller`; MSI/NSIS собираются. `tools/build-installer.ps1`
+   создаёт self-signed `CN=ECO AIOps Dev` и подписывает exe/MSI/NSIS (SHA-256).
+   Для поставки нужен сертификат УЦ/ИБ (thumbprint или `signCommand` для HSM),
+   CI, SBOM, SAST/SCA; установка на чистой машине не проверялась. Для офлайн-сборки
+   нужны кеши Tauri: `%LOCALAPPDATA%\tauri\{NSIS,WixTools314,x64}` (там bootstrapper
    WebView2) или `fixedRuntime` с локальной папкой рантайма.
 2. **opencode вендорен скриптом, а не артефактом в git.** `tools/vendor.ps1` кладёт
    `opencode.exe` и `models.json` в `vendor/engine` (gitignored); платформа ищет бинарь
@@ -263,6 +270,13 @@ eco-platform.exe --trust dev\keys\trusted.pub
 - Tauri CLI 2 установлен (`cargo install tauri-cli --version "^2"`); `cargo tauri build`
   в `src-tauri` собирает MSI и NSIS. NSIS/WiX/WebView2-bootstrapper скачиваются при
   первой сборке и кешируются в `%LOCALAPPDATA%\tauri`.
+- `signtool.exe` есть в Windows Kits 10.0.26100 (Tauri находит сам).
+  Dev-подпись: `CN=ECO AIOps Dev`, self-signed, `Cert:\CurrentUser\My`,
+  thumbprint `FE1D3554E6A62D645A94E77D9E7D437827B45F05` (до 2029-11-14, ключ
+  non-exportable). `tools/build-installer.ps1 -Trust` дополнительно кладёт его в
+  `CurrentUser\Root`/`TrustedPublisher` — только для локальной проверки.
+  Tauri после бандлинга оставляет `target\release\eco-platform.exe` без подписи,
+  поэтому скрипт подписывает его повторно; подписанные копии внутри MSI/NSIS.
 - crates.io и registry.npmjs.org доступны **на этой машине**. В целевом контуре —
   нет, нужен vendor/mirror.
 - **rustls не проходит** к `mcp.context7.com` (таймаут 60 с), Schannel проходит.
@@ -317,7 +331,8 @@ eco-platform.exe --trust dev\keys\trusted.pub
 
 1. ~~Скрипт сборки/подписи пакета~~ — сделано: `tools/package.ps1` (P1).
 2. Инсталлятор и вендоринг opencode/npm/WebView2 для закрытого контура (P2) —
-   частично: бандл и офлайн-движок готовы, нет Authenticode и проверки на чистой машине.
+   сделано: бандл, офлайн-движок и dev-подпись; для поставки нужен сертификат УЦ и
+   проверка на чистой машине.
 3. Реестр версий и управляемый откат (P3) — сделано: `--history`, `--rollback`,
    `--check`, архив `versions/`, аудит отката.
 4. Идентичность агента и аудит вызовов LLM (Observability отложена) (P4).
@@ -372,7 +387,7 @@ eco-platform.exe --trust dev\keys\trusted.pub
   вернул `ok: true`, установка прошла; повторный прогон без изменений не меняет
   манифест; подмена хеша в копии пакета исправляется прогоном.
 
-### P2. Инсталлятор и вендоринг — сделано (2026-11-14, кроме Authenticode)
+### P2. Инсталлятор и вендоринг — сделано (2026-11-14, dev-подпись)
 
 - `bundle.active: true`: NSIS `perMachine`, WebView2 `offlineInstaller`, ресурс
   `vendor/engine` → `engine/` рядом с `eco-platform.exe`.
@@ -384,9 +399,10 @@ eco-platform.exe --trust dev\keys\trusted.pub
 - Проверено: `--chat-async` с vendored бинарём и мёртвым прокси завершился успешно,
   внешних соединений 0, `node_modules`/`package.json` в профиле не создаются;
   MSI/NSIS собраны, MSI-раскладка содержит `engine\opencode.exe` и работает офлайн.
-- Осталось: Authenticode-подпись установщика (нужен сертификат); проверка установки
-  на чистой машине; для офлайн-сборки — кеши Tauri (NSIS/WiX/WebView2) или
-  `fixedRuntime`; CI, SBOM, SAST/SCA.
+- Осталось: для поставки заменить self-signed сертификат на сертификат УЦ/ИБ
+  (`-Thumbprint` или `signCommand` для HSM); проверить установку на чистой машине;
+  для офлайн-сборки — кеши Tauri (NSIS/WiX/WebView2) или `fixedRuntime`; CI, SBOM,
+  SAST/SCA.
 
 ### P3. Реестр версий и откат — сделано (2026-11-14)
 
@@ -446,6 +462,7 @@ eco-platform.exe --trust dev\keys\trusted.pub
 1. Прочитать §1–§8, запустить приложение по §2.
 2. Проверить `--list`, `--verify dev-apps/doc-writer`, `--chat-async doc-writer ...`.
 3. Пересобрать пакет через `powershell -File tools\package.ps1` (P1 сделано).
-4. Собрать дистрибутив: `powershell -File tools\vendor.ps1`, затем `cargo tauri build`
-   (P2 сделано, кроме Authenticode; см. §6 и §7).
+4. Собрать дистрибутив: `powershell -File tools\vendor.ps1`, затем
+   `powershell -File tools\build-installer.ps1 -Trust` (P2 сделано с dev-подписью;
+   для поставки — сертификат УЦ, см. §6 и §7).
 5. Взять P4: идентичность агента и аудит вызовов LLM.

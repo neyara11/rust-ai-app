@@ -5,9 +5,9 @@ Windows-приложение и устанавливает в него подп�
 промпт, скилы, подключения и инструменты. Агентский движок — [opencode](https://opencode.ai)
 sidecar, интерфейс — Tauri v2 + WebView2.
 
-> Статус: рабочий прототип, не production. Нет инсталлятора, Authenticode-подписи,
-> офлайн-вендоринга opencode и песочницы процессов. Полный список — в `HANDOFF.md` §6
-> и §11.
+> Статус: рабочий прототип, не production. Инсталляторы и dev-подпись есть; нет
+> production-сертификата Authenticode, проверки на чистой машине и песочницы
+> процессов. Полный список — в `HANDOFF.md` §6 и §11.
 
 ![Превью](preview-dark.png)
 
@@ -122,6 +122,7 @@ powershell -File tools\package.ps1 -SkipConverter   # только hashes/sign/v
 
 ```powershell
 powershell -File tools\vendor.ps1     # vendor/engine: opencode.exe + models.json + хеши
+powershell -File tools\build-installer.ps1 -Trust   # сборка + dev-подпись (self-signed)
 cargo tauri build                     # NSIS per-machine, WebView2 offlineInstaller
 ```
 
@@ -140,7 +141,13 @@ cargo tauri build                     # NSIS per-machine, WebView2 offlineInstal
 - Результат: MSI ~286 МБ и NSIS ~267 МБ в `src-tauri/target/release/bundle/`;
   административное извлечение MSI подтверждает `engine\opencode.exe` рядом с
   `eco-platform.exe`.
-- Authenticode-подпись установщика пока не настроена (нужен сертификат).
+- Подпись Authenticode для dev-сборки:
+  `powershell -File tools\build-installer.ps1 -Trust` создаёт self-signed
+  code-signing сертификат `CN=ECO AIOps Dev` в `Cert:\CurrentUser\My`, подписывает
+  `eco-platform.exe`, MSI и NSIS (SHA-256). `-Trust` добавляет сертификат в
+  `CurrentUser\Root` и `TrustedPublisher`, иначе статус будет `UntrustedRoot`.
+  Для поставки подписывать сертификатом УЦ: `-Thumbprint <sha1>` (или свой
+  `signCommand` для HSM/токена). Self-signed сертификат — только для dev.
 
 ## Файловые инструменты
 
@@ -214,8 +221,9 @@ MCP (JSON/SSE), лимит ответа, endpoint.
 
 ## Ограничения
 
-- Нет Authenticode и проверки установки на чистой машине; вендоринг движка —
-  скриптом `tools/vendor.ps1`, артефакты не в git.
+- Authenticode — только dev self-signed сертификат; нет production-сертификата УЦ и
+  проверки установки на чистой машине; вендоринг движка — скриптом
+  `tools/vendor.ps1`, артефакты не в git.
 - Нет песочницы процессов; пакетный exe работает с правами пользователя.
 - Нет идентичности агента и аудита вызовов LLM; Observability отложена.
 - Docs-подсистема в backend осталась мёртвым кодом после перехода на файловый сценарий.
