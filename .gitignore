@@ -17,4 +17,7 @@ Thumbs.db
 /tools/pack/target
 /docs/SECURITY_REQUIREMENTS.md
 /examples/*.zip
+/examples/dev.key
+/examples/trusted.pub
+/examples/dify-plugin-publishing/
 /dist
