@@ -25,7 +25,8 @@
     "active": true,
     "icon": ["icons/icon.ico", "icons/icon.png"],
     "resources": {
-      "../vendor/engine/": "engine/"
+      "../vendor/engine/": "engine/",
+      "../vendor/pack/": "pack/"
     },
     "windows": {
       "webviewInstallMode": {

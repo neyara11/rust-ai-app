@@ -66,7 +66,7 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 | `tools/package.ps1` | одна команда: сборка конвертера → hashes → подпись → `--verify` → `--install` |
 | `tools/vendor.ps1` | вендоринг движка в `vendor/engine` (opencode + models.json + хеши) с проверкой `tools/engine.lock.json` |
 | `tools/engine.lock.json` | пин движка: точная версия opencode и sha256 `opencode.exe`/`models.json` |
-| `tools/build-installer.ps1` | `cargo tauri build` + dev-подпись (self-signed или `-Thumbprint`) |
+| `tools/build-installer.ps1` | `cargo tauri build` + dev-подпись; сам собирает движок и `eco-pack` (если не `-SkipVendor`/`-SkipPack`) |
 | `tools/pack` | `eco-pack`: офлайн-утилита автора мини-приложения (init/validate/build/sign/dev-install) |
 | `tools/build-pack.ps1` | сборка `eco-pack.exe` и Authenticode-подпись в `vendor/pack` |
 | `tools/docx-export` | Python-скрипт markdown → docx, PyInstaller-сборка, README |
@@ -599,7 +599,7 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
 ### P2. Инсталлятор и вендоринг — сделано (2026-11-14, dev-подпись)
 
 - `bundle.active: true`: NSIS `perMachine`, WebView2 `offlineInstaller`, ресурс
-  `vendor/engine` → `engine/` рядом с `eco-platform.exe`.
+  `vendor/engine` → `engine/`, `vendor/pack` → `pack/` рядом с `eco-platform.exe`;
 - `tools/vendor.ps1` собирает вендоренный движок (`opencode.exe`, `models.json`,
   `VERSION.txt`, `sha256.json`); `vendor/` gitignored. Версия и хеши источника
   закреплены в `tools/engine.lock.json` (npm-зависимость — точная `1.19.5`), поэтому

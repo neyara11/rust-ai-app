@@ -185,14 +185,17 @@ eco-pack dev-install D:\apps\my-app `
 
 ```powershell
 powershell -File tools\vendor.ps1     # vendor/engine + сверка с tools/engine.lock.json
+powershell -File tools\build-pack.ps1 # vendor/pack/eco-pack.exe
 powershell -File tools\build-installer.ps1 -Trust   # сборка + dev-подпись (self-signed)
-cargo tauri build                     # NSIS per-machine, WebView2 offlineInstaller
 ```
 
-Для `cargo tauri build` нужен Tauri CLI 2 (`cargo install tauri-cli --version "^2"`).
+`build-installer.ps1` сам вызывает `vendor.ps1` и `build-pack.ps1`
+(`-SkipVendor`/`-SkipPack` отключают шаги). Для `cargo tauri build` нужен Tauri CLI 2
+(`cargo install tauri-cli --version "^2"`).
 
 - `bundle.active: true`; `vendor/engine` попадает в `engine/` рядом с
-  `eco-platform.exe` (ресурсы Tauri).
+  `eco-platform.exe`, `vendor/pack` — в `pack/` (`eco-pack.exe` доступен мастеру
+  пакета из установленной платформы).
 - Движок не ходит в сеть и не требует npm: включены
   `OPENCODE_DISABLE_MODELS_FETCH`/`..._DEFAULT_PLUGINS`/`..._LSP_DOWNLOAD`, а
   провайдер `@ai-sdk/openai-compatible` встроен в бинарь opencode.

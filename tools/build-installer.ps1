@@ -3,7 +3,8 @@ param(
     [string]$Thumbprint = "",
     [switch]$Trust,
     [switch]$SkipSign,
-    [switch]$SkipVendor
+    [switch]$SkipVendor,
+    [switch]$SkipPack
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +14,11 @@ $srcTauri = Join-Path $repo "src-tauri"
 
 if (-not $SkipVendor) {
     & (Join-Path $repo "tools\vendor.ps1")
+}
+
+if (-not $SkipPack) {
+    & (Join-Path $repo "tools\build-pack.ps1")
+    if ($LASTEXITCODE -ne 0) { throw "eco-pack build failed" }
 }
 
 $buildArgs = @("tauri", "build")
