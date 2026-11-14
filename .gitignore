@@ -15,3 +15,4 @@ Thumbs.db
 .idea/
 /vendor
 /tools/pack/target
+/docs/SECURITY_REQUIREMENTS.md
