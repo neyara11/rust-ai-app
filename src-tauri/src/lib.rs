@@ -39,6 +39,7 @@ pub fn run() {
             commands::close_all_apps,
             commands::choose_workspace,
             commands::artifacts_usage,
+            commands::artifact_grep,
             commands::cleanup_artifacts,
             commands::mcp_servers,
             commands::mcp_server_get,
@@ -257,6 +258,56 @@ pub fn cli_check(arg: Option<&String>) -> i32 {
 }
 
 
+
+/// `--artifacts <app-id>`: artifact usage and NDJSON dump files.
+pub fn cli_artifacts(app: Option<&String>) -> i32 {
+    let Some(app_id) = app else {
+        eprintln!("usage: eco-platform --artifacts <app-id>");
+        return 2;
+    };
+    let home = registry::home();
+    let root = artifacts::sessions_root(&home, app_id);
+    let out = serde_json::json!({
+        "app_id": app_id,
+        "usage": artifacts::usage(&root),
+        "dumps": artifacts::list_dumps(&root)
+    });
+    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+    0
+}
+
+/// `--grep-artifacts <app-id> <query> [session]`: case-insensitive search over
+/// the session NDJSON dumps.
+pub fn cli_grep_artifacts(
+    app: Option<&String>,
+    query: Option<&String>,
+    session: Option<&String>,
+) -> i32 {
+    let (Some(app_id), Some(query)) = (app, query) else {
+        eprintln!("usage: eco-platform --grep-artifacts <app-id> <query> [session]");
+        return 2;
+    };
+    let home = registry::home();
+    let root = artifacts::sessions_root(&home, app_id);
+    match artifacts::grep(&root, query, session.map(String::as_str), 100) {
+        Ok(hits) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "app_id": app_id,
+                    "hits": hits
+                }))
+                .unwrap_or_default()
+            );
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
+}
 
 /// Headless MCP probe: `--mcp-probe <url>`.
 pub fn cli_mcp_probe(url: Option<&String>) -> i32 {
@@ -627,20 +678,10 @@ pub fn cli_chat(
         return 2;
     };
     let home = registry::home();
-    let policy = config::policy(&home);
-    let root = artifacts::sessions_root(&home, app_id);
-    let dir = match artifacts::open_session(&root, &policy) {
-        Ok(d) => d,
-        Err(e) => {
-            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
-            return 1;
-        }
-    };
     let engine = match engine::Engine::start(app_id, &home, &config::workspace(&home, app_id)) {
         Ok(e) => e,
         Err(e) => {
             println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
-            artifacts::close_session(&dir);
             return 1;
         }
     };
@@ -651,7 +692,6 @@ pub fn cli_chat(
         .prompt(message, level.map(|l| l.as_str()))
         .and_then(|_| session.history());
     drop(engine);
-    artifacts::close_session(&dir);
     match result {
         Ok(items) => {
             for item in items {
@@ -751,20 +791,10 @@ pub fn cli_chat_async(app_id: Option<&String>, message: Option<&String>) -> i32 
         return 2;
     };
     let home = registry::home();
-    let policy = config::policy(&home);
-    let root = artifacts::sessions_root(&home, app_id);
-    let dir = match artifacts::open_session(&root, &policy) {
-        Ok(d) => d,
-        Err(e) => {
-            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
-            return 1;
-        }
-    };
     let engine = match engine::Engine::start(app_id, &home, &config::workspace(&home, app_id)) {
         Ok(e) => e,
         Err(e) => {
             println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
-            artifacts::close_session(&dir);
             return 1;
         }
     };
@@ -822,7 +852,6 @@ pub fn cli_chat_async(app_id: Option<&String>, message: Option<&String>) -> i32 
     println!("prompt finished in {} ms", started.elapsed().as_millis());
 
     drop(engine);
-    artifacts::close_session(&dir);
     match result {
         Ok(items) => {
             for item in items {
@@ -849,20 +878,10 @@ pub fn cli_chat_sessions(app_id: Option<&String>) -> i32 {
         return 2;
     };
     let home = registry::home();
-    let policy = config::policy(&home);
-    let root = artifacts::sessions_root(&home, app_id);
-    let dir = match artifacts::open_session(&root, &policy) {
-        Ok(d) => d,
-        Err(e) => {
-            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
-            return 1;
-        }
-    };
     let mut engine = match engine::Engine::start(app_id, &home, &config::workspace(&home, app_id)) {
         Ok(e) => e,
         Err(e) => {
             println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
-            artifacts::close_session(&dir);
             return 1;
         }
     };
@@ -876,14 +895,12 @@ pub fn cli_chat_sessions(app_id: Option<&String>) -> i32 {
         Err(e) => {
             println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
             drop(engine);
-            artifacts::close_session(&dir);
             return 1;
         }
     }
     if let Err(e) = engine.new_session("Проверка нового чата") {
         println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
         drop(engine);
-        artifacts::close_session(&dir);
         return 1;
     }
     match engine.sessions() {
@@ -896,7 +913,6 @@ pub fn cli_chat_sessions(app_id: Option<&String>) -> i32 {
         Err(e) => println!("{{ \"ok\": false, \"problem\": \"{e}\" }}"),
     }
     drop(engine);
-    artifacts::close_session(&dir);
     0
 }
 

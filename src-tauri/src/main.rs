@@ -25,6 +25,12 @@ fn main() {
             args.get(1),
             args.get(2),
         )),
+        Some("--artifacts") => std::process::exit(eco_platform_lib::cli_artifacts(args.get(1))),
+        Some("--grep-artifacts") => std::process::exit(eco_platform_lib::cli_grep_artifacts(
+            args.get(1),
+            args.get(2),
+            args.get(3),
+        )),
         Some("--secret-add") => std::process::exit(eco_platform_lib::cli_secret_add(args.get(1), args.get(2))),
         Some("--import-auth") => std::process::exit(eco_platform_lib::cli_import_auth(args.get(1), args.get(2), args.get(3))),
         Some("--chat-sessions") => std::process::exit(eco_platform_lib::cli_chat_sessions(args.get(1))),
@@ -55,11 +61,17 @@ fn main() {
             args.get(4),
         )),
         Some("--mcp-proxy") => match (args.get(1), args.get(2)) {
-            (Some(app_id), Some(session)) => std::process::exit(
-                eco_platform_lib::proxy::serve(app_id, std::path::Path::new(session)),
+            (Some(app_id), Some(workspace)) => std::process::exit(
+                eco_platform_lib::proxy::serve(
+                    app_id,
+                    std::path::Path::new(workspace),
+                    args.get(3).map(|arg| std::path::Path::new(arg)),
+                ),
             ),
             _ => {
-                eprintln!("usage: eco-platform --mcp-proxy <app-id> <session-dir>");
+                eprintln!(
+                    "usage: eco-platform --mcp-proxy <app-id> <workspace> [artifact-session-dir]"
+                );
                 std::process::exit(2);
             }
         },

@@ -270,6 +270,23 @@ pub fn artifacts_usage(state: tauri::State<'_, AppState>, app_id: String) -> art
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub fn artifact_grep(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    query: String,
+    session: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<artifacts::GrepHit>> {
+    let root = artifacts::sessions_root(&state.home, &app_id);
+    artifacts::grep(
+        &root,
+        &query,
+        session.as_deref(),
+        limit.unwrap_or(50).clamp(1, 500),
+    )
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub fn cleanup_artifacts(
     state: tauri::State<'_, AppState>,
     app_id: String,

@@ -52,7 +52,7 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 | `src-tauri/src/manifest.rs` | манифест пакета, Ed25519-подпись, sha256, schema |
 | `src-tauri/src/allowlist.rs` | подписанный allowlist/CRL одобренных приложений и версий |
 | `src-tauri/src/registry.rs` | установка/удаление, fail-closed, список, trust anchor |
-| `src-tauri/src/artifacts.rs` | сессии, квоты, TTL, sweep осиротевших |
+| `src-tauri/src/artifacts.rs` | сессии, NDJSON-дампы, grep, квоты, TTL, sweep |
 | `src-tauri/src/identity.rs` | короткоживущие токены приложений, отзыв, псевдоним пользователя |
 | `src-tauri/src/secrets.rs` | DPAPI (CryptProtectData) |
 | `src-tauri/src/mcp.rs` | MCP-клиент (streamable HTTP + SSE), лимит 64 КиБ |
@@ -120,6 +120,10 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 - Все пути относительные; абсолютные, `..` и выход за папку (включая symlink/junction)
   отклоняются после канонизации. Чтение ≤ 64 КиБ, запись ≤ 1 МиБ, листинг ≤ 200 записей.
 - Квоты/TTL артефактов сессии сохраняются; рабочая папка пользователя не удаляется.
+- Каждый запуск движка открывает артефакт-сессию; tool-результаты ≥ 8 КиБ (и все
+  усечённые) пишутся в `sessions/<id>/dumps.ndjson` с лимитом сессии. Дамп не
+  ломает tool-вызов при превышении квоты. Поиск/список: `--artifacts <app>`,
+  `--grep-artifacts <app> <query> [session]` и Tauri-команда `artifact_grep`.
 - Типизированная docs-подсистема удалена (P6): нет `docs.rs`, doc-команд, поля `docs`
   в манифесте/реестре и UI документов. `doc-lookup` переведён на файловый сценарий.
 
@@ -234,14 +238,15 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 
 ### CLI
 `--verify`, `--install`, `--list`, `--trust`, `--untrust`, `--anchor`,
-`--allowlist`, `--allowlist-verify`, `--allowlist-check`, `--secret-add`,
+`--allowlist`, `--allowlist-verify`, `--allowlist-check`, `--artifacts`,
+`--grep-artifacts`, `--secret-add`,
 `--import-auth`, `--mcp-probe`, `--mcp-call`, `--mcp-add`, `--mcp-call-app`,
 `--chat <app> <text> [low|medium|high]`, `--chat-async`, `--chat-sessions`,
 `--tokens [app]`, `--issue-token <app> [ttl-hours]`, `--revoke <token-id|app-id>`,
 `--unrevoke <app-id>`.
 
 ### Тесты
-`cargo test --manifest-path src-tauri/Cargo.toml` — 35 тестов: подпись/хеши/схема,
+`cargo test --manifest-path src-tauri/Cargo.toml` — 36 тестов: подпись/хеши/схема,
 path traversal, sweep артефактов, разбор MCP (JSON/SSE),
 лимит ответа, разбор endpoint, allow-list, file tools и path escape шлюза,
 allowlist (версии/revoked/TTL/две подписи) и ротация anchor.
@@ -295,7 +300,11 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   (37 КБ, ZIP-заголовок), аудит `platform_write_file` + `platform_docx_export`;
   `tools/ui-smoke` (`npm test`) прошёл: каталог, allowlist-бейдж, disabled у
   недоверенного пакета, markdown/статистика чата, переключение приложения.
-- `cargo test` — 35 тестов, включая detection/derive старых заголовков и схему
+- P11: `read_file` на 14 КБ через `--mcp-proxy` создал
+  `sessions/s-test-artifacts/dumps.ndjson` (14486 байт); `--artifacts` и
+  `--grep-artifacts doc-writer ARTIFACTNEEDLE` нашли запись, токены/тестовые
+  файлы после проверки удалены.
+- `cargo test` — 36 тестов, включая detection/derive старых заголовков и схему
   пакетного инструмента с `input`/`output`.
 - `eco-pack` (release, Authenticode `Valid`): `init` → `validate` (до build падает на
   непокрытых hashes) → `build` (zip) → `keygen` → `sign` → `verify` → `dev-install`
@@ -332,8 +341,9 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
 ### Функциональные пробелы
 3. Нет полной матрицы совместимости платформа × пакет. Реестр версий, архив и
    `--rollback` сделаны (P3); проверяются `min_shell_version` и запрет downgrade.
-4. Нет артефактов-дампов, grep/query по NDJSON, квот для них; `artifacts.rs` сейчас
-   считает пустые сессии.
+4. ~~Нет артефактов-дампов, grep/query по NDJSON, квот~~ — сделано (P11):
+   движок открывает артефакт-сессию, крупные tool-результаты пишутся в
+   `dumps.ndjson`, есть квоты/TTL, `--artifacts`, `--grep-artifacts`, `artifact_grep`.
 5. ~~Нет идентичности агента~~ — сделано (P4): короткоживущие токены, отзыв,
    маркировка `X-Agent-Id`/`X-User`/`X-Request-Id`; токен локальный, не от
    централизованной системы ключей.
@@ -608,7 +618,7 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   browser-mock: каталог, allowlist-бейдж, запрет недоверенного пакета, рендер чата,
   переключение приложения).
 - Проверено: e2e создал `note.md` → `note.docx` (37 КБ, real LLM); `npm test` в
-  `tools/ui-smoke` — `ui smoke ok`; `cargo test` — 35 тестов.
+  `tools/ui-smoke` — `ui smoke ok`; `cargo test` — 36 тестов.
 
 ### P8. Standalone-утилита `eco-pack` — сделано (2026-11-14)
 
@@ -674,6 +684,23 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
 - Осталось: доставка allowlist по GPO/HTTPS и его аудит на стороне ИБ; подпись
   allowlist сейчас через `tools/signer sign <file> --key ... --out allowlist.sig`.
 
+### P11. Артефакты, NDJSON-дампы и grep — сделано (2026-11-14)
+
+- `artifacts.rs`: `append_dump` (NDJSON, лимит `session_quota_bytes`, отказ не
+  ломает tool-вызов), `list_dumps`, `grep` (case-insensitive, лимит 100/500,
+  фильтр по сессии); квоты/TTL/sweep переиспользуются.
+- Движок при старте открывает артефакт-сессию (`ArtifactGuard` закрывает маркер
+  при ошибке старта, `Drop` — при остановке) и передаёт её путь шлюзу.
+- Шлюз (`--mcp-proxy <app> <workspace> <artifact-dir>`) пишет результат в
+  `dumps.ndjson`, если он ≥ 8 КиБ или усечён; квота сессии не влияет на ответ
+  модели и аудит.
+- CLI: `--artifacts <app>`, `--grep-artifacts <app> <query> [session]`;
+  Tauri-команда `artifact_grep`; UI `artifacts_usage`/`cleanup_artifacts` работают
+  с теми же сессиями.
+- Проверено: `read_file` 14 КБ через прокси → `dumps.ndjson` 14486 байт, grep
+  нашёл уникальную строку; unit-тест покрывает квоту и поиск.
+- Осталось: UI-поиск по артефактам (сейчас CLI/команда) и экспорт дампов.
+
 ### С чего начать
 
 1. Прочитать §1–§8, запустить приложение по §2.
@@ -689,9 +716,9 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
    allowlist.sig`) и положить в `%ProgramData%\EcoAIOps\`; проверить `--allowlist`.
 6. Для разработки мини-приложений внешними авторами: `tools\build-pack.ps1` →
    `vendor/pack/eco-pack.exe` (P8 сделано); проверить на машине без Rust/Node/Python.
-7. P7 сделано; следующий фронт — функциональные пробелы: артефакт-дампы/grep по
-   NDJSON, матрица совместимости платформа × пакет, OS-песочница. P2/P10-эксплуатация
-   (сертификат УЦ, GPO/HTTPS) отложены как нереализуемые в текущем контуре.
+7. P7 и P11 сделаны. Следующие функциональные пробелы: матрица совместимости
+   платформа × пакет и OS-песочница. P2/P10-эксплуатация (сертификат УЦ, GPO/HTTPS)
+   отложены как нереализуемые в текущем контуре.
 8. Проверить идентичность: `--issue-token doc-writer 1` → `--tokens` →
    `--revoke <token_id>`; для app-отзыва: `--revoke doc-writer` →
    `--issue-token doc-writer` (должен отказать) → `--unrevoke doc-writer`;

@@ -248,7 +248,23 @@ pub struct Engine {
     pub app_name: String,
     pub app_version: String,
     pub token_id: String,
+    artifact_dir: PathBuf,
     pid_file: PathBuf,
+}
+
+/// Removes the `.active` marker if engine startup fails after the artifact
+/// session was created, so a failed start does not leave an unsweepable session.
+struct ArtifactGuard {
+    dir: PathBuf,
+    armed: bool,
+}
+
+impl Drop for ArtifactGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            crate::artifacts::close_session(&self.dir);
+        }
+    }
 }
 
 /// Recorded engine process identity: a stale pid file must not be used to kill
@@ -271,6 +287,7 @@ impl Drop for Engine {
         if recorded_pid(&self.pid_file) == Some(self.child.id()) {
             let _ = std::fs::remove_file(&self.pid_file);
         }
+        crate::artifacts::close_session(&self.artifact_dir);
     }
 }
 
@@ -451,6 +468,8 @@ pub struct GatewayConfig {
     pub exe: PathBuf,
     pub home: PathBuf,
     pub workspace: PathBuf,
+    /// Active artifact session; large tool results are dumped there.
+    pub artifacts: PathBuf,
 }
 
 fn build_config(
@@ -492,7 +511,8 @@ fn build_config(
                     gateway.exe.to_string_lossy(),
                     "--mcp-proxy",
                     app.app_id,
-                    gateway.workspace.to_string_lossy()
+                    gateway.workspace.to_string_lossy(),
+                    gateway.artifacts.to_string_lossy()
                 ],
                 "environment": {
                     "ECO_PLATFORM_HOME": gateway.home.to_string_lossy(),
@@ -757,6 +777,17 @@ impl Engine {
         let cfg = config::load(home);
         let secrets = SecretStore::new(home);
 
+        // One artifact session per engine run: large tool results are dumped
+        // as NDJSON there and swept by TTL/quota.
+        let artifact_dir = crate::artifacts::open_session(
+            &crate::artifacts::sessions_root(home, app_id),
+            &config::policy(home),
+        )?;
+        let mut artifact_guard = ArtifactGuard {
+            dir: artifact_dir.clone(),
+            armed: true,
+        };
+
         // Short-lived per-app token: the proxy validates it on every call and
         // `--revoke` can stop a running agent without reinstalling the app.
         let token = identity::issue(
@@ -774,6 +805,7 @@ impl Engine {
             home: std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()),
             workspace: std::fs::canonicalize(workdir)
                 .unwrap_or_else(|_| workdir.to_path_buf()),
+            artifacts: artifact_dir.clone(),
         };
 
         let (engine_config, provider_id, model_id, mut engine_envs) =
@@ -858,6 +890,7 @@ impl Engine {
             system.push_str(&skill);
         }
 
+        artifact_guard.armed = false;
         Ok(Self {
             child,
             base,
@@ -872,6 +905,7 @@ impl Engine {
             app_name: app.name.clone(),
             app_version: app.version.clone(),
             token_id: token.token_id.clone(),
+            artifact_dir,
             pid_file,
         })
     }

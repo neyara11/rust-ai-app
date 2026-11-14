@@ -23,6 +23,8 @@ const MAX_LIST_ENTRIES: usize = 200;
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PACKAGE_OUTPUT: usize = 64 * 1024;
 const PACKAGE_TOOL_TIMEOUT_SECS: u64 = 60;
+/// Results at least this large are also dumped to the artifact NDJSON.
+const DUMP_MIN_BYTES: usize = 8 * 1024;
 
 const FILE_TOOLS: &[&str] = &["list_files", "read_file", "write_file", "append_file"];
 
@@ -114,6 +116,7 @@ pub struct Proxy {
     app: Manifest,
     package_dir: PathBuf,
     workspace: PathBuf,
+    artifact_dir: Option<PathBuf>,
     servers: HashMap<String, McpSession>,
     routes: HashMap<String, Route>,
     tools: Vec<Value>,
@@ -161,7 +164,7 @@ fn resolve_identity(home: &Path, app: &Manifest) -> Result<ProxyIdentity> {
 }
 
 impl Proxy {
-    pub fn new(app_id: &str, workspace: &Path) -> Result<Self> {
+    pub fn new(app_id: &str, workspace: &Path, artifact_dir: Option<&Path>) -> Result<Self> {
         let home = registry::home();
         let app = registry::verified_manifest(&home, app_id)?;
         let package_dir = registry::apps_dir(&home).join(app_id);
@@ -169,12 +172,14 @@ impl Proxy {
             fs::create_dir_all(workspace)?;
         }
         let workspace = fs::canonicalize(workspace)?;
+        let artifact_dir = artifact_dir.filter(|dir| dir.is_dir());
         let identity = resolve_identity(&home, &app)?;
         Ok(Self {
             home,
             app,
             package_dir,
             workspace,
+            artifact_dir: artifact_dir.map(Path::to_path_buf),
             servers: HashMap::new(),
             routes: HashMap::new(),
             tools: Vec::new(),
@@ -525,7 +530,51 @@ impl Proxy {
             false,
             None,
         );
+        self.dump_result(&route, name, &request_id, &value, bytes, truncated);
         Ok((value, bytes, truncated))
+    }
+
+    /// Keeps large tool results for later grep/query. Quota overflow is not a
+    /// tool failure: the model already has the capped response.
+    fn dump_result(
+        &self,
+        route: &Route,
+        name: &str,
+        request_id: &str,
+        value: &Value,
+        bytes: usize,
+        truncated: bool,
+    ) {
+        let Some(dir) = &self.artifact_dir else {
+            return;
+        };
+        if bytes < DUMP_MIN_BYTES && !truncated {
+            return;
+        }
+        let (source, tool) = match route {
+            Route::Files => ("files".to_string(), name.to_string()),
+            Route::Package { tool, .. } => ("package".to_string(), tool.clone()),
+            Route::Remote { server, tool } => (server.clone(), tool.clone()),
+        };
+        let record = json!({
+            "ts": crate::artifacts::now_secs(),
+            "app_id": self.app.app_id,
+            "app_version": self.app.version,
+            "request_id": request_id,
+            "source": source,
+            "tool": tool,
+            "bytes": bytes,
+            "truncated": truncated,
+            "result": value
+        });
+        let policy = crate::config::policy(&self.home);
+        match crate::artifacts::append_dump(dir, &record, &policy) {
+            Ok(true) => {}
+            Ok(false) => eprintln!(
+                "eco-platform mcp proxy: artifact quota exceeded, dump for {name} skipped"
+            ),
+            Err(e) => eprintln!("eco-platform mcp proxy: cannot write artifact dump: {e}"),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1039,8 +1088,8 @@ fn handle(proxy: &mut Proxy, request: &Value) -> Option<Value> {
 
 /// Runs the stdio MCP gateway until the parent closes stdin. Never writes
 /// anything but JSON-RPC to stdout; diagnostics go to stderr.
-pub fn serve(app_id: &str, workspace: &Path) -> i32 {
-    let mut proxy = match Proxy::new(app_id, workspace) {
+pub fn serve(app_id: &str, workspace: &Path, artifacts: Option<&Path>) -> i32 {
+    let mut proxy = match Proxy::new(app_id, workspace, artifacts) {
         Ok(proxy) => proxy,
         Err(e) => {
             eprintln!("eco-platform mcp proxy: {e}");

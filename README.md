@@ -39,6 +39,8 @@ sidecar, интерфейс — Tauri v2 + WebView2.
   проверка при установке, запуске и откате.
 - **Незавершённые ходы.** Переключение приложения не закрывает движок: ход
   продолжается в фоне, старые чаты переименовываются из первого сообщения.
+- **Артефакты.** Крупные tool-результаты пишутся в NDJSON по сессиям с квотами и
+  TTL; есть `--artifacts`, `--grep-artifacts` и команда `artifact_grep`.
 
 Полный процесс разработки, тестирования, подписи ИБ и тиражирования —
 `docs/APP_LIFECYCLE.md`.
@@ -228,6 +230,8 @@ cargo tauri build                     # NSIS per-machine, WebView2 offlineInstal
 --allowlist                 статус разрешённого списка
 --allowlist-verify <file>   проверить подпись allowlist перед раскаткой
 --allowlist-check <app> [ver]  решение allowlist для установки/запуска
+--artifacts <app>           квоты и NDJSON-дампы сессий
+--grep-artifacts <app> <query> [session]  поиск по дампам
 --secret-add <name> <v>     сохранить секрет в DPAPI
 --import-auth <name> <json> <provider>
 --mcp-probe <url>
@@ -255,7 +259,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 Покрыты подпись/хеши/схема, версии и downgrade, path traversal, file tools, разбор
 MCP (JSON/SSE), лимит ответа, endpoint, allowlist (версии/revoked/TTL/подписи),
-ротация нескольких anchor и ремонт старых заголовков чатов.
+ротация нескольких anchor, ремонт старых заголовков чатов и квоты/grep NDJSON-дампов.
 
 E2E и UI-прогоны:
 

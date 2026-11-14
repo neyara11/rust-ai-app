@@ -1,14 +1,33 @@
 use crate::error::{msg, Result};
 use serde::Serialize;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const DUMP_FILE: &str = "dumps.ndjson";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
     pub sessions: usize,
     pub bytes: u64,
     pub files: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DumpFile {
+    pub session: String,
+    pub path: String,
+    pub bytes: u64,
+    pub modified: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GrepHit {
+    pub session: String,
+    pub path: String,
+    pub line: usize,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,6 +145,113 @@ pub fn close_session(dir: &Path) {
     }
 }
 
+/// Appends one NDJSON record to the session dump. Returns `false` when the
+/// session quota would be exceeded; callers must never fail the tool call just
+/// because its optional dump could not be stored.
+pub fn append_dump(
+    session_dir: &Path,
+    record: &serde_json::Value,
+    policy: &Policy,
+) -> Result<bool> {
+    fs::create_dir_all(session_dir)?;
+    let path = session_dir.join(DUMP_FILE);
+    let current = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let mut line = serde_json::to_string(record)?;
+    line.push('\n');
+    if current.saturating_add(line.len() as u64) > policy.session_quota_bytes {
+        return Ok(false);
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    file.write_all(line.as_bytes())?;
+    file.flush()?;
+    Ok(true)
+}
+
+/// Dump files across all sessions, newest session first.
+pub fn list_dumps(root: &Path) -> Vec<DumpFile> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let dump = path.join(DUMP_FILE);
+        let Ok(meta) = fs::metadata(&dump) else {
+            continue;
+        };
+        out.push(DumpFile {
+            session: entry.file_name().to_string_lossy().to_string(),
+            path: dump.display().to_string(),
+            bytes: meta.len(),
+            modified: meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        });
+    }
+    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out
+}
+
+/// Case-insensitive substring search over `dumps.ndjson`. `session` narrows
+/// the search to one session directory.
+pub fn grep(
+    root: &Path,
+    query: &str,
+    session: Option<&str>,
+    limit: usize,
+) -> Result<Vec<GrepHit>> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return msg("grep query is empty");
+    }
+    let mut out = Vec::new();
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(wanted) = session {
+            if name != wanted {
+                continue;
+            }
+        }
+        let path = dir.join(DUMP_FILE);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for (index, line) in text.lines().enumerate() {
+            if !line.to_lowercase().contains(&query) {
+                continue;
+            }
+            out.push(GrepHit {
+                session: name.clone(),
+                path: path.display().to_string(),
+                line: index + 1,
+                text: line.chars().take(400).collect(),
+            });
+            if out.len() >= limit {
+                return Ok(out);
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub fn sweep(root: &Path, policy: &Policy) -> Result<SweepReport> {
     let mut report = SweepReport {
         removed: 0,
@@ -189,6 +315,35 @@ mod tests {
         assert_eq!(report.removed, 1);
         assert!(!session.exists());
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dumps_are_quota_bound_and_searchable() {
+        let dir = std::env::temp_dir().join(format!("eco-dump-{}", now_secs()));
+        let _ = fs::remove_dir_all(&dir);
+        let policy = Policy {
+            session_quota_bytes: 220,
+            ..Policy::default()
+        };
+        let session = open_session(&dir, &policy).unwrap();
+        let record = serde_json::json!({
+            "tool": "query-docs",
+            "result": { "text": "PostgreSQL migration guidance" }
+        });
+        assert!(append_dump(&session, &record, &policy).unwrap());
+
+        let hits = grep(&dir, "POSTGRESQL", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line, 1);
+        assert!(hits[0].text.contains("query-docs"));
+        assert!(grep(&dir, "missing", None, 10).unwrap().is_empty());
+
+        let large = serde_json::json!({ "text": "x".repeat(300) });
+        assert!(!append_dump(&session, &large, &policy).unwrap());
+        assert_eq!(list_dumps(&dir).len(), 1);
+
+        close_session(&session);
         let _ = fs::remove_dir_all(&dir);
     }
 }
