@@ -49,6 +49,7 @@ eco-platform.exe --anchor                       # проверить source/fing
 | `src-tauri/src/registry.rs` | установка/удаление, fail-closed, список, trust anchor |
 | `src-tauri/src/docs.rs` | md-документы: ревизии, якоря, append/insert/replace/finalize |
 | `src-tauri/src/artifacts.rs` | сессии, квоты, TTL, sweep осиротевших |
+| `src-tauri/src/identity.rs` | короткоживущие токены приложений, отзыв, псевдоним пользователя |
 | `src-tauri/src/secrets.rs` | DPAPI (CryptProtectData) |
 | `src-tauri/src/mcp.rs` | MCP-клиент (streamable HTTP + SSE), лимит 64 КиБ |
 | `src-tauri/src/proxy.rs` | stdio-MCP шлюз: allow-list, file tools в рабочей папке, пакетные exe, аудит |
@@ -124,6 +125,30 @@ eco-platform.exe --anchor                       # проверить source/fing
 - DPAPI (per-user) в `<home>\secrets\<name>.bin`, в конфиг не попадают.
 - UI: «Ключ модели (DPAPI)» + произвольные секреты; CLI `--secret-add`, `--import-auth`.
 
+### Идентичность агента и аудит LLM
+- При старте движка платформа выпускает короткоживущий токен приложения
+  (12 ч, `identity/tokens.json` хранит только sha256). Сырой токен не пишется
+  на диск: он передаётся через env движка и подставляется в конфиг как
+  `{env:ECO_AGENT_TOKEN}` (и в provider headers, и в environment MCP-сервера).
+- Запись хранилища атомарная (temp + rename) и под межпроцессным lock-файлом;
+  повреждённый `tokens.json` — ошибка (fail-closed), а не пустой store.
+- Каждый вызов LLM маркируется `X-Agent-Id`, `X-Agent-Version`, `X-User`
+  (стабильный псевдоним `u_<hex>`), `X-Request-Id`, `X-Agent-Token-Id`.
+  Сам токен на внешний LLM-gateway не отправляется.
+- Шлюз проверяет токен при старте и на каждом вызове инструмента; отозванный или
+  истёкший токен — отказ. Remote MCP-вызовы получают `X-Agent-Id`, `X-User`,
+  свежий `X-Request-Id` и `X-Agent-Token-Id`.
+- Аудит: `action: llm` на каждый ход (app/version, token_id, request_id, модель,
+  tokens in/out/reasoning, ms, ok) и `action: tool`/`tool_denied`; содержимое
+  сообщений не пишется. `token_issue`, `token_revoke`, `app_revoke`,
+  `app_unrevoke` — в `audit/<app>.jsonl`.
+- `--revoke <token-id>` отзывает один токен; `--revoke <app-id>` ставит durable
+  маркер: перезапуск приложения не выпустит новый токен до `--unrevoke <app-id>`.
+  Обе формы останавливают движок; `--tokens` показывает токены и отозванные app.
+- `engine.pid` хранит JSON `{pid,image,created}`; kill выполняется только если
+  процесс совпадает по образу/времени создания, а `taskkill` подтвердил успех.
+  `Engine::Drop` удаляет pid-файл только если тот всё ещё принадлежит ему.
+
 ### MCP
 - Клиент: `initialize` → `tools/list` → `tools/call`, JSON или SSE, `Mcp-Session-Id`,
   Bearer-токен, лимит ответа 64 КиБ, таймауты.
@@ -179,7 +204,9 @@ eco-platform.exe --anchor                       # проверить source/fing
 ### CLI
 `--verify`, `--install`, `--list`, `--trust`, `--anchor`, `--secret-add`, `--import-auth`,
 `--mcp-probe`, `--mcp-call`, `--mcp-add`, `--mcp-call-app`,
-`--chat <app> <text> [low|medium|high]`, `--chat-async`, `--chat-sessions`.
+`--chat <app> <text> [low|medium|high]`, `--chat-async`, `--chat-sessions`,
+`--tokens [app]`, `--issue-token <app> [ttl-hours]`, `--revoke <token-id|app-id>`,
+`--unrevoke <app-id>`.
 
 ### Тесты
 `cargo test --manifest-path src-tauri/Cargo.toml` — 19 тестов: подпись/хеши/схема,
@@ -228,6 +255,14 @@ eco-platform.exe --anchor                       # проверить source/fing
   непокрытых hashes) → `build` (zip) → `keygen` → `sign` → `verify` → `dev-install`
   в отдельный профиль через debug-платформу; пакет виден в `--list` как trusted,
   установка попала в аудит.
+- Идентичность (P4): `--issue-token` → `--tokens` → `--revoke <app>` (durable
+  маркер: `--issue-token` и `--chat-async` отказывают до `--unrevoke`);
+  `--mcp-proxy` с отозванным токеном завершается `agent token ... is revoked`,
+  с валидным — `initialize` отвечает; токен не пишется на диск (tool-вызов
+  работает только через env-подстановку); `--revoke` с чужим pid отказывается
+  убивать процесс; `agent.token` больше нет, `engine.pid` удаляется после
+  остановки; в аудите `action: tool` с `token_id`/`request_id`/`agent_id`,
+  затем `action: llm` с токенами и `request_id`.
 
 ## 6. Что НЕ реализовано (важно)
 
@@ -250,10 +285,11 @@ eco-platform.exe --anchor                       # проверить source/fing
    Проверяются только `min_shell_version` и запрет downgrade.
 4. Нет артефактов-дампов, grep/query по NDJSON, квот для них; `artifacts.rs` сейчас
    считает пустые сессии.
-5. Нет идентичности агента: маркировки операций, короткоживущих токенов, отзыва.
-   Ключ — пользовательский, из DPAPI.
-6. Нет аудита вызовов LLM (MCP-вызовы агента уже пишутся в `audit/` со `source: agent`),
-   нет отправки в Observability. **Отправка отложена** — настраивать пока не на чем.
+5. ~~Нет идентичности агента~~ — сделано (P4): короткоживущие токены, отзыв,
+   маркировка `X-Agent-Id`/`X-User`/`X-Request-Id`; токен локальный, не от
+   централизованной системы ключей.
+6. Нет аудита вызовов LLM в Observability: локальный `action: llm` уже пишется,
+   отправка отложена — настраивать пока не на чем.
 7. Нет песочницы: движок и инструменты работают с правами пользователя. Встроенные
    tools выключены, но изоляции процесса/ФС нет.
 8. Нет маскирования ПДн/псевдонимизации. **Не требуется** на текущем этапе.
@@ -349,7 +385,8 @@ eco-platform.exe --anchor                       # проверить source/fing
    проверка на чистой машине.
 3. Реестр версий и управляемый откат (P3) — сделано: `--history`, `--rollback`,
    `--check`, архив `versions/`, аудит отката.
-4. Идентичность агента и аудит вызовов LLM (Observability отложена) (P4).
+4. ~~Идентичность агента и аудит вызовов LLM~~ — сделано (P4): токены, отзыв,
+   маркировка вызовов, локальный аудит LLM; Observability по-прежнему отложена.
 5. Таймауты/лимиты пакетных инструментов и изоляция процессов (P5).
 6. Чистка мёртвой docs-подсистемы, `doc-lookup` и вкладки ручных MCP-вызовов (P6).
 7. ~~Standalone `eco-pack` для авторов мини-приложений~~ — сделано: `tools/pack`,
@@ -439,14 +476,29 @@ eco-platform.exe --anchor                       # проверить source/fing
   отклонена; `--rollback` вернул 0.1.0 и записал аудит; `--check` дал `same`.
 - Матрица совместимости платформа × пакет пока не формализована.
 
-### P4. Идентичность агента и аудит LLM
+### P4. Идентичность агента и аудит LLM — сделано (2026-11-14)
 
-- Нет короткоживущих токенов на приложение, TTL/отзыва, маркировки
-  `X-Agent-Id`/`X-User`/`X-Request-Id`.
-- Аудит MCP/файлов/пакетных вызовов уже есть (`audit/<app>.jsonl`, `source: agent`),
-  вызовы LLM не аудируются. Observability отложена.
-- **Приёмка:** отзыв токена прекращает работу приложения; в аудите видно app/version
-  и операцию; секреты не попадают в лог.
+- `identity.rs`: токен на приложение/версию, TTL 12 ч (CLI может задать часы),
+  в `identity/tokens.json` только sha256; атомарная запись под lock-файлом;
+  повреждённый store — fail-closed. Выпуск/отзыв пишутся в аудит.
+- Сырой токен не персистится: env движка → `{env:ECO_AGENT_TOKEN}` в provider
+  headers и в environment MCP-сервера. На внешний LLM-gateway уходит только
+  `X-Agent-Token-Id`, не сам токен.
+- Шлюз проверяет токен при старте и на каждом вызове; remote MCP-вызовы
+  маркируются `X-Agent-Id`/`X-User`/`X-Request-Id`/`X-Agent-Token-Id`.
+- Аудит LLM: `action: llm` на каждый ход; текст сообщений не пишется.
+  Observability-отправка отложена.
+- CLI: `--tokens [app]`, `--issue-token <app> [ttl-hours]`,
+  `--revoke <token-id|app-id>`, `--unrevoke <app-id>`. App-отзыв durable:
+  перезапуск не выдаёт новый токен. Некорректный TTL и неизвестная цель дают
+  ошибку.
+- `engine.pid` — JSON с pid/image/created; kill только при совпадении процесса и
+  успешном `taskkill`; `--revoke` не рапортует успех, если движок не остановлен.
+- **Приёмка:** выполнена — отозванный токен отклоняется шлюзом, app-отзыв
+  переживает перезапуск, аудит содержит app/version и операцию, raw-токен не
+  попадает ни в конфиг, ни в аудит.
+- Осталось: токен локальный, не от централизованной системы ключей; в целевой
+  модели нужен выпуск/отзыв на стороне ИБ-контура.
 
 ### P5. Изоляция и лимиты
 
@@ -522,4 +574,9 @@ eco-platform.exe --anchor                       # проверить source/fing
    администратора (HKLM), для dev — debug-сборка или `ECO_PLATFORM_DEV=1`.
 6. Для разработки мини-приложений внешними авторами: `tools\build-pack.ps1` →
    `vendor/pack/eco-pack.exe` (P8 сделано); проверить на машине без Rust/Node/Python.
-7. Взять P4: идентичность агента и аудит вызовов LLM.
+7. P4 сделано; взять P5: таймауты и лимиты пакетных exe, изоляция процессов.
+8. Проверить идентичность: `--issue-token doc-writer 1` → `--tokens` →
+   `--revoke <token_id>`; для app-отзыва: `--revoke doc-writer` →
+   `--issue-token doc-writer` (должен отказать) → `--unrevoke doc-writer`;
+   в `audit/doc-writer.jsonl` должны быть `token_issue`, `token_revoke`,
+   `app_revoke`, `action: llm` и `action: tool`.

@@ -4,6 +4,7 @@ pub mod config;
 pub mod docs;
 pub mod engine;
 pub mod error;
+pub mod identity;
 pub mod manifest;
 pub mod mcp;
 pub mod proxy;
@@ -71,6 +72,7 @@ pub fn run() {
 
 /// Removes leftover staging directories and expired or orphaned session data.
 pub fn startup_sweep(home: &std::path::Path) {
+    identity::sweep(home);
     let policy = config::policy(home);
     for app in registry::list(home) {
         let root = artifacts::sessions_root(home, &app.app_id);
@@ -779,4 +781,196 @@ pub fn cli_chat_sessions(app_id: Option<&String>) -> i32 {
     drop(engine);
     artifacts::close_session(&dir);
     0
+}
+
+/// `--tokens [app-id]`: issued agent tokens (without hashes) and durable app
+/// revocations.
+pub fn cli_tokens(app_id: Option<&String>) -> i32 {
+    let home = registry::home();
+    let tokens = match identity::list(&home, app_id.map(String::as_str)) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            return 1;
+        }
+    };
+    let revoked = match identity::revoked_apps(&home) {
+        Ok(apps) => apps,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            return 1;
+        }
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "tokens": tokens,
+            "revoked_apps": revoked
+        }))
+        .unwrap_or_default()
+    );
+    0
+}
+
+/// `--issue-token <app-id> [ttl-hours]`: issues a short-lived per-app token and
+/// prints it once. The engine normally does this itself on start.
+pub fn cli_issue_token(app_id: Option<&String>, ttl: Option<&String>) -> i32 {
+    let Some(app_id) = app_id else {
+        eprintln!("usage: eco-platform --issue-token <app-id> [ttl-hours]");
+        return 2;
+    };
+    let home = registry::home();
+    let app = match registry::verified_manifest(&home, app_id) {
+        Ok(app) => app,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            return 1;
+        }
+    };
+    let ttl_secs = match ttl {
+        Some(value) => match value.parse::<u64>() {
+            Ok(hours) if hours > 0 => hours.saturating_mul(3600),
+            _ => {
+                eprintln!("ttl-hours must be a positive integer");
+                return 2;
+            }
+        },
+        None => identity::DEFAULT_TTL_SECS,
+    };
+    match identity::issue(&home, &app.app_id, &app.version, ttl_secs, "admin") {
+        Ok(issued) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&issued).unwrap_or_default()
+            );
+            0
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
+}
+
+/// `--revoke <token-id|app-id>`: revokes one token, or durably revokes an app
+/// and stops its engine. An app stays revoked across restarts until
+/// `--unrevoke`.
+pub fn cli_revoke(target: Option<&String>) -> i32 {
+    let Some(target) = target else {
+        eprintln!("usage: eco-platform --revoke <token-id|app-id>");
+        return 2;
+    };
+    let home = registry::home();
+
+    if target.starts_with("tok_") {
+        let records = match identity::revoke_token(&home, target) {
+            Ok(records) => records,
+            Err(e) => {
+                println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+                return 1;
+            }
+        };
+        if records.is_empty() {
+            println!(
+                "{{ \"ok\": false, \"problem\": \"no active token {target}\" }}"
+            );
+            return 1;
+        }
+        let apps: std::collections::BTreeSet<&str> =
+            records.iter().map(|record| record.app_id.as_str()).collect();
+        let mut problems = Vec::new();
+        for app in &apps {
+            if let Err(e) = engine::kill_leftover(&home, app) {
+                problems.push(format!("{app}: {e}"));
+            }
+        }
+        let ok = problems.is_empty();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": ok,
+                "revoked": records.len(),
+                "apps": apps,
+                "problems": problems
+            }))
+            .unwrap_or_default()
+        );
+        return if ok { 0 } else { 1 };
+    }
+
+    if registry::verified_manifest(&home, target).is_err() {
+        println!(
+            "{{ \"ok\": false, \"problem\": \"app {target} is not installed; nothing to revoke\" }}"
+        );
+        return 1;
+    }
+    let records = match identity::revoke_app(&home, target) {
+        Ok(records) => records,
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            return 1;
+        }
+    };
+    match engine::kill_leftover(&home, target) {
+        Ok(()) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "app_id": target,
+                    "revoked_app": true,
+                    "tokens_revoked": records.len()
+                }))
+                .unwrap_or_default()
+            );
+            0
+        }
+        Err(e) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": false,
+                    "app_id": target,
+                    "revoked_app": true,
+                    "tokens_revoked": records.len(),
+                    "problem": e.to_string()
+                }))
+                .unwrap_or_default()
+            );
+            1
+        }
+    }
+}
+
+/// `--unrevoke <app-id>`: removes the durable app revocation marker.
+pub fn cli_unrevoke(app_id: Option<&String>) -> i32 {
+    let Some(app_id) = app_id else {
+        eprintln!("usage: eco-platform --unrevoke <app-id>");
+        return 2;
+    };
+    let home = registry::home();
+    match identity::unrevoke_app(&home, app_id) {
+        Ok(true) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "app_id": app_id,
+                    "unrevoked": true
+                }))
+                .unwrap_or_default()
+            );
+            0
+        }
+        Ok(false) => {
+            println!(
+                "{{ \"ok\": false, \"problem\": \"app {app_id} is not revoked\" }}"
+            );
+            1
+        }
+        Err(e) => {
+            println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
+            1
+        }
+    }
 }

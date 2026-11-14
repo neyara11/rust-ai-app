@@ -119,10 +119,34 @@ impl McpSession {
     }
 
     pub fn call(&self, tool: &str, arguments: Value) -> Result<Value> {
-        self.rpc("tools/call", json!({ "name": tool, "arguments": arguments }))
+        self.call_with_headers(tool, arguments, &[])
+    }
+
+    /// Same as `call`, with per-request identity headers (agent id, user,
+    /// request id). Used by the platform gateway for remote MCP calls.
+    pub fn call_with_headers(
+        &self,
+        tool: &str,
+        arguments: Value,
+        headers: &[(String, String)],
+    ) -> Result<Value> {
+        self.rpc_with_headers(
+            "tools/call",
+            json!({ "name": tool, "arguments": arguments }),
+            headers,
+        )
     }
 
     fn rpc(&self, method: &str, params: Value) -> Result<Value> {
+        self.rpc_with_headers(method, params, &[])
+    }
+
+    fn rpc_with_headers(
+        &self,
+        method: &str,
+        params: Value,
+        headers: &[(String, String)],
+    ) -> Result<Value> {
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
         let payload = json!({
             "jsonrpc": "2.0",
@@ -130,7 +154,7 @@ impl McpSession {
             "method": method,
             "params": params
         });
-        let text = self.post(&payload)?;
+        let text = self.post(&payload, headers)?;
         let value = parse_rpc_body(&text, id)?;
         if let Some(err) = value.get("error") {
             return msg(format!("MCP error: {err}"));
@@ -140,16 +164,20 @@ impl McpSession {
 
     fn notify(&self, method: &str, params: Value) {
         let payload = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        let _ = self.post(&payload);
+        let _ = self.post(&payload, &[]);
     }
 
-    fn post(&self, payload: &Value) -> Result<String> {
+    fn post(&self, payload: &Value, headers: &[(String, String)]) -> Result<String> {
         let mut request = self
             .agent
             .post(&self.def.url)
             .set("Content-Type", "application/json")
             .set("Accept", "application/json, text/event-stream")
             .set("MCP-Protocol-Version", PROTOCOL_VERSION);
+
+        for (name, value) in headers {
+            request = request.set(name, value);
+        }
 
         if let Some(token) = &self.def.token {
             request = request.set("Authorization", &format!("Bearer {token}"));

@@ -17,6 +17,13 @@ fn main() {
         Some("--secret-add") => std::process::exit(eco_platform_lib::cli_secret_add(args.get(1), args.get(2))),
         Some("--import-auth") => std::process::exit(eco_platform_lib::cli_import_auth(args.get(1), args.get(2), args.get(3))),
         Some("--chat-sessions") => std::process::exit(eco_platform_lib::cli_chat_sessions(args.get(1))),
+        Some("--tokens") => std::process::exit(eco_platform_lib::cli_tokens(args.get(1))),
+        Some("--issue-token") => std::process::exit(eco_platform_lib::cli_issue_token(
+            args.get(1),
+            args.get(2),
+        )),
+        Some("--revoke") => std::process::exit(eco_platform_lib::cli_revoke(args.get(1))),
+        Some("--unrevoke") => std::process::exit(eco_platform_lib::cli_unrevoke(args.get(1))),
         Some("--chat-async") => std::process::exit(eco_platform_lib::cli_chat_async(args.get(1), args.get(2))),
         Some("--chat") => std::process::exit(eco_platform_lib::cli_chat(args.get(1), args.get(2), args.get(3))),
         Some("--mcp-probe") => std::process::exit(eco_platform_lib::cli_mcp_probe(args.get(1))),

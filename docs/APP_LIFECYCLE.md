@@ -282,9 +282,12 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 4. Пользователь ставит пакет из хранилища; платформа проверяет подпись и хеши.
 5. Обновление: новая подписанная версия; платформа архивирует предыдущую,
    `--rollback` — только явным действием администратора (пишется в аудит).
-6. Отзыв: убрать `app_id`/версию из allowlist или выпустить исправленную версию.
-   **Целевое:** подписанный отзыв (CRL) с TTL, чтобы отзыв доезжал без обновления
-   пакета.
+6. Отзыв доступа к приложению: `--revoke <app-id>` ставит durable-маркер,
+   останавливает движок и запрещает выпуск новых токенов до
+   `--unrevoke <app-id>`; `--revoke <token-id>` отзывает только один токен.
+   Отзыв пакета — убрать `app_id`/версию из allowlist или выпустить исправленную
+   версию. **Целевое:** подписанный отзыв (CRL) с TTL, чтобы отзыв доезжал без
+   обновления пакета.
 
 ## 8. Платформа и поставка
 
@@ -325,6 +328,11 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
   версии. Обновление allowlist не требует обновления платформы.
 - ACL: `Program Files`, `%ProgramData%\EcoAIOps` — запись только администраторы.
 - Аудит установок/отказов/откатов; отпечаток anchor виден в UI.
+- Идентичность агента: короткоживущий токен на приложение/версию (только hash на
+  диске, атомарная запись под lock), проверка в шлюзе на каждом вызове, отзыв
+  одного токена или durable app-отзыв через `--revoke`, снятие — `--unrevoke`;
+  вызовы LLM и инструментов пишутся в `audit/<app>.jsonl` с `app_id`/версией,
+  `token_id` и `request_id`.
 
 ### 9.3. Кто что может (целевое)
 
@@ -351,6 +359,8 @@ src-tauri\target\debug\eco-platform.exe --verify <package-dir>
 - dev-ключи, отдельные профили, `--verify`, `--list`, `--check`, `--history`,
   `--rollback`, `--chat-async`;
 - аудит установок и отказов по подписи в `audit/<app>.jsonl`;
+- короткоживущие токены приложений, маркировка вызовов LLM/инструментов и
+  локальный отзыв (`--tokens`, `--issue-token`, `--revoke`);
 - вендоринг движка и офлайн-запуск;
 - подпись установщиков self-signed сертификатом (dev).
 
@@ -403,4 +413,7 @@ eco-platform.exe --install <package-dir>
 eco-platform.exe --check <package-dir>
 eco-platform.exe --history <app_id>
 eco-platform.exe --rollback <app_id> [version]
+eco-platform.exe --tokens <app_id>          # токены и отозванные app
+eco-platform.exe --revoke <token-id|app-id> # токен или durable app-отзыв
+eco-platform.exe --unrevoke <app_id>        # снять app-отзыв после проверки
 ```

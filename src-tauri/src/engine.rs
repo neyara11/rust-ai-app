@@ -1,10 +1,11 @@
 use crate::config;
 use crate::error::{msg, Error, Result};
+use crate::identity;
 use crate::manifest;
 use crate::proxy;
 use crate::secrets::SecretStore;
 use base64::Engine as _;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -242,14 +243,33 @@ pub struct Engine {
     pub session_id: String,
     pub system: String,
     pub workdir: PathBuf,
+    pub home: PathBuf,
+    pub app_id: String,
+    pub app_version: String,
+    pub token_id: String,
     pid_file: PathBuf,
+}
+
+/// Recorded engine process identity: a stale pid file must not be used to kill
+/// an unrelated process after Windows reuses the pid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeInfo {
+    pid: u32,
+    #[serde(default)]
+    image: String,
+    #[serde(default)]
+    created: u64,
 }
 
 impl Drop for Engine {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_file(&self.pid_file);
+        // Only remove the runtime file if it still belongs to this engine: a
+        // newer engine (for example started by the CLI) may have replaced it.
+        if recorded_pid(&self.pid_file) == Some(self.child.id()) {
+            let _ = std::fs::remove_file(&self.pid_file);
+        }
     }
 }
 
@@ -367,6 +387,7 @@ fn http(
 fn provider_config(
     cfg: &config::UserConfig,
     secrets: &SecretStore,
+    headers: &Value,
 ) -> Result<(Value, String, String, Vec<(String, String)>)> {
     let endpoint = cfg.llm_endpoint.clone().unwrap_or_default();
     let mut envs: Vec<(String, String)> = Vec::new();
@@ -402,7 +423,10 @@ fn provider_config(
             "name": "LLM Gateway",
             "options": {
                 "baseURL": endpoint,
-                "apiKey": api_key
+                "apiKey": api_key,
+                // Agent identity markers for every model call. The raw token
+                // stays in the engine env; the config only references it.
+                "headers": headers
             },
             "models": {
                 (model_name.clone()): {
@@ -433,8 +457,19 @@ fn build_config(
     cfg: &config::UserConfig,
     secrets: &SecretStore,
     gateway: &GatewayConfig,
+    token: &identity::IssuedToken,
+    user: &str,
 ) -> Result<(Value, String, String, Vec<(String, String)>)> {
-    let (provider, provider_id, model_id, envs) = provider_config(cfg, secrets)?;
+    let headers = json!({
+        "X-Agent-Id": format!("{}/{}", app.app_id, app.version),
+        "X-Agent-Version": app.version,
+        "X-User": user,
+        // One engine instance is one request scope; per-turn ids go to audit.
+        "X-Request-Id": token.token_id,
+        "X-Agent-Token-Id": token.token_id,
+        "X-Agent-Token-Expires": token.expires_at.to_string()
+    });
+    let (provider, provider_id, model_id, envs) = provider_config(cfg, secrets, &headers)?;
 
     let names = proxy::gateway_tool_names(app);
     let mut permissions = serde_json::Map::new();
@@ -459,7 +494,11 @@ fn build_config(
                     gateway.workspace.to_string_lossy()
                 ],
                 "environment": {
-                    "ECO_PLATFORM_HOME": gateway.home.to_string_lossy()
+                    "ECO_PLATFORM_HOME": gateway.home.to_string_lossy(),
+                    // Passed through the engine env; never written as a raw
+                    // value into this config file.
+                    "ECO_AGENT_TOKEN": "{env:ECO_AGENT_TOKEN}",
+                    "ECO_AGENT_USER": "{env:ECO_AGENT_USER}"
                 },
                 // Keep tools on the provider's native list: the platform owns
                 // naming, permissions and audit.
@@ -534,12 +573,199 @@ fn skill_texts(package_dir: &Path) -> Vec<String> {
     out
 }
 
+fn recorded_pid(pid_file: &Path) -> Option<u32> {
+    let raw = std::fs::read_to_string(pid_file).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{') {
+        serde_json::from_str::<RuntimeInfo>(trimmed)
+            .ok()
+            .map(|info| info.pid)
+    } else {
+        trimmed.parse::<u32>().ok()
+    }
+}
+
+fn parse_runtime(raw: &str) -> Result<RuntimeInfo> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{') {
+        serde_json::from_str(trimmed)
+            .map_err(|e| Error::Msg(format!("engine pid file is corrupt: {e}")))
+    } else {
+        let pid = trimmed
+            .parse::<u32>()
+            .map_err(|_| Error::Msg("engine pid file is corrupt".to_string()))?;
+        Ok(RuntimeInfo {
+            pid,
+            image: String::new(),
+            created: 0,
+        })
+    }
+}
+
+enum ProcessState {
+    Missing,
+    Unknown,
+    Found(RuntimeInfo),
+}
+
+#[cfg(windows)]
+fn process_state(pid: u32) -> ProcessState {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            let code = std::io::Error::last_os_error().raw_os_error();
+            return if code == Some(87) {
+                ProcessState::Missing
+            } else {
+                ProcessState::Unknown
+            };
+        }
+
+        let mut buf = vec![0u16; 32 * 1024];
+        let mut size = buf.len() as u32;
+        let image = if QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut size) != 0 {
+            std::ffi::OsString::from_wide(&buf[..size as usize])
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            String::new()
+        };
+
+        let mut created = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exited = created;
+        let mut kernel = created;
+        let mut user = created;
+        let created_ticks =
+            if GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) != 0 {
+                ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64
+            } else {
+                0
+            };
+        CloseHandle(handle);
+
+        ProcessState::Found(RuntimeInfo {
+            pid,
+            image,
+            created: created_ticks,
+        })
+    }
+}
+
+#[cfg(not(windows))]
+fn process_state(_pid: u32) -> ProcessState {
+    ProcessState::Unknown
+}
+
+fn same_process(recorded: &RuntimeInfo, current: &RuntimeInfo) -> bool {
+    if recorded.created != 0 && current.created != 0 {
+        return recorded.created == current.created;
+    }
+    if !recorded.image.is_empty() {
+        return recorded.image.eq_ignore_ascii_case(&current.image);
+    }
+    current
+        .image
+        .to_ascii_lowercase()
+        .ends_with("opencode.exe")
+}
+
+fn runtime_info(pid: u32, image: &Path) -> RuntimeInfo {
+    match process_state(pid) {
+        ProcessState::Found(info) => info,
+        _ => RuntimeInfo {
+            pid,
+            image: image.display().to_string(),
+            created: 0,
+        },
+    }
+}
+
+/// Stops a sidecar left behind by a crash, a force-killed app, or an explicit
+/// token revocation. Refuses to kill when the pid no longer belongs to the
+/// recorded engine image. Safe to call when no engine is running.
+pub fn kill_leftover(home: &Path, app_id: &str) -> Result<()> {
+    let pid_file = home
+        .join("apps")
+        .join(app_id)
+        .join("engine")
+        .join("engine.pid");
+    let raw = match std::fs::read_to_string(&pid_file) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(Error::Io(e)),
+    };
+    let recorded = parse_runtime(&raw)?;
+    match process_state(recorded.pid) {
+        ProcessState::Missing => {
+            let _ = std::fs::remove_file(&pid_file);
+            return Ok(());
+        }
+        ProcessState::Unknown => {
+            return msg(format!(
+                "cannot verify engine process {}; refusing to kill it",
+                recorded.pid
+            ))
+        }
+        ProcessState::Found(current) => {
+            if !same_process(&recorded, &current) {
+                return msg(format!(
+                    "pid {} is not the recorded engine process; refusing to kill it",
+                    recorded.pid
+                ));
+            }
+        }
+    }
+
+    let mut kill = Command::new("taskkill");
+    kill.args(["/PID", &recorded.pid.to_string(), "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        kill.creation_flags(0x0800_0000);
+    }
+    let status = kill.status().map_err(|e| {
+        Error::Msg(format!("cannot run taskkill for pid {}: {e}", recorded.pid))
+    })?;
+    if !status.success() {
+        return msg(format!(
+            "taskkill failed for pid {}; engine may still be running",
+            recorded.pid
+        ));
+    }
+    let _ = std::fs::remove_file(&pid_file);
+    Ok(())
+}
+
 impl Engine {
     pub fn start(app_id: &str, home: &Path, workdir: &Path) -> Result<Self> {
         let package_dir = crate::registry::apps_dir(home).join(app_id);
         let app = crate::registry::verified_manifest(home, app_id)?;
         let cfg = config::load(home);
         let secrets = SecretStore::new(home);
+
+        // Short-lived per-app token: the proxy validates it on every call and
+        // `--revoke` can stop a running agent without reinstalling the app.
+        let token = identity::issue(
+            home,
+            &app.app_id,
+            &app.version,
+            identity::DEFAULT_TTL_SECS,
+            "platform",
+        )?;
+        let user = identity::user_pseudonym(home);
 
         let gateway = GatewayConfig {
             exe: std::env::current_exe()
@@ -549,31 +775,20 @@ impl Engine {
                 .unwrap_or_else(|_| workdir.to_path_buf()),
         };
 
-        let (engine_config, provider_id, model_id, engine_envs) =
-            build_config(&app, &cfg, &secrets, &gateway)?;
+        let (engine_config, provider_id, model_id, mut engine_envs) =
+            build_config(&app, &cfg, &secrets, &gateway, &token, &user)?;
+        engine_envs.push(("ECO_AGENT_TOKEN".to_string(), token.token.clone()));
+        engine_envs.push(("ECO_AGENT_USER".to_string(), user.clone()));
 
         let engine_home = home.join("apps").join(app_id).join("engine");
         std::fs::create_dir_all(&engine_home)?;
         write_config(&engine_home, &engine_config)?;
 
         // Kill an engine left behind by a previous crash or a force-killed app.
+        // A process that cannot be verified or stopped aborts the start: two
+        // engines must never share the same session store.
+        kill_leftover(home, app_id)?;
         let pid_file = engine_home.join("engine.pid");
-        if let Ok(raw) = std::fs::read_to_string(&pid_file) {
-            if let Ok(pid) = raw.trim().parse::<u32>() {
-                let mut kill = Command::new("taskkill");
-                kill.args(["/PID", &pid.to_string(), "/F"])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    kill.creation_flags(0x0800_0000);
-                }
-                let _ = kill.status();
-            }
-            let _ = std::fs::remove_file(&pid_file);
-        }
 
         let binary = find_binary(home)?;
         let models = binary
@@ -628,7 +843,8 @@ impl Engine {
 
         let agent = agent();
         wait_ready(&agent, &base, &auth, Duration::from_secs(25))?;
-        std::fs::write(&pid_file, child.id().to_string())?;
+        let runtime = runtime_info(child.id(), &binary);
+        std::fs::write(&pid_file, serde_json::to_string(&runtime)?)?;
 
         let session_id = match existing_session(&agent, &base, &auth)? {
             Some(id) => id,
@@ -650,6 +866,10 @@ impl Engine {
             session_id,
             system,
             workdir: workdir.to_path_buf(),
+            home: home.to_path_buf(),
+            app_id: app.app_id.clone(),
+            app_version: app.version.clone(),
+            token_id: token.token_id.clone(),
             pid_file,
         })
     }
@@ -703,6 +923,10 @@ impl Engine {
             model_id: self.model_id.clone(),
             session_id: self.session_id.clone(),
             system: self.system.clone(),
+            home: self.home.clone(),
+            app_id: self.app_id.clone(),
+            app_version: self.app_version.clone(),
+            token_id: self.token_id.clone(),
         }
     }
 
@@ -745,12 +969,34 @@ pub struct ChatSession {
     pub model_id: String,
     pub session_id: String,
     pub system: String,
+    pub home: PathBuf,
+    pub app_id: String,
+    pub app_version: String,
+    pub token_id: String,
 }
 
 impl ChatSession {
     /// Synchronous prompt: returns when the agent finishes the turn. Callers
     /// run it on a worker thread so the UI stays responsive.
     pub fn prompt(&self, text: &str, variant: Option<&str>) -> Result<()> {
+        let started = Instant::now();
+        let request_id = identity::new_request_id();
+        let result = self.prompt_raw(text, variant);
+        let took_ms = started.elapsed().as_millis() as u64;
+        match &result {
+            Ok(response) => self.audit_llm(&request_id, variant, took_ms, response, None),
+            Err(e) => self.audit_llm(
+                &request_id,
+                variant,
+                took_ms,
+                &Value::Null,
+                Some(&e.to_string()),
+            ),
+        }
+        result.map(|_| ())
+    }
+
+    fn prompt_raw(&self, text: &str, variant: Option<&str>) -> Result<Value> {
         let agent = agent();
         let mut payload = json!({
             "model": { "providerID": self.provider_id, "modelID": self.model_id },
@@ -769,8 +1015,50 @@ impl ChatSession {
             "POST",
             &format!("/session/{}/message", self.session_id),
             Some(&payload),
-        )?;
-        Ok(())
+        )
+    }
+
+    /// Writes one audit record per model turn: app/version, token, model,
+    /// tokens and duration. Message content is never logged.
+    fn audit_llm(
+        &self,
+        request_id: &str,
+        variant: Option<&str>,
+        took_ms: u64,
+        response: &Value,
+        problem: Option<&str>,
+    ) {
+        let info = response.get("info").unwrap_or(response);
+        let tokens = info.get("tokens");
+        let model = info
+            .get("modelID")
+            .and_then(Value::as_str)
+            .unwrap_or(self.model_id.as_str());
+        crate::commands::audit(
+            &self.home,
+            &self.app_id,
+            json!({
+                "ts": crate::artifacts::now_secs(),
+                "app_id": self.app_id,
+                "app_version": self.app_version,
+                "source": "agent",
+                "action": "llm",
+                "request_id": request_id,
+                "token_id": self.token_id,
+                "session": self.session_id,
+                "provider_id": self.provider_id,
+                "model_id": model,
+                "variant": variant,
+                "tokens_in": tokens.and_then(|t| t.get("input")).and_then(Value::as_u64),
+                "tokens_out": tokens.and_then(|t| t.get("output")).and_then(Value::as_u64),
+                "reasoning_tokens": tokens
+                    .and_then(|t| t.get("reasoning"))
+                    .and_then(Value::as_u64),
+                "took_ms": took_ms,
+                "ok": problem.is_none(),
+                "problem": problem.map(|p| p.chars().take(200).collect::<String>())
+            }),
+        );
     }
 
     /// Opens the server-sent event stream. Connect before sending the prompt,

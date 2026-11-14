@@ -96,6 +96,15 @@ enum Route {
     Package { tool: String, bin: String },
 }
 
+#[derive(Clone)]
+struct ProxyIdentity {
+    agent_id: String,
+    user: String,
+    token_id: String,
+    /// Raw token, kept only in memory to re-check revocation on every call.
+    raw: String,
+}
+
 pub struct Proxy {
     home: PathBuf,
     app: Manifest,
@@ -105,6 +114,46 @@ pub struct Proxy {
     routes: HashMap<String, Route>,
     tools: Vec<Value>,
     built: bool,
+    identity: ProxyIdentity,
+    call_seq: u64,
+}
+
+/// Resolves the agent identity passed by the engine. A missing token is a hard
+/// error outside dev mode: the gateway never runs unauthenticated.
+fn resolve_identity(home: &Path, app: &Manifest) -> Result<ProxyIdentity> {
+    let agent_id = format!("{}/{}", app.app_id, app.version);
+    let token = std::env::var("ECO_AGENT_TOKEN")
+        .ok()
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| {
+            crate::error::Error::Msg(
+                "agent token is missing: the tool gateway refuses to start".to_string(),
+            )
+        })?;
+    let record = crate::identity::validate(home, &token)?;
+    if record.app_id != app.app_id {
+        return msg(format!(
+            "agent token belongs to {}, not {}",
+            record.app_id, app.app_id
+        ));
+    }
+    if record.app_version != app.version {
+        return msg(format!(
+            "agent token was issued for version {}, not {}",
+            record.app_version, app.version
+        ));
+    }
+    let user = std::env::var("ECO_AGENT_USER")
+        .ok()
+        .map(|user| user.trim().to_string())
+        .filter(|user| !user.is_empty())
+        .unwrap_or_else(|| crate::identity::user_pseudonym(home));
+    Ok(ProxyIdentity {
+        agent_id,
+        user,
+        token_id: record.token_id,
+        raw: token,
+    })
 }
 
 impl Proxy {
@@ -116,6 +165,7 @@ impl Proxy {
             fs::create_dir_all(workspace)?;
         }
         let workspace = fs::canonicalize(workspace)?;
+        let identity = resolve_identity(&home, &app)?;
         Ok(Self {
             home,
             app,
@@ -125,6 +175,8 @@ impl Proxy {
             routes: HashMap::new(),
             tools: Vec::new(),
             built: false,
+            identity,
+            call_seq: 0,
         })
     }
 
@@ -253,15 +305,32 @@ impl Proxy {
         }
     }
 
-    fn remote_call(&mut self, server: &str, tool: &str, arguments: Value) -> Result<Value> {
+    fn identity_headers(&self, request_id: &str) -> Vec<(String, String)> {
+        vec![
+            ("X-Agent-Id".to_string(), self.identity.agent_id.clone()),
+            ("X-Agent-Version".to_string(), self.app.version.clone()),
+            ("X-User".to_string(), self.identity.user.clone()),
+            ("X-Request-Id".to_string(), request_id.to_string()),
+            ("X-Agent-Token-Id".to_string(), self.identity.token_id.clone()),
+        ]
+    }
+
+    fn remote_call(
+        &mut self,
+        server: &str,
+        tool: &str,
+        arguments: Value,
+        request_id: &str,
+    ) -> Result<Value> {
         let secrets = SecretStore::new(&self.home);
         if !self.servers.contains_key(server) {
             let def = mcp::get(&secrets, server)?;
             let session = McpSession::connect(def)?;
             self.servers.insert(server.to_string(), session);
         }
+        let headers = self.identity_headers(request_id);
         let result = match self.servers.get(server) {
-            Some(session) => session.call(tool, arguments),
+            Some(session) => session.call_with_headers(tool, arguments, &headers),
             None => return msg(format!("mcp server {server} is not connected")),
         };
         if result.is_err() {
@@ -318,6 +387,24 @@ impl Proxy {
 
     /// Returns the MCP `tools/call` result object and the audit metadata.
     fn call(&mut self, name: &str, arguments: Value) -> Result<(Value, usize, bool)> {
+        // Long-lived gateway: a token revoked or expired after start must not
+        // keep working. Re-check the raw token on every tool call.
+        if let Err(e) = crate::identity::validate(&self.home, &self.identity.raw) {
+            crate::commands::audit(
+                &self.home,
+                &self.app.app_id,
+                json!({
+                    "ts": crate::artifacts::now_secs(),
+                    "app_id": self.app.app_id,
+                    "app_version": self.app.version,
+                    "source": "agent",
+                    "action": "tool_denied",
+                    "token_id": self.identity.token_id,
+                    "reason": e.to_string()
+                }),
+            );
+            return Err(e);
+        }
         self.ensure_tools();
         let route = match self.routes.get(name).cloned() {
             Some(route) => route,
@@ -329,11 +416,13 @@ impl Proxy {
             }
         };
 
+        self.call_seq = self.call_seq.saturating_add(1);
+        let request_id = format!("{}-{}", self.identity.token_id, self.call_seq);
         let started = Instant::now();
         let raw = match &route {
             Route::Files => file_call(&self.workspace, name, &arguments),
             Route::Remote { server, tool } => {
-                self.remote_call(server, tool, arguments.clone())
+                self.remote_call(server, tool, arguments.clone(), &request_id)
             }
             Route::Package { tool, bin } => self.package_call(tool, bin, &arguments),
         };
@@ -341,13 +430,22 @@ impl Proxy {
         let (value, bytes, truncated) = match raw {
             Ok(value) => wrap_result(value),
             Err(e) => {
-                self.audit(&route, name, 0, false, started.elapsed().as_millis() as u64, true);
+                self.audit(
+                    &route,
+                    name,
+                    &request_id,
+                    0,
+                    false,
+                    started.elapsed().as_millis() as u64,
+                    true,
+                );
                 return Err(e);
             }
         };
         self.audit(
             &route,
             name,
+            &request_id,
             bytes,
             truncated,
             started.elapsed().as_millis() as u64,
@@ -360,6 +458,7 @@ impl Proxy {
         &self,
         route: &Route,
         name: &str,
+        request_id: &str,
         bytes: usize,
         truncated: bool,
         took_ms: u64,
@@ -376,7 +475,12 @@ impl Proxy {
             json!({
                 "ts": crate::artifacts::now_secs(),
                 "app_id": self.app.app_id,
+                "app_version": self.app.version,
                 "source": "agent",
+                "action": "tool",
+                "request_id": request_id,
+                "token_id": self.identity.token_id,
+                "agent_id": self.identity.agent_id,
                 "server_id": server,
                 "tool": tool,
                 "bytes": bytes,
