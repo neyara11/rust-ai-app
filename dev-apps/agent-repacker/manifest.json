@@ -1,0 +1,35 @@
+{
+  "schema_version": 2,
+  "app_id": "agent-repacker",
+  "name": "Переупаковщик агентов",
+  "version": "0.1.0",
+  "min_shell_version": "0.1.0",
+  "publisher": "CN=ECO AIOps Dev",
+  "profile": {
+    "system_prompt": "prompt/system.md",
+    "model_hint": "gateway-default",
+    "max_steps": 80
+  },
+  "tools": [],
+  "connections": [
+    {
+      "id": "llm",
+      "type": "llm",
+      "required": true
+    }
+  ],
+  "capabilities": {
+    "index_allowlist": [],
+    "file_scopes": ["workspace"],
+    "external_writes": []
+  },
+  "artifacts": {
+    "quota_mb": 128,
+    "ttl_hours": 168
+  },
+  "hashes": {
+    "prompt/system.md": "sha256:cbeedf82d682ecedba75ccea57a6e03e774e175b9383b2a0bc698d36fea9886f",
+    "skills/repack-playbook/SKILL.md": "sha256:1c982ebcde14e2ea5ba696322900e0ea42424872edd3a9025890ef66a83f2508",
+    "skills/tool-adapters/SKILL.md": "sha256:e680d55c17a68fe5ff08ea0793d068c360574bd72e7d940e3a127623277d79e3"
+  }
+}

@@ -5,7 +5,7 @@
 
 Связанные документы:
 - `PLAN.md` — целевая архитектура, фазы, риски, открытые вопросы.
-- `dev-apps/doc-writer`, `dev-apps/doc-lookup` — примеры подписанных пакетов.
+- `dev-apps/doc-writer`, `dev-apps/doc-lookup`, `dev-apps/agent-repacker` — примеры подписанных пакетов.
 
 ## 1. Что это
 
@@ -73,7 +73,7 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 | `tools/stub-llm/server.js` | локальная заглушка OpenAI-совместимого API (порт 4098) |
 | `tools/e2e-docx.ps1` | e2e: агент создаёт markdown и конвертирует в `.docx` |
 | `tools/ui-smoke` | Playwright-прогон UI на встроенном browser-mock |
-| `dev-apps/*` | подписанные пакеты-примеры: `doc-writer`, `doc-lookup` |
+| `dev-apps/*` | подписанные пакеты-примеры: `doc-writer`, `doc-lookup`, `agent-repacker` |
 | `examples/file-notes` | исходники примера: навыки + работа с файлами |
 | `examples/skill-only` | готовый dev-пример: `file_scopes: workspace`, hashes и подпись |
 | `examples/skill-only-source` | только `AGENTS.md` + `SKILL.md` для проверки генерации манифеста |
@@ -178,8 +178,12 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
   Команды: `pack_tool_info`, `pack_scan`, `pack_import`, `pack_apply_template`, `pack_set_mcp`, `pack_init`,
   `pack_validate`, `pack_build`, `pack_sign`, `pack_keygen`, `pack_files`,
   `pack_read_text`, `pack_write_text`, `pack_pick_folder`.
-- Осталось: app-forge (мини-приложение, вызывающее `bin/pack-tool.exe`) и общее ядро
-  `pack-core` вместо вызова CLI; сейчас мастер использует `eco-pack.exe`.
+- Первый шаг app-forge: `dev-apps/agent-repacker` — мини-приложение на LLM+файловых
+  инструментах, которое раскладывает `source/` (AGENTS.md, скилы, скрипты, MCP)
+  в пакет по `docs/REPACK_AGENT.md`, пишет манифест, адаптеры, `SECRETS_REQUIRED.md`,
+  `REPORT.md` и `build.ps1`. Компиляцию exe и `eco-pack validate/build` выполняет
+  автор: у мини-приложения нет shell/сети. Осталось: `bin/pack-tool.exe` и общее
+  ядро `pack-core` вместо вызова CLI; сейчас мастер использует `eco-pack.exe`.
 - Проверочные примеры: `examples/file-notes` (готовые исходники с навыками и файлами)
   и `examples/skill-only` (собранный/подписанный пример с file access) / `examples/skill-only-source` (только `AGENTS.md` + `SKILL.md` для проверки генерации
   манифеста); инструкции — `docs/MINIAPP_AUTHORING.md` и `docs/REPACK_AGENT.md`.
