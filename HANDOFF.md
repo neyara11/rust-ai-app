@@ -84,6 +84,36 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 
 ## 4. Что реализовано
 
+### Режимы: локальный и корпоративный
+- Окружение выбирается **при установке**: NSIS-хук `src-tauri/windows/hooks.nsh`
+  спрашивает режим и пишет `%ProgramData%\EcoAIOps\install-mode.json`
+  (для `/S` — аргумент `/MODE=local|corporate`). Пока файл есть, `config::load`
+  переопределяет `environment` и ставит `mode_chosen=true`.
+- `config.json` → `environment: local|corporate`, `role: developer|user`,
+  `mode_chosen`. Роль меняется в UI; окружение для установленной версии
+  заблокировано: `--mode` и «Сменить режим…» возвращают ошибку до переустановки.
+- Локальный режим ставит и подписанные, и неподписанные пакеты; trust anchor и
+  allowlist не требуются. Неизменность после установки держит **seal**:
+  `<home>/seals/<app_id>.json` (sha256 всех файлов, кроме `engine/`, `sessions/`,
+  `tmp/`), проверяется при каждом запуске и в шлюзе. Правка промта/скила/скрипта/
+  манифеста или лишний файл → отказ. Подписанный пакет принимается по подписи,
+  если anchor активен, и лениво покрывается seal.
+- Корпоративный режим — прежний контур: подпись от активного anchor + allowlist,
+  проверки при установке, запуске и откате.
+- Роль `user` скрывает «Мастер пакета»; роль `developer` показывает его.
+  Роль не блокируется установкой: Настройки → «Включить режим разработчика» или
+  `--role developer` (обратно `--role user`).
+- `--verify`/`--check` учитывают режим (в локальном проверяют целостность).
+
+### Группа скилов
+- Пакет может содержать несколько `skills/<name>/SKILL.md` (и ресурсы внутри
+  каталога скила). `eco-pack build` рекурсивно хеширует `skills/**`.
+- При одном скиле текст по-прежнему встраивается в промпт. При нескольких платформа
+  добавляет индекс и инструмент `platform_skill` (`list`/`read`); модель загружает
+  нужный скил и зависимости по мере необходимости. Вызовы пишутся в аудит.
+- Несколько `tools[].bin` и MCP-подключения (`http-mcp`) работают как раньше;
+  порядок работы со скилами и MCP описывается в `prompt/system.md` (AGENTS.md).
+
 ### Платформа и пакеты
 - Tauri v2 + WebView2, статический фронтенд (`withGlobalTauri`), npm не нужен.
 - Манифест `schema_version: 2`: `app_id`, `profile.system_prompt`, `tools[]`,
@@ -308,7 +338,7 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
   `platform_write_file` и `platform_docx_export`; файлы появились в рабочей папке.
 
 ### CLI
-`--verify`, `--install`, `--list`, `--trust`, `--untrust`, `--anchor`,
+`--mode`, `--verify`, `--install`, `--list`, `--trust`, `--untrust`, `--anchor`,
 `--allowlist`, `--allowlist-verify`, `--allowlist-check`, `--artifacts`,
 `--grep-artifacts`, `--secret-add`,
 `--import-auth`, `--mcp-probe`, `--mcp-call`, `--mcp-add`, `--mcp-call-app`,
@@ -317,7 +347,7 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 `--unrevoke <app-id>`.
 
 ### Тесты
-`cargo test --manifest-path src-tauri/Cargo.toml` — 54 теста: подпись/хеши/схема,
+`cargo test --manifest-path src-tauri/Cargo.toml` — 61 тест: подпись/хеши/схема,
 path traversal, sweep артефактов, разбор MCP (JSON/SSE),
 лимит ответа, разбор endpoint, allow-list, file tools и path escape шлюза,
 allowlist (версии/revoked/TTL/две подписи) и ротация anchor.

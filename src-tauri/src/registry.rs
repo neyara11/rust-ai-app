@@ -1,3 +1,4 @@
+use crate::config::Policy;
 use crate::error::{msg, Error, Result};
 use crate::manifest::{self, Capabilities, Connection, Manifest, ToolDef};
 use ed25519_dalek::VerifyingKey;
@@ -395,18 +396,58 @@ pub fn is_elevated() -> bool {
     false
 }
 
+/// Verifies a package according to the active environment. Local mode trusts
+/// the local seal (or a valid signature for packages installed before the seal
+/// existed); corporate mode keeps the signature + allowlist gate.
+fn verify_for(
+    home: &Path,
+    app_id: &str,
+    dir: &Path,
+    trusted: &[VerifyingKey],
+    policy: Policy,
+) -> manifest::VerifyReport {
+    if !policy.local() {
+        return manifest::verify_package(dir, trusted);
+    }
+    let mut report = manifest::verify_integrity(dir);
+    if !report.ok {
+        return report;
+    }
+    match crate::seal::verify(home, app_id, dir) {
+        Ok(()) => report,
+        Err(seal_error) => {
+            // A package installed before local seals existed may still carry
+            // a valid signature. Accept it once and seal it lazily.
+            if !trusted.is_empty() {
+                let signed = manifest::verify_package(dir, trusted);
+                if signed.ok {
+                    let _ = crate::seal::write(home, app_id, dir);
+                    return signed;
+                }
+            }
+            report.ok = false;
+            report.problems.push(seal_error.to_string());
+            report
+        }
+    }
+}
+
 fn installed(
     home: &Path,
     path: &Path,
     manifest: &Manifest,
     report: &manifest::VerifyReport,
     allow: &crate::allowlist::AllowlistGuard,
+    policy: Policy,
 ) -> InstalledApp {
-    let (allowed, allowlist_problem) =
+    let (allowed, allowlist_problem) = if policy.enforce_allowlist() {
         match allow.decision(&manifest.app_id, &manifest.version) {
             Ok(()) => (true, None),
             Err(e) => (false, Some(e.to_string())),
-        };
+        }
+    } else {
+        (true, None)
+    };
     InstalledApp {
         app_id: manifest.app_id.clone(),
         name: manifest.name.clone(),
@@ -428,6 +469,7 @@ fn installed(
 pub fn list(home: &Path) -> Vec<InstalledApp> {
     let trusted = load_trusted_keys(home);
     let allow = crate::allowlist::guard(home, &trusted);
+    let policy = crate::config::policy_for(home);
     let dir = apps_dir(home);
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(&dir) else {
@@ -440,8 +482,8 @@ pub fn list(home: &Path) -> Vec<InstalledApp> {
         }
         match manifest::load(&path) {
             Ok(m) => {
-                let report = manifest::verify_package(&path, &trusted);
-                out.push(installed(home, &path, &m, &report, &allow));
+                let report = verify_for(home, &m.app_id, &path, &trusted, policy);
+                out.push(installed(home, &path, &m, &report, &allow, policy));
             }
             Err(e) => out.push(InstalledApp {
                 app_id: entry.file_name().to_string_lossy().to_string(),
@@ -620,7 +662,12 @@ pub fn rollback(home: &Path, app_id: &str, version: Option<&str>) -> Result<Inst
     let archived = PathBuf::from(&target.path);
 
     let trusted = load_trusted_keys(home);
-    let report = manifest::verify_package(&archived, &trusted);
+    let policy = crate::config::policy_for(home);
+    let report = if policy.local() {
+        manifest::verify_integrity(&archived)
+    } else {
+        manifest::verify_package(&archived, &trusted)
+    };
     if !report.ok {
         return msg(format!(
             "archived package rejected (fail-closed): {}",
@@ -629,23 +676,25 @@ pub fn rollback(home: &Path, app_id: &str, version: Option<&str>) -> Result<Inst
     }
     let manifest = manifest::load(&archived)?;
     let allow = crate::allowlist::guard(home, &trusted);
-    if let Err(e) = allow.decision(&manifest.app_id, &manifest.version) {
-        crate::commands::audit(
-            home,
-            app_id,
-            serde_json::json!({
-                "ts": now_secs(),
-                "source": "admin",
-                "action": "rollback",
-                "app_id": app_id,
-                "from": current.version,
-                "to": manifest.version,
-                "ok": false,
-                "reason": "allowlist",
-                "problem": e.to_string()
-            }),
-        );
-        return Err(e);
+    if policy.enforce_allowlist() {
+        if let Err(e) = allow.decision(&manifest.app_id, &manifest.version) {
+            crate::commands::audit(
+                home,
+                app_id,
+                serde_json::json!({
+                    "ts": now_secs(),
+                    "source": "admin",
+                    "action": "rollback",
+                    "app_id": app_id,
+                    "from": current.version,
+                    "to": manifest.version,
+                    "ok": false,
+                    "reason": "allowlist",
+                    "problem": e.to_string()
+                }),
+            );
+            return Err(e);
+        }
     }
 
     let staging = home.join("staging").join(format!("rollback-{}", now_secs()));
@@ -654,7 +703,11 @@ pub fn rollback(home: &Path, app_id: &str, version: Option<&str>) -> Result<Inst
     }
     fs::create_dir_all(&staging)?;
     copy_package_dir(&archived, &staging)?;
-    let staged_report = manifest::verify_package(&staging, &trusted);
+    let staged_report = if policy.local() {
+        manifest::verify_integrity(&staging)
+    } else {
+        manifest::verify_package(&staging, &trusted)
+    };
     if !staged_report.ok {
         let _ = fs::remove_dir_all(&staging);
         return msg(format!(
@@ -667,10 +720,16 @@ pub fn rollback(home: &Path, app_id: &str, version: Option<&str>) -> Result<Inst
     fs::remove_dir_all(&dest)?;
     fs::rename(&staging, &dest)?;
 
+    if policy.local() {
+        if let Err(e) = crate::seal::write(home, app_id, &dest) {
+            return msg(format!("cannot seal the rolled-back package: {e}"));
+        }
+    }
+
     audit_rollback(home, app_id, &current.version, &manifest.version);
 
-    let report = manifest::verify_package(&dest, &trusted);
-    Ok(installed(home, &dest, &manifest, &report, &allow))
+    let report = verify_for(home, app_id, &dest, &trusted, policy);
+    Ok(installed(home, &dest, &manifest, &report, &allow, policy))
 }
 
 /// Loads the manifest only if the package is installed and passes signature,
@@ -681,7 +740,8 @@ pub fn verified_manifest(home: &Path, app_id: &str) -> Result<Manifest> {
     let path =
         find(home, app_id).ok_or_else(|| Error::Msg(format!("app {app_id} is not installed")))?;
     let trusted = load_trusted_keys(home);
-    let report = manifest::verify_package(&path, &trusted);
+    let policy = crate::config::policy_for(home);
+    let report = verify_for(home, app_id, &path, &trusted, policy);
     if !report.ok {
         crate::commands::audit(
             home,
@@ -702,6 +762,9 @@ pub fn verified_manifest(home: &Path, app_id: &str) -> Result<Manifest> {
         ));
     }
     let app = manifest::load(&path)?;
+    if !policy.enforce_allowlist() {
+        return Ok(app);
+    }
     let allow = crate::allowlist::guard(home, &trusted);
     if let Err(e) = allow.decision(&app.app_id, &app.version) {
         crate::commands::audit(
@@ -756,7 +819,12 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
     }
 
     let trusted = load_trusted_keys(home);
-    let report = manifest::verify_package(&staging, &trusted);
+    let policy = crate::config::policy_for(home);
+    let report = if policy.local() {
+        manifest::verify_integrity(&staging)
+    } else {
+        manifest::verify_package(&staging, &trusted)
+    };
     if !report.ok {
         crate::commands::audit(
             home,
@@ -779,23 +847,25 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
         ));
     }
     let allow = crate::allowlist::guard(home, &trusted);
-    if let Err(e) = allow.decision(&manifest.app_id, &manifest.version) {
-        crate::commands::audit(
-            home,
-            &manifest.app_id,
-            serde_json::json!({
-                "ts": now_secs(),
-                "source": "user",
-                "action": "install",
-                "app_id": manifest.app_id,
-                "version": manifest.version,
-                "ok": false,
-                "reason": "allowlist",
-                "problem": e.to_string()
-            }),
-        );
-        let _ = fs::remove_dir_all(&staging);
-        return Err(e);
+    if policy.enforce_allowlist() {
+        if let Err(e) = allow.decision(&manifest.app_id, &manifest.version) {
+            crate::commands::audit(
+                home,
+                &manifest.app_id,
+                serde_json::json!({
+                    "ts": now_secs(),
+                    "source": "user",
+                    "action": "install",
+                    "app_id": manifest.app_id,
+                    "version": manifest.version,
+                    "ok": false,
+                    "reason": "allowlist",
+                    "problem": e.to_string()
+                }),
+            );
+            let _ = fs::remove_dir_all(&staging);
+            return Err(e);
+        }
     }
 
     let dest = apps_dir(home).join(&manifest.app_id);
@@ -831,6 +901,12 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
     fs::create_dir_all(apps_dir(home))?;
     fs::rename(&staging, &dest)?;
 
+    if policy.local() {
+        if let Err(e) = crate::seal::write(home, &manifest.app_id, &dest) {
+            return msg(format!("cannot seal the installed package: {e}"));
+        }
+    }
+
     crate::commands::audit(
         home,
         &manifest.app_id,
@@ -843,7 +919,7 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
             "ok": true
         }),
     );
-    Ok(installed(home, &dest, &manifest, &report, &allow))
+    Ok(installed(home, &dest, &manifest, &report, &allow, policy))
 }
 
 pub fn remove(home: &Path, app_id: &str) -> Result<()> {
@@ -853,6 +929,7 @@ pub fn remove(home: &Path, app_id: &str) -> Result<()> {
         return msg(format!("app {app_id} is not installed"));
     }
     fs::remove_dir_all(&dest)?;
+    crate::seal::remove(home, app_id);
     Ok(())
 }
 
@@ -1050,7 +1127,7 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use std::fs;
 
-    fn write_package(dir: &Path, version: &str, key: &SigningKey) {
+    fn write_manifest(dir: &Path, version: &str) -> String {
         fs::create_dir_all(dir.join("prompt")).unwrap();
         fs::write(dir.join("prompt/system.md"), b"prompt").unwrap();
         let hash = manifest::sha256_hex(b"prompt");
@@ -1058,8 +1135,76 @@ mod tests {
             r#"{{"schema_version":2,"app_id":"demo","name":"Demo","version":"{version}","profile":{{"system_prompt":"prompt/system.md"}},"hashes":{{"prompt/system.md":"sha256:{hash}"}}}}"#
         );
         fs::write(dir.join("manifest.json"), &body).unwrap();
+        body
+    }
+
+    fn write_package(dir: &Path, version: &str, key: &SigningKey) {
+        let body = write_manifest(dir, version);
         let sig = key.sign(body.as_bytes());
         fs::write(dir.join("manifest.sig"), hex::encode(sig.to_bytes())).unwrap();
+    }
+
+    fn write_unsigned_package(dir: &Path, version: &str) {
+        write_manifest(dir, version);
+    }
+
+    fn use_local_mode(home: &Path, role: crate::config::Role) {
+        let mut cfg = crate::config::load(home);
+        cfg.environment = crate::config::Environment::Local;
+        cfg.role = role;
+        cfg.mode_chosen = true;
+        crate::config::save(home, &cfg).unwrap();
+    }
+
+    #[test]
+    fn local_mode_installs_unsigned_packages_and_detects_tampering() {
+        let home = std::env::temp_dir().join(format!("eco-registry-local-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        use_local_mode(&home, crate::config::Role::User);
+
+        let pkg = home.join("pkg");
+        write_unsigned_package(&pkg, "1.0.0");
+        install(&home, &pkg).unwrap();
+        verified_manifest(&home, "demo").unwrap();
+
+        // A declared file is caught by the manifest hashes.
+        let prompt = home.join("apps/demo/prompt/system.md");
+        fs::write(&prompt, b"tampered").unwrap();
+        let err = verified_manifest(&home, "demo").unwrap_err().to_string();
+        assert!(
+            err.contains("hash mismatch") || err.contains("package content changed"),
+            "{err}"
+        );
+
+        // An explicit reinstall restores a trusted copy and reseals it.
+        install(&home, &pkg).unwrap();
+        verified_manifest(&home, "demo").unwrap();
+
+        // An undeclared file is caught by the seal.
+        fs::write(home.join("apps/demo/extra.txt"), b"x").unwrap();
+        let err = verified_manifest(&home, "demo").unwrap_err().to_string();
+        assert!(err.contains("package content changed"), "{err}");
+
+        install(&home, &pkg).unwrap();
+        verified_manifest(&home, "demo").unwrap();
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn corporate_mode_rejects_unsigned_packages() {
+        let home =
+            std::env::temp_dir().join(format!("eco-registry-corp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+
+        let pkg = home.join("pkg");
+        write_unsigned_package(&pkg, "1.0.0");
+        let err = install(&home, &pkg).unwrap_err().to_string();
+        assert!(err.contains("trust anchor") || err.contains("manifest.sig"), "{err}");
+
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]

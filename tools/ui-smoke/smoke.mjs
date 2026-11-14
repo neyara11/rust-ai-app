@@ -143,9 +143,27 @@ try {
     () => document.querySelector("#pack-log")?.textContent.includes("eco-pack"),
   );
 
+  await page.click('.tab[data-tab="settings"]');
+  await page.click("#mode-change");
+  await page.waitForSelector("#mode-overlay:not([hidden])");
+  await page.check('input[name="mode-role"][value="user"]');
+  await page.click('[data-mode="local"]');
+  await page.waitForFunction(
+    () => document.querySelector("#mode-badge")?.textContent.includes("локальный"),
+  );
+  assert(
+    (await page.locator("#mode-setting").textContent()).includes("пользователь"),
+    "mode setting was not updated",
+  );
+  assert(await page.locator('.tab[data-tab="dev"]').isHidden(), "developer tab must be hidden for a user");
+  assert(
+    (await page.locator("#allowlist").textContent()).includes("не требуется"),
+    "local mode must not show the allowlist gate",
+  );
+
   assert(pageErrors.length === 0, `page errors: ${pageErrors.join("; ")}`);
   console.log(
-    "ui smoke ok: catalog, allowlist, chat, artifacts, attachments, package import",
+    "ui smoke ok: catalog, allowlist, chat, artifacts, attachments, package import, modes",
   );
 } finally {
   await browser.close();

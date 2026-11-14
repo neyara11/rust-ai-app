@@ -12,6 +12,10 @@ fn main() {
             args.get(2),
         )),
         Some("--check") => std::process::exit(eco_platform_lib::cli_check(args.get(1))),
+        Some("--mode") => {
+            std::process::exit(eco_platform_lib::cli_mode(args.get(1), args.get(2)))
+        }
+        Some("--role") => std::process::exit(eco_platform_lib::cli_role(args.get(1))),
         Some("--trust") => std::process::exit(eco_platform_lib::cli_trust(args.get(1))),
         Some("--untrust") => {
             std::process::exit(eco_platform_lib::cli_untrust(args.get(1), args.get(2)))

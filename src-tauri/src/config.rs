@@ -4,8 +4,137 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Where the platform gets its packages from and how strictly it validates
+/// them. The choice is made on first run and stored per profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Environment {
+    /// A person installs any package (signed or unsigned) and cannot edit it
+    /// afterwards. Integrity is enforced by the signature when present and by
+    /// a local seal otherwise. No trust anchor or allowlist is required.
+    Local,
+    /// Corporate contour: only packages signed by an active anchor and
+    /// permitted by the allowlist are installed.
+    Corporate,
+}
+
+impl Environment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Environment::Local => "local",
+            Environment::Corporate => "corporate",
+        }
+    }
+}
+
+/// Who is using the platform. Authors get the package master and may rebuild
+/// sources; users only consume installed apps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Developer,
+    User,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Developer => "developer",
+            Role::User => "user",
+        }
+    }
+}
+
+fn default_environment() -> Environment {
+    // Preserve the previous fail-closed behaviour until the first-run choice.
+    Environment::Corporate
+}
+
+fn default_role() -> Role {
+    Role::User
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Policy {
+    pub environment: Environment,
+    pub role: Role,
+}
+
+impl Policy {
+    pub fn local(self) -> bool {
+        self.environment == Environment::Local
+    }
+
+    pub fn require_anchor(self) -> bool {
+        !self.local()
+    }
+
+    pub fn enforce_allowlist(self) -> bool {
+        !self.local()
+    }
+
+    pub fn allow_unsigned(self) -> bool {
+        self.local()
+    }
+
+    pub fn allow_authoring(self) -> bool {
+        self.role == Role::Developer
+    }
+}
+
+/// Mode written by the installer under `%ProgramData%\EcoAIOps`. When the
+/// file exists the environment is fixed for this machine and the app cannot
+/// switch it at runtime.
+#[derive(Debug, Clone, Deserialize)]
+struct InstallMode {
+    environment: Environment,
+}
+
+pub fn install_mode_path() -> Option<PathBuf> {
+    let base = std::env::var_os("ProgramData")?;
+    if base.is_empty() {
+        return None;
+    }
+    Some(
+        PathBuf::from(base)
+            .join("EcoAIOps")
+            .join("install-mode.json"),
+    )
+}
+
+pub fn read_install_mode() -> Option<Environment> {
+    // Development and unit tests must not inherit the machine-wide mode left by
+    // an installed release build.
+    if cfg!(debug_assertions) {
+        return None;
+    }
+    install_mode_path()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str::<InstallMode>(&raw).ok())
+        .map(|mode| mode.environment)
+}
+
+pub fn install_mode_locked() -> bool {
+    read_install_mode().is_some()
+}
+
+fn apply_install_mode(mut cfg: UserConfig, mode: Option<Environment>) -> UserConfig {
+    if let Some(environment) = mode {
+        cfg.environment = environment;
+        cfg.mode_chosen = true;
+    }
+    cfg
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserConfig {
+    #[serde(default = "default_environment")]
+    pub environment: Environment,
+    #[serde(default = "default_role")]
+    pub role: Role,
+    /// False until the first-run dialog has stored an explicit choice.
+    #[serde(default)]
+    pub mode_chosen: bool,
     #[serde(default)]
     pub llm_endpoint: Option<String>,
     #[serde(default)]
@@ -118,6 +247,9 @@ fn default_ttl_hours() -> u64 {
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
+            environment: default_environment(),
+            role: default_role(),
+            mode_chosen: false,
             llm_endpoint: None,
             llm_model: None,
             llm_capabilities: ModelCapabilities::default(),
@@ -154,10 +286,11 @@ fn path(home: &Path) -> std::path::PathBuf {
 }
 
 pub fn load(home: &Path) -> UserConfig {
-    fs::read_to_string(path(home))
+    let cfg = fs::read_to_string(path(home))
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    apply_install_mode(cfg, read_install_mode())
 }
 
 pub fn save(home: &Path, cfg: &UserConfig) -> Result<()> {
@@ -165,6 +298,43 @@ pub fn save(home: &Path, cfg: &UserConfig) -> Result<()> {
     let raw = serde_json::to_string_pretty(cfg)?;
     fs::write(path(home), raw)?;
     Ok(())
+}
+
+impl UserConfig {
+    pub fn policy(&self) -> Policy {
+        Policy {
+            environment: self.environment,
+            role: self.role,
+        }
+    }
+}
+
+pub fn policy_for(home: &Path) -> Policy {
+    load(home).policy()
+}
+
+pub fn set_mode(home: &Path, environment: Environment, role: Role) -> Result<UserConfig> {
+    if install_mode_locked() {
+        return crate::error::msg(
+            "режим задан при установке; чтобы его изменить, переустановите приложение",
+        );
+    }
+    let mut cfg = load(home);
+    cfg.environment = environment;
+    cfg.role = role;
+    cfg.mode_chosen = true;
+    save(home, &cfg)?;
+    Ok(cfg)
+}
+
+/// Role is an interface choice, not part of the installed environment, so it
+/// stays switchable even when the installer pinned the mode.
+pub fn set_role(home: &Path, role: Role) -> Result<UserConfig> {
+    let mut cfg = load(home);
+    cfg.role = role;
+    cfg.mode_chosen = true;
+    save(home, &cfg)?;
+    Ok(cfg)
 }
 
 pub fn policy(home: &Path) -> crate::artifacts::Policy {
@@ -194,8 +364,45 @@ mod tests {
     }
 
     #[test]
-    fn effort_list_is_sanitized_and_bounded() {
-        let caps = ModelCapabilities {
+    fn install_mode_overrides_profile_and_marks_choice() {
+        let cfg = apply_install_mode(UserConfig::default(), Some(Environment::Local));
+        assert_eq!(cfg.environment, Environment::Local);
+        assert!(cfg.mode_chosen);
+
+        let cfg = apply_install_mode(cfg, None);
+        assert_eq!(cfg.environment, Environment::Local);
+    }
+
+    #[test]
+    fn install_mode_json_requires_known_environment() {
+        let mode: InstallMode = serde_json::from_str(r#"{"environment":"local"}"#).unwrap();
+        assert_eq!(mode.environment, Environment::Local);
+        let mode: InstallMode = serde_json::from_str(r#"{"environment":"corporate"}"#).unwrap();
+        assert_eq!(mode.environment, Environment::Corporate);
+        assert!(serde_json::from_str::<InstallMode>(r#"{"environment":"other"}"#).is_err());
+    }
+
+    #[test]
+    fn role_change_persists_without_touching_environment_choice() {
+        let home = std::env::temp_dir().join(format!("eco-role-{}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+        let mut cfg = UserConfig::default();
+        cfg.environment = Environment::Corporate;
+        cfg.role = Role::User;
+        cfg.mode_chosen = true;
+        save(&home, &cfg).unwrap();
+
+        let updated = set_role(&home, Role::Developer).unwrap();
+        assert_eq!(updated.role, Role::Developer);
+
+        let raw = fs::read_to_string(home.join("config.json")).unwrap();
+        let disk: UserConfig = serde_json::from_str(&raw).unwrap();
+        assert_eq!(disk.role, Role::Developer);
+        let _ = fs::remove_file(home.join("config.json"));
+    }
+
+    #[test]
+    fn effort_list_is_sanitized_and_bounded() {        let caps = ModelCapabilities {
             reasoning_efforts: vec![
                 " High ".to_string(),
                 "high".to_string(),

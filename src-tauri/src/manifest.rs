@@ -179,11 +179,23 @@ pub fn ensure_not_downgrade(current: &str, next: &str) -> Result<()> {
     Ok(())
 }
 
+/// Verifies package integrity only: schema version, version format, the
+/// system prompt file and every declared sha256. It does not require a trust
+/// anchor. Local mode pairs this with a local seal; corporate mode uses
+/// [`verify_package`].
+pub fn verify_integrity(dir: &Path) -> VerifyReport {
+    verify_impl(dir, None)
+}
+
 /// Verifies the package in `dir`: schema version, detached signature over
 /// manifest.json and per-file hashes. Fail-closed: any problem makes the
 /// package unusable. The signature may be made by any of the active anchors,
 /// which allows staged key rotation.
 pub fn verify_package(dir: &Path, trusted: &[VerifyingKey]) -> VerifyReport {
+    verify_impl(dir, Some(trusted))
+}
+
+fn verify_impl(dir: &Path, trusted: Option<&[VerifyingKey]>) -> VerifyReport {
     let manifest_bytes = match fs::read(dir.join("manifest.json")) {
         Ok(b) => b,
         Err(e) => return VerifyReport::fail(vec![format!("manifest.json unreadable: {e}")]),
@@ -230,30 +242,33 @@ pub fn verify_package(dir: &Path, trusted: &[VerifyingKey]) -> VerifyReport {
         }
     }
 
-    if trusted.is_empty() {
-        problems.push("trust anchor missing: trusted.pub not installed".to_string());
-    } else {
-        match fs::read_to_string(dir.join("manifest.sig")) {
-            Err(e) => problems.push(format!("manifest.sig unreadable: {e}")),
-            Ok(raw) => match hex::decode(raw.trim()) {
-                Err(e) => problems.push(format!("manifest.sig is not hex: {e}")),
-                Ok(bytes) => match Signature::from_slice(&bytes) {
-                    Err(e) => problems.push(format!("manifest.sig invalid: {e}")),
-                    Ok(sig) => {
-                        let signer = trusted
-                            .iter()
-                            .find(|key| key.verify_strict(&manifest_bytes, &sig).is_ok());
-                        match signer {
-                            Some(key) => {
-                                let digest = sha256_hex(&key.to_bytes());
-                                signer_fingerprint = Some(digest[..16].to_string());
+    if let Some(trusted) = trusted {
+        if trusted.is_empty() {
+            problems.push("trust anchor missing: trusted.pub not installed".to_string());
+        } else {
+            match fs::read_to_string(dir.join("manifest.sig")) {
+                Err(e) => problems.push(format!("manifest.sig unreadable: {e}")),
+                Ok(raw) => match hex::decode(raw.trim()) {
+                    Err(e) => problems.push(format!("manifest.sig is not hex: {e}")),
+                    Ok(bytes) => match Signature::from_slice(&bytes) {
+                        Err(e) => problems.push(format!("manifest.sig invalid: {e}")),
+                        Ok(sig) => {
+                            let signer = trusted
+                                .iter()
+                                .find(|key| key.verify_strict(&manifest_bytes, &sig).is_ok());
+                            match signer {
+                                Some(key) => {
+                                    let digest = sha256_hex(&key.to_bytes());
+                                    signer_fingerprint = Some(digest[..16].to_string());
+                                }
+                                None => problems.push(
+                                    "signature mismatch: no active anchor matches".to_string(),
+                                ),
                             }
-                            None => problems
-                                .push("signature mismatch: no active anchor matches".to_string()),
                         }
-                    }
+                    },
                 },
-            },
+            }
         }
     }
 

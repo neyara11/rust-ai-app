@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod pack;
 pub mod proxy;
 pub mod registry;
+pub mod seal;
 pub mod secrets;
 pub mod state;
 
@@ -24,8 +25,11 @@ pub fn run() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             commands::platform_info,
+            commands::set_mode,
+            commands::set_role,
             commands::list_apps,
             commands::install_app,
+            commands::pick_package,
             commands::remove_app,
             commands::app_history,
             commands::rollback_app,
@@ -97,6 +101,24 @@ pub fn startup_sweep(home: &std::path::Path) {
 }
 
 /// Headless verification of a package directory or zip. Used by CI and by
+fn cli_package_path(raw: &str) -> std::path::PathBuf {
+    let src = std::path::PathBuf::from(raw);
+    if src.exists() {
+        return src;
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+    {
+        for candidate in [dir.join(&src), dir.join("dev-apps").join(&src)] {
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    src
+}
+
 /// `--verify` on the built binary; no window is created.
 pub fn cli_verify(arg: Option<&String>) -> i32 {
     let Some(path) = arg else {
@@ -104,7 +126,7 @@ pub fn cli_verify(arg: Option<&String>) -> i32 {
         return 2;
     };
     let home = registry::home();
-    let src = std::path::PathBuf::from(path);
+    let src = cli_package_path(path);
     let (dir, _temp) = match prepare_package(&home, &src) {
         Ok(v) => v,
         Err(e) => {
@@ -112,8 +134,7 @@ pub fn cli_verify(arg: Option<&String>) -> i32 {
             return 1;
         }
     };
-    let trusted = registry::load_trusted_keys(&home);
-    let report = manifest::verify_package(&dir, &trusted);
+    let report = verify_by_policy(&home, &dir);
     let out = serde_json::json!({ "ok": report.ok, "problems": report.problems });
     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     if report.ok {
@@ -145,7 +166,7 @@ pub fn cli_install(arg: Option<&String>) -> i32 {
         return 2;
     };
     let home = registry::home();
-    let src = std::path::PathBuf::from(path);
+    let src = cli_package_path(path);
     match registry::install(&home, &src) {
         Ok(app) => {
             println!(
@@ -211,6 +232,86 @@ pub fn cli_rollback(app: Option<&String>, version: Option<&String>) -> i32 {
 
 /// `--check <package-dir|package.zip>`: compares a package with the installed
 /// version without touching the profile.
+/// Local mode checks integrity only; corporate mode keeps the signature gate.
+fn verify_by_policy(home: &std::path::Path, dir: &std::path::Path) -> manifest::VerifyReport {
+    let policy = config::policy_for(home);
+    if policy.local() {
+        manifest::verify_integrity(dir)
+    } else {
+        manifest::verify_package(dir, &registry::load_trusted_keys(home))
+    }
+}
+
+/// `--mode <local|corporate> [developer|user]`: stores the first-run choice
+/// without opening the UI.
+pub fn cli_mode(environment: Option<&String>, role: Option<&String>) -> i32 {
+    let Some(environment) = environment else {
+        eprintln!("usage: eco-platform --mode <local|corporate> [developer|user]");
+        return 2;
+    };
+    let environment = match environment.as_str() {
+        "local" => config::Environment::Local,
+        "corporate" => config::Environment::Corporate,
+        other => {
+            eprintln!("unknown environment '{other}': use local or corporate");
+            return 2;
+        }
+    };
+    let role = match role.map(String::as_str) {
+        Some("developer") => config::Role::Developer,
+        Some("user") | None => config::Role::User,
+        Some(other) => {
+            eprintln!("unknown role '{other}': use developer or user");
+            return 2;
+        }
+    };
+    let home = registry::home();
+    match config::set_mode(&home, environment, role) {
+        Ok(cfg) => {
+            println!(
+                "mode: {} · {}",
+                cfg.environment.as_str(),
+                cfg.role.as_str()
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+pub fn cli_role(role: Option<&String>) -> i32 {
+    let Some(role) = role else {
+        eprintln!("usage: eco-platform --role <developer|user>");
+        return 2;
+    };
+    let role = match role.as_str() {
+        "developer" => config::Role::Developer,
+        "user" => config::Role::User,
+        other => {
+            eprintln!("unknown role '{other}': use developer or user");
+            return 2;
+        }
+    };
+    let home = registry::home();
+    match config::set_role(&home, role) {
+        Ok(cfg) => {
+            println!(
+                "role: {} · environment: {}",
+                cfg.role.as_str(),
+                cfg.environment.as_str()
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
 pub fn cli_check(arg: Option<&String>) -> i32 {
     let Some(path) = arg else {
         eprintln!("usage: eco-platform --check <package-dir|package.zip>");
@@ -225,8 +326,7 @@ pub fn cli_check(arg: Option<&String>) -> i32 {
             return 1;
         }
     };
-    let trusted = registry::load_trusted_keys(&home);
-    let report = manifest::verify_package(&dir, &trusted);
+    let report = verify_by_policy(&home, &dir);
     if !report.ok {
         let out = serde_json::json!({ "ok": false, "problems": report.problems });
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());

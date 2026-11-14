@@ -674,6 +674,7 @@ fn build_config(
     cfg: &config::UserConfig,
     secrets: &SecretStore,
     gateway: &GatewayConfig,
+    package_dir: &std::path::Path,
     token: &identity::IssuedToken,
     user: &str,
 ) -> Result<(Value, String, String, Vec<(String, String)>)> {
@@ -688,7 +689,7 @@ fn build_config(
     });
     let (provider, provider_id, model_id, envs) = provider_config(cfg, secrets, &headers)?;
 
-    let names = proxy::gateway_tool_names(app);
+    let names = proxy::gateway_tool_names(app, package_dir);
     let mut permissions = serde_json::Map::new();
     permissions.insert("*".to_string(), json!("deny"));
     for name in &names {
@@ -776,7 +777,7 @@ fn read_system_prompt(package_dir: &Path, app: &manifest::Manifest) -> Result<St
     Ok(std::fs::read_to_string(path)?)
 }
 
-fn skill_texts(package_dir: &Path) -> Vec<String> {
+fn skill_texts(package_dir: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let dir = package_dir.join("skills");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -785,9 +786,13 @@ fn skill_texts(package_dir: &Path) -> Vec<String> {
     for entry in entries.flatten() {
         let path = entry.path().join("SKILL.md");
         if let Ok(text) = std::fs::read_to_string(path) {
-            out.push(text);
+            out.push((
+                entry.file_name().to_string_lossy().to_string(),
+                text,
+            ));
         }
     }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
@@ -1006,7 +1011,7 @@ impl Engine {
         };
 
         let (engine_config, provider_id, model_id, mut engine_envs) =
-            build_config(&app, &cfg, &secrets, &gateway, &token, &user)?;
+            build_config(&app, &cfg, &secrets, &gateway, &package_dir, &token, &user)?;
         engine_envs.push(("ECO_AGENT_TOKEN".to_string(), token.token.clone()));
         engine_envs.push(("ECO_AGENT_USER".to_string(), user.clone()));
 
@@ -1082,9 +1087,31 @@ impl Engine {
         };
 
         let mut system = read_system_prompt(&package_dir, &app)?;
-        for skill in skill_texts(&package_dir) {
-            system.push_str("\n\n---\n\n");
-            system.push_str(&skill);
+        let skills = skill_texts(&package_dir);
+        match skills.len() {
+            0 => {}
+            // One skill is the app's whole behaviour: keep it inline for
+            // compatibility with existing single-skill packages.
+            1 => {
+                system.push_str("\n\n---\n\n");
+                system.push_str(&skills[0].1);
+            }
+            // A group of skills is loaded on demand so the prompt stays small
+            // and each skill keeps its own scope.
+            _ => {
+                let names = skills
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                system.push_str(
+                    "\n\n---\n\n## Скилы приложения\n\nДоступны скилы: ",
+                );
+                system.push_str(&names);
+                system.push_str(
+                    ".\nПеред выполнением задачи загрузи нужный скил инструментом platform_skill: {\"action\":\"read\",\"name\":\"<имя>\"}. Список скилов: {\"action\":\"list\"}. Работай строго по загруженному скилу; зависимые скилы загружай тем же инструментом по мере необходимости.\n",
+                );
+            }
         }
         let has_file_tools = app
             .capabilities
@@ -1777,6 +1804,24 @@ pub type EngineMap = HashMap<String, Engine>;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn skills_keep_their_names_and_order() {
+        let dir = std::env::temp_dir().join(format!("eco-engine-skills-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("skills/beta")).unwrap();
+        std::fs::create_dir_all(dir.join("skills/alpha")).unwrap();
+        std::fs::write(dir.join("skills/beta/SKILL.md"), "beta body").unwrap();
+        std::fs::write(dir.join("skills/alpha/SKILL.md"), "alpha body").unwrap();
+
+        let skills = skill_texts(&dir);
+        assert_eq!(skills.len(), 2);
+        assert_eq!(skills[0].0, "alpha");
+        assert_eq!(skills[0].1, "alpha body");
+        assert_eq!(skills[1].0, "beta");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn stream_state_accumulates_parts() {

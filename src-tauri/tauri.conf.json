@@ -23,10 +23,12 @@
   },
   "bundle": {
     "active": true,
+    "targets": ["nsis"],
     "icon": ["icons/icon.ico", "icons/icon.png"],
     "resources": {
       "../vendor/engine/": "engine/",
-      "../vendor/pack/": "pack/"
+      "../vendor/pack/": "pack/",
+      "../dev-apps/": "dev-apps/"
     },
     "windows": {
       "webviewInstallMode": {
@@ -34,7 +36,8 @@
         "silent": true
       },
       "nsis": {
-        "installMode": "perMachine"
+        "installMode": "perMachine",
+        "installerHooks": "./windows/hooks.nsh"
       }
     }
   }

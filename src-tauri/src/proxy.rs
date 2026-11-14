@@ -70,11 +70,27 @@ fn has_file_scope(app: &Manifest) -> bool {
         .any(|scope| scope == "workspace")
 }
 
+/// True when the package ships one or more `skills/<name>/SKILL.md`. The
+/// gateway then exposes the platform-owned `skill` tool for progressive
+/// loading instead of pasting every skill into the system prompt.
+pub fn has_skills(package_dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(package_dir.join("skills")) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.path().join("SKILL.md").is_file())
+}
+
 /// Names (without the `platform_` prefix) that the gateway exposes for an app.
 /// Shared by the engine config (permission entries) and the proxy.
-pub fn gateway_tool_names(app: &Manifest) -> Vec<String> {
+pub fn gateway_tool_names(app: &Manifest, package_dir: &Path) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let writes_allowed = manifest::external_writes_allowed(app);
+
+    if has_skills(package_dir) {
+        out.push("skill".to_string());
+    }
 
     for connection in &app.connections {
         if connection.kind != "http-mcp" {
@@ -114,6 +130,9 @@ pub fn gateway_tool_names(app: &Manifest) -> Vec<String> {
 #[derive(Clone)]
 enum Route {
     Files,
+    /// Platform-owned skill loader: reads `skills/<name>/SKILL.md` from the
+    /// signed package. Exposed only when the package ships skills.
+    Skill,
     Remote { server: String, tool: String },
     Package {
         tool: String,
@@ -222,7 +241,25 @@ impl Proxy {
 
         let mut tools = Vec::new();
 
-        // Platform-owned file tools are reserved first.
+        // Platform-owned skill loader is reserved before app tools.
+        if has_skills(&self.package_dir) {
+            self.routes.insert("skill".to_string(), Route::Skill);
+            tools.push(json!({
+                "name": "skill",
+                "description": "Навыки (скилы) приложения. action=list возвращает список, action=read с именем возвращает полный SKILL.md. Загрузи нужный скил перед выполнением задачи.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "enum": ["list", "read"] },
+                        "name": { "type": "string", "description": "Имя скила из action=list" }
+                    },
+                    "required": ["action"],
+                    "additionalProperties": false
+                }
+            }));
+        }
+
+        // Platform-owned file tools are reserved next.
         if has_file_scope(&self.app) {
             for name in FILE_TOOLS {
                 self.routes.insert((*name).to_string(), Route::Files);
@@ -596,6 +633,7 @@ impl Proxy {
         let started = Instant::now();
         let raw = match &route {
             Route::Files => file_call(&self.workspace, name, &arguments),
+            Route::Skill => skill_call(&self.package_dir, &arguments),
             Route::Remote { server, tool } => {
                 self.remote_call(server, tool, arguments.clone(), &request_id)
             }
@@ -658,6 +696,7 @@ impl Proxy {
         }
         let (source, tool) = match route {
             Route::Files => ("files".to_string(), name.to_string()),
+            Route::Skill => ("skills".to_string(), name.to_string()),
             Route::Package { tool, .. } => ("package".to_string(), tool.clone()),
             Route::Remote { server, tool } => (server.clone(), tool.clone()),
         };
@@ -696,6 +735,7 @@ impl Proxy {
     ) {
         let (server, tool) = match route {
             Route::Files => ("files".to_string(), name.to_string()),
+            Route::Skill => ("skills".to_string(), name.to_string()),
             Route::Package { tool, .. } => ("package".to_string(), tool.clone()),
             Route::Remote { server, tool } => (server.clone(), tool.clone()),
         };
@@ -1042,6 +1082,116 @@ fn package_bin(package_dir: &Path, raw: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn skill_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+/// A short human-readable title for `skill list`: frontmatter `description:`
+/// when present, otherwise the first non-heading line.
+fn skill_description(text: &str) -> String {
+    let mut in_frontmatter = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            in_frontmatter = !in_frontmatter;
+            continue;
+        }
+        if in_frontmatter {
+            if let Some(rest) = trimmed.strip_prefix("description:") {
+                return rest
+                    .trim()
+                    .trim_matches('"')
+                    .chars()
+                    .take(160)
+                    .collect();
+            }
+        }
+    }
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        return trimmed.chars().take(160).collect();
+    }
+    String::new()
+}
+
+/// Lists or reads packaged skills. Skills stay separate files, so a package
+/// can ship a whole group and the model loads only the one it needs.
+fn skill_call(package_dir: &Path, args: &Value) -> Result<Value> {
+    let action = text_arg(args, "action")?;
+    let root = fs::canonicalize(package_dir.join("skills"))
+        .map_err(|_| Error::Msg("package has no skills directory".to_string()))?;
+
+    match action {
+        "list" => {
+            let mut skills = Vec::new();
+            for entry in fs::read_dir(&root)?.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let skill_md = path.join("SKILL.md");
+                if !skill_md.is_file() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                let text = fs::read_to_string(&skill_md).unwrap_or_default();
+                skills.push(json!({
+                    "name": name,
+                    "description": skill_description(&text)
+                }));
+                if skills.len() >= MAX_LIST_ENTRIES {
+                    break;
+                }
+            }
+            skills.sort_by(|a, b| {
+                a["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(b["name"].as_str().unwrap_or(""))
+            });
+            Ok(json!({ "skills": skills, "root": "skills" }))
+        }
+        "read" => {
+            let name = text_arg(args, "name")?;
+            if !skill_name_ok(name) {
+                return msg("invalid skill name: use letters, digits, '-', '_' or '.'");
+            }
+            let path = fs::canonicalize(root.join(name).join("SKILL.md"))?;
+            if !inside(&root, &path) {
+                return msg("skill path escapes the package");
+            }
+            if !path.is_file() {
+                return msg(format!("skill '{name}' not found"));
+            }
+            let bytes = fs::read(&path)?;
+            let total = bytes.len();
+            let bytes = if total > MAX_READ_BYTES {
+                &bytes[..MAX_READ_BYTES]
+            } else {
+                &bytes[..]
+            };
+            let text = String::from_utf8(bytes.to_vec())
+                .map_err(|_| Error::Msg("skill is not UTF-8 text".to_string()))?;
+            Ok(json!({
+                "name": name,
+                "text": text,
+                "truncated": total > MAX_READ_BYTES,
+                "bytes": total
+            }))
+        }
+        _ => msg("skill action must be 'list' or 'read'"),
+    }
+}
+
 fn file_call(workspace: &Path, name: &str, args: &Value) -> Result<Value> {
     match name {
         "list_files" => {
@@ -1329,7 +1479,9 @@ mod tests {
             "resolve_library_id"
         );
 
-        let names = gateway_tool_names(&test_manifest());
+        let empty = std::env::temp_dir().join(format!("eco-proxy-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&empty);
+        let names = gateway_tool_names(&test_manifest(), &empty);
         assert!(names.contains(&"ctx_search".to_string()));
         assert!(!names.contains(&"ctx_dump".to_string()));
         assert!(names.contains(&"read_file".to_string()));
@@ -1337,8 +1489,37 @@ mod tests {
 
         let mut app = test_manifest();
         app.capabilities.file_scopes.clear();
-        let names = gateway_tool_names(&app);
+        let names = gateway_tool_names(&app, &empty);
         assert!(!names.contains(&"read_file".to_string()));
+        let _ = fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn skills_are_exposed_and_loaded_by_name() {
+        let dir = std::env::temp_dir().join(format!("eco-proxy-skills-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("skills/alpha")).unwrap();
+        fs::create_dir_all(dir.join("skills/beta")).unwrap();
+        fs::write(
+            dir.join("skills/alpha/SKILL.md"),
+            "---\ndescription: Alpha skill\n---\n# Alpha\n",
+        )
+        .unwrap();
+        fs::write(dir.join("skills/beta/SKILL.md"), "# Beta\nBeta body\n").unwrap();
+
+        let names = gateway_tool_names(&test_manifest(), &dir);
+        assert!(names.contains(&"skill".to_string()));
+
+        let listed = skill_call(&dir, &json!({ "action": "list" })).unwrap();
+        assert_eq!(listed["skills"][0]["name"], "alpha");
+        assert_eq!(listed["skills"][0]["description"], "Alpha skill");
+        assert_eq!(listed["skills"][1]["name"], "beta");
+
+        let read = skill_call(&dir, &json!({ "action": "read", "name": "beta" })).unwrap();
+        assert!(read["text"].as_str().unwrap().contains("Beta body"));
+        assert!(skill_call(&dir, &json!({ "action": "read", "name": "../x" })).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1350,7 +1531,7 @@ mod tests {
             "bin": "bin/docx-export.exe"
         }))
         .unwrap());
-        let names = gateway_tool_names(&app);
+        let names = gateway_tool_names(&app, &std::env::temp_dir());
         assert!(names.contains(&"docx_export".to_string()));
     }
 

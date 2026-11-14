@@ -29,6 +29,15 @@ pub struct PlatformInfo {
     pub allowlist_expires_at: Option<u64>,
     pub allowlist_problem: Option<String>,
     pub dev_mode: bool,
+    /// `local` or `corporate` — chosen on first run.
+    pub environment: String,
+    /// `developer` or `user`.
+    pub role: String,
+    /// False until the first-run dialog stores an explicit choice.
+    pub mode_chosen: bool,
+    /// True when the installer pinned the environment for this machine.
+    pub mode_locked: bool,
+    pub allow_authoring: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,7 +58,14 @@ pub fn platform_info(state: tauri::State<'_, AppState>) -> PlatformInfo {
     let anchor = registry::trusted_anchor(&state.home);
     let keys = registry::load_trusted_keys(&state.home);
     let allow = crate::allowlist::info(&state.home, &keys);
+    let cfg = config::load(&state.home);
+    let policy = cfg.policy();
     PlatformInfo {
+        environment: cfg.environment.as_str().to_string(),
+        role: cfg.role.as_str().to_string(),
+        mode_chosen: cfg.mode_chosen,
+        mode_locked: config::install_mode_locked(),
+        allow_authoring: policy.allow_authoring(),
         home: state.home.display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         schema: manifest::SUPPORTED_SCHEMA,
@@ -68,21 +84,89 @@ pub fn platform_info(state: tauri::State<'_, AppState>) -> PlatformInfo {
     }
 }
 
+/// Stores the first-run (or later) choice of environment and role. Changing
+/// the environment does not touch installed packages; switching to corporate
+/// simply makes them subject to the anchor/allowlist rules.
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_mode(
+    state: tauri::State<'_, AppState>,
+    environment: config::Environment,
+    role: config::Role,
+) -> Result<UserConfig> {
+    let cfg = config::set_mode(&state.home, environment, role)?;
+    // Engine config depends on the profile, so running engines are restarted.
+    if let Ok(mut engines) = state.engines.lock() {
+        engines.clear();
+    }
+    Ok(cfg)
+}
+
+/// Switches the interface role. The installed environment stays locked, but
+/// the role only controls authoring UI, so it remains user-switchable.
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_role(state: tauri::State<'_, AppState>, role: config::Role) -> Result<UserConfig> {
+    config::set_role(&state.home, role)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn list_apps(state: tauri::State<'_, AppState>) -> Vec<registry::InstalledApp> {
     registry::list(&state.home)
 }
 
+/// Resolves a package path typed by the user. Relative paths are looked up in
+/// the app's resource directory (bundled `dev-apps/`), then in the current
+/// working directory, so the quick-install chips work in the installed build.
+fn resolve_package_path(app: &tauri::AppHandle, raw: &str) -> Option<PathBuf> {
+    let direct = PathBuf::from(raw);
+    if direct.exists() {
+        return Some(direct);
+    }
+    if direct.is_absolute() {
+        return None;
+    }
+    let mut roots = Vec::new();
+    if let Ok(dir) = app.path().resource_dir() {
+        roots.push(dir);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    for root in roots {
+        let candidate = root.join(raw);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        let nested = root.join("dev-apps").join(raw);
+        if nested.exists() {
+            return Some(nested);
+        }
+    }
+    None
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn install_app(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> Result<registry::InstalledApp> {
-    let src = PathBuf::from(&path);
-    if !src.exists() {
-        return msg(format!("package path does not exist: {path}"));
-    }
+    let src = resolve_package_path(&app, &path)
+        .ok_or_else(|| Error::Msg(format!("package path does not exist: {path}")))?;
     registry::install(&state.home, &src)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn pick_package(kind: Option<String>) -> Result<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dialog = rfd::FileDialog::new().set_title("Пакет мини-приложения");
+        let picked = match kind.as_deref() {
+            Some("file") => dialog.add_filter("Пакет", &["zip"]).pick_file(),
+            _ => dialog.pick_folder(),
+        };
+        Ok(picked.map(|path| path.display().to_string()))
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("package dialog failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]

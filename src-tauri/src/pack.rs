@@ -964,6 +964,29 @@ mod tests {
     }
 
     #[test]
+    fn import_keeps_a_group_of_skills_and_their_resources() {
+        let root = temp("skills-group");
+        fs::write(root.join("AGENTS.md"), "# Agent\n\nUse the skills.\n").unwrap();
+        fs::create_dir_all(root.join("skills/alpha")).unwrap();
+        fs::create_dir_all(root.join("skills/beta/scripts")).unwrap();
+        fs::write(root.join("skills/alpha/SKILL.md"), "# Alpha\n").unwrap();
+        fs::write(root.join("skills/beta/SKILL.md"), "# Beta\n").unwrap();
+        fs::write(root.join("skills/beta/scripts/run.py"), "print('ok')\n").unwrap();
+
+        let scan = scan_impl(&root).unwrap();
+        assert_eq!(scan.skills, vec!["alpha".to_string(), "beta".to_string()]);
+
+        let run = import_impl(&root, "group-demo", "Group Demo", "files").unwrap();
+        assert!(run.ok);
+        assert!(root.join("skills/alpha/SKILL.md").is_file());
+        assert!(root.join("skills/beta/SKILL.md").is_file());
+        assert!(root.join("skills/beta/scripts/run.py").is_file());
+        assert!(root.join("manifest.json").is_file());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn apply_template_updates_file_scopes() {
         let root = temp("template");
         fs::write(root.join("AGENTS.md"), "# Agent\n").unwrap();

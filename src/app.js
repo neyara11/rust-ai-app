@@ -113,6 +113,9 @@ const browserMock = (() => {
     session_quota_mb: 500,
     global_quota_mb: 5120,
     ttl_hours: 168,
+    environment: "corporate",
+    role: "developer",
+    mode_chosen: true,
   };
 
   return async function invokeMock(cmd, args = {}) {
@@ -134,7 +137,23 @@ const browserMock = (() => {
           allowlist_expires_at: null,
           allowlist_problem: null,
           dev_mode: true,
+          environment: config.environment,
+          role: config.role,
+          mode_chosen: config.mode_chosen,
+          mode_locked: false,
+          allow_authoring: config.role === "developer",
         };
+      case "set_mode":
+        config = {
+          ...config,
+          environment: args.environment,
+          role: args.role,
+          mode_chosen: true,
+        };
+        return config;
+      case "set_role":
+        config = { ...config, role: args.role };
+        return config;
       case "list_apps":
         return mockApps;
       case "get_config":
@@ -285,6 +304,8 @@ const browserMock = (() => {
         return { ok: true, output: `eco-pack ${args.__cmd || "ok"}` };
       case "install_app":
         return { app_id: args.path ? "demo-app" : "unknown", name: "Demo App", version: "0.1.0" };
+      case "pick_package":
+        return "dev-apps/doc-writer";
       case "chat_open":
         return {
           model: config.llm_model,
@@ -505,7 +526,7 @@ function renderApps() {
             <div class="app-submeta">${esc(app.app_id)} · ${esc(app.publisher || "без подписанта")}</div>
           </div>
         </div>
-        <span class="badge ${app.trusted ? "ok" : "bad"}">${app.trusted ? "подпись ок" : "не доверенный"}</span>
+        <span class="badge ${app.trusted ? "ok" : "bad"}">${app.trusted ? (app.signer_fingerprint ? "подпись ок" : "целостность ок") : "не доверенный"}</span>
         ${allowBadge}
       </div>
 
@@ -538,6 +559,13 @@ async function installApp() {
     $("install-path").value = "";
     await refreshApps();
     await openApp(app.app_id);
+  });
+}
+
+async function pickPackage(kind) {
+  await guard(async () => {
+    const path = await invoke("pick_package", { kind });
+    if (path) $("install-path").value = path;
   });
 }
 
@@ -898,10 +926,13 @@ function renderChat(items) {
     if (entry.node.parentNode === log) log.removeChild(entry.node);
   }
   while (log.children.length > items.length) {
-    log.removeChild(log.lastElementChild);
+    const last = log.lastElementChild;
+    if (last && last.classList.contains("chat-thinking")) break;
+    log.removeChild(last);
   }
 
   if (atBottom) log.scrollTop = log.scrollHeight;
+  if (ctx.busy) renderThinking();
 }
 
 function fmtNum(value) {
@@ -923,28 +954,51 @@ let busyStart = 0;
 
 function setBusy(on) {
   ctx.busy = Boolean(on);
-  $("chat-busy").hidden = !on;
-  $("chat-stop").hidden = !on;
-  $("chat-send").disabled = Boolean(on);
+  const stop = $("chat-stop");
+  const send = $("chat-send");
+  if (stop) {
+    stop.hidden = !on;
+    stop.style.display = on ? "" : "none";
+  }
+  if (send) {
+    send.hidden = false;
+    send.style.display = on ? "none" : "";
+  }
   if (on) {
     busyStart = Date.now();
-    $("chat-busy").textContent = "думает… 0 с";
     clearInterval(busyTimer);
-    busyTimer = setInterval(() => {
-      const secs = Math.round((Date.now() - busyStart) / 1000);
-      $("chat-busy").textContent = `думает… ${secs} с`;
-    }, 1000);
+    renderThinking();
+    busyTimer = setInterval(renderThinking, 1000);
   } else {
     clearInterval(busyTimer);
     busyTimer = null;
-    $("chat-busy").textContent = "думает…";
+    renderThinking();
   }
+}
+
+function renderThinking() {
+  const log = $("chat-log");
+  if (!log) return;
+  let node = log.querySelector(".chat-thinking");
+  if (!ctx.busy) {
+    if (node) node.remove();
+    return;
+  }
+  if (!node) {
+    node = document.createElement("div");
+    node.className = "chat-thinking";
+    node.innerHTML = '<span class="spinner" aria-hidden="true"></span><span class="chat-thinking-text"></span>';
+  }
+  const secs = Math.max(0, Math.round((Date.now() - busyStart) / 1000));
+  node.querySelector(".chat-thinking-text").textContent = secs ? `думает… ${secs} с` : "думает…";
+  if (log.lastElementChild !== node) log.appendChild(node);
+  log.scrollTop = log.scrollHeight;
 }
 
 function renderChatMeta(model) {
   const endpoint = (ctx.config && ctx.config.llm_endpoint) || "";
   const modelText = model || (ctx.chat && ctx.chat.model) || "движок не запущен";
-  $("chat-model").textContent = `${modelText}${endpoint ? " · " + endpoint : ""}`;
+  $("chat-model").textContent = modelText;
   const local = /127\.0\.0\.1|localhost/i.test(endpoint);
   $("chat-warning").hidden = !local;
 }
@@ -1205,22 +1259,22 @@ async function sendChat() {
   clearAttachments();
   setBusy(true);
   const variant = $("chat-reasoning").value || null;
-  const optimistic = [...(ctx.chatItems || [])];
-  if (text) optimistic.push({ role: "user", kind: "text", text });
-  for (const attachment of attachments) {
-    optimistic.push({
-      role: "user",
-      kind: "file",
-      text: attachment.filename,
-      mime: attachment.mime,
-    });
-  }
-  ctx.chatItems = optimistic;
-  ctx.streamingItems = [];
-  ctx.acceptStream = true;
-  renderChat(optimistic);
   try {
     await ensureChat();
+    const optimistic = [...(ctx.chatItems || [])];
+    if (text) optimistic.push({ role: "user", kind: "text", text });
+    for (const attachment of attachments) {
+      optimistic.push({
+        role: "user",
+        kind: "file",
+        text: attachment.filename,
+        mime: attachment.mime,
+      });
+    }
+    ctx.chatItems = optimistic;
+    ctx.streamingItems = [];
+    ctx.acceptStream = true;
+    renderChat(optimistic);
     await invoke("chat_send", { app_id: ctx.appId, text, variant, attachments });
     if (!(window.__TAURI__ && window.__TAURI__.event)) {
       ctx.acceptStream = false;
@@ -2017,7 +2071,17 @@ function bind() {
     });
   });
 
+  document.querySelectorAll("[data-mode]").forEach((btn) => {
+    btn.addEventListener("click", () => chooseMode(btn.dataset.mode));
+  });
+  const modeChange = $("mode-change");
+  if (modeChange) modeChange.addEventListener("click", showModeOverlay);
+  const roleChange = $("role-change");
+  if (roleChange) roleChange.addEventListener("click", changeRole);
+
   $("install-btn").addEventListener("click", installApp);
+  $("install-pick-file").addEventListener("click", () => pickPackage("file"));
+  $("install-pick-folder").addEventListener("click", () => pickPackage("folder"));
 
   document.querySelectorAll("[data-quick-install]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -2223,12 +2287,148 @@ function bind() {
   });
 }
 
+let currentMode = {
+  environment: "corporate",
+  role: "user",
+  allow_authoring: false,
+  mode_chosen: false,
+};
+
+function modeLabel(info) {
+  const env = info.environment === "local" ? "локальный" : "корпоративный";
+  const role = info.role === "developer" ? "разработчик" : "пользователь";
+  return `${env} · ${role}`;
+}
+
+function applyMode(info) {
+  currentMode = { ...currentMode, ...info };
+  const label = modeLabel(currentMode);
+  const badge = $("mode-badge");
+  if (badge) {
+    badge.textContent = label;
+    badge.className = "badge mono " + (currentMode.environment === "local" ? "warn" : "ok");
+    badge.title = "Режим установки и роль";
+  }
+  const setting = $("mode-setting");
+  if (setting) {
+    setting.textContent = label;
+    setting.className = "badge " + (currentMode.environment === "local" ? "warn" : "ok");
+  }
+  const change = $("mode-change");
+  if (change) {
+    change.hidden = Boolean(currentMode.mode_locked);
+    change.title = currentMode.mode_locked
+      ? "Режим задан при установке; изменить его можно только переустановкой"
+      : "Сменить режим установки";
+  }
+  const roleSetting = $("role-setting");
+  if (roleSetting) {
+    roleSetting.textContent = currentMode.role === "developer" ? "разработчик" : "пользователь";
+    roleSetting.className = "badge " + (currentMode.role === "developer" ? "warn" : "");
+  }
+  const roleChange = $("role-change");
+  if (roleChange) {
+    roleChange.textContent = currentMode.role === "developer"
+      ? "Переключить на пользователя"
+      : "Включить режим разработчика";
+  }
+  const devTab = document.querySelector('.tab[data-tab="dev"]');
+  if (devTab) devTab.style.display = currentMode.allow_authoring ? "" : "none";
+  if (!currentMode.allow_authoring && devTab && devTab.classList.contains("active")) {
+    const appsTab = document.querySelector('.tab[data-tab="apps"]');
+    if (appsTab) appsTab.click();
+  }
+  if (currentMode.environment === "local") {
+    const trust = $("trust");
+    if (trust) {
+      trust.textContent = "локальный слепок целостности";
+      trust.className = "badge ok";
+      trust.title = "Подпись не требуется: изменения промта, скилов и скриптов ловит локальный seal";
+    }
+    const allow = $("allowlist");
+    if (allow) {
+      allow.textContent = "allowlist: не требуется";
+      allow.className = "badge";
+      allow.title = "В локальном режиме ограничения allowlist не применяются";
+    }
+  }
+}
+
+function showModeOverlay() {
+  const overlay = $("mode-overlay");
+  if (!overlay) return;
+  const error = $("mode-error");
+  if (error) error.hidden = true;
+  const role = document.querySelector(
+    `input[name="mode-role"][value="${currentMode.role}"]`
+  );
+  if (role) role.checked = true;
+  overlay.hidden = false;
+}
+
+function hideModeOverlay() {
+  const overlay = $("mode-overlay");
+  if (overlay) overlay.hidden = true;
+}
+
+async function chooseMode(environment) {
+  const role =
+    document.querySelector('input[name="mode-role"]:checked')?.value || "user";
+  const error = $("mode-error");
+  if (error) error.hidden = true;
+  try {
+    await invoke("set_mode", { environment, role });
+    hideModeOverlay();
+    await refreshPlatformInfo();
+    await refreshApps();
+    toast(`Режим: ${modeLabel(currentMode)}`);
+  } catch (e) {
+    if (error) {
+      error.textContent = String(e);
+      error.hidden = false;
+    } else {
+      toast(String(e), true);
+    }
+  }
+}
+
+async function changeRole() {
+  const role = currentMode.role === "developer" ? "user" : "developer";
+  try {
+    await invoke("set_role", { role });
+    await refreshPlatformInfo();
+    await refreshApps();
+    toast(`Роль: ${modeLabel(currentMode)}`);
+  } catch (e) {
+    toast(String(e), true);
+  }
+}
+
+async function refreshPlatformInfo() {
+  const info = await invoke("platform_info");
+  renderPlatformInfo(info);
+  return info;
+}
+
 async function init() {
   initTheme();
   bind();
   bindChatEvents();
   await guard(async () => {
     const info = await invoke("platform_info");
+    renderPlatformInfo(info);
+    if (!info.mode_chosen) showModeOverlay();
+    await loadConfig();
+    await refreshLlmKeyStatus();
+    await refreshApps();
+    await refreshArtifacts();
+    await refreshPackTool(true);
+    await refreshSecrets();
+    await refreshMcpServers();
+  });
+}
+
+function renderPlatformInfo(info) {
     $("home").textContent = info.home;
     $("version").textContent = `v${info.version} · schema ${info.schema}`;
     const trust = $("trust");
@@ -2254,14 +2454,7 @@ async function init() {
       allow.className = "badge";
       allow.title = "Подписанный allowlist не настроен: действует только проверка подписи пакета";
     }
-    await loadConfig();
-    await refreshLlmKeyStatus();
-    await refreshApps();
-    await refreshArtifacts();
-    await refreshPackTool(true);
-    await refreshSecrets();
-    await refreshMcpServers();
-  });
+    applyMode(info);
 }
 
 window.addEventListener("DOMContentLoaded", init);
