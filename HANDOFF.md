@@ -63,7 +63,8 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 | `src/app.js`, `src/index.html`, `src/styles.css` | интерфейс, без npm и сборки |
 | `tools/signer` | genkey / sign / verify для пакетов |
 | `tools/package.ps1` | одна команда: сборка конвертера → hashes → подпись → `--verify` → `--install` |
-| `tools/vendor.ps1` | вендоринг движка в `vendor/engine` (opencode + models.json + хеши) |
+| `tools/vendor.ps1` | вендоринг движка в `vendor/engine` (opencode + models.json + хеши) с проверкой `tools/engine.lock.json` |
+| `tools/engine.lock.json` | пин движка: точная версия opencode и sha256 `opencode.exe`/`models.json` |
 | `tools/build-installer.ps1` | `cargo tauri build` + dev-подпись (self-signed или `-Thumbprint`) |
 | `tools/pack` | `eco-pack`: офлайн-утилита автора мини-приложения (init/validate/build/sign/dev-install) |
 | `tools/build-pack.ps1` | сборка `eco-pack.exe` и Authenticode-подпись в `vendor/pack` |
@@ -335,11 +336,17 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
    CI, SBOM, SAST/SCA; установка на чистой машине не проверялась. Для офлайн-сборки
    нужны кеши Tauri: `%LOCALAPPDATA%\tauri\{NSIS,WixTools314,x64}` (там bootstrapper
    WebView2) или `fixedRuntime` с локальной папкой рантайма.
-2. **opencode вендорен скриптом, а не артефактом в git.** `tools/vendor.ps1` кладёт
-   `opencode.exe` и `models.json` в `vendor/engine` (gitignored); платформа ищет бинарь
+2. **opencode вендорен скриптом, а не артефактом в git.** `opencode.exe` — 198 МиБ,
+   выше жёсткого лимита GitHub в 100 МБ на файл, а LFS в проекте не используется;
+   коммитить бинарь в git нельзя. `tools/vendor.ps1` кладёт `opencode.exe` и
+   `models.json` в `vendor/engine` (gitignored) и **сверяет источник с
+   `tools/engine.lock.json`** (точная версия + sha256 exe/models, npm-зависимость
+   закреплена как `1.19.5`); расхождение — отказ. Платформа ищет бинарь
    в `<home>/engine`, рядом с exe (`engine/opencode.exe`) и `tools/oc`. С флагами
    `OPENCODE_DISABLE_MODELS_FETCH`/`DEFAULT_PLUGINS`/`LSP_DOWNLOAD` движок не ходит
    в сеть и не требует npm: провайдер `@ai-sdk/openai-compatible` встроен в бинарь.
+   Поставка самого бинаря — через CI/артефакт-хранилище (часть отложенного P2), а не
+   через git: в git лежат только lock, версия npm-пакета и скрипт вендоринга.
 
 ### Функциональные пробелы
 3. Нет полной матрицы совместимости платформа × пакет. Реестр версий, архив и
@@ -399,7 +406,10 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   `@ai-sdk/openai-compatible` и его зависимости встроены в бинарь. Проверено: чат через
   vendored `opencode.exe` при мёртвом прокси и нулевых внешних соединениях.
 - Дистрибутив движка: `tools/vendor.ps1` → `vendor/engine` (`opencode.exe`,
-  `models.json`, `VERSION.txt`, `sha256.json`). Платформа передаёт
+  `models.json`, `VERSION.txt`, `sha256.json`). Скрипт сверяет версию и sha256
+  источника с `tools/engine.lock.json` и падает при расхождении; намеренное
+  обновление движка — `-UpdateLock` (пишет lock), `-VersionOverride` нужен, если
+  версия не читается из `tools/oc`. Платформа передаёт
   `OPENCODE_MODELS_PATH`, если `models.json` лежит рядом с бинарём; иначе модели
   берутся встроенные, без похода на models.dev.
 - Шлюз инструментов — тот же `eco-platform.exe` с `--mcp-proxy <app> <workspace>`; у
@@ -519,7 +529,9 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
 - `bundle.active: true`: NSIS `perMachine`, WebView2 `offlineInstaller`, ресурс
   `vendor/engine` → `engine/` рядом с `eco-platform.exe`.
 - `tools/vendor.ps1` собирает вендоренный движок (`opencode.exe`, `models.json`,
-  `VERSION.txt`, `sha256.json`); `vendor/` gitignored.
+  `VERSION.txt`, `sha256.json`); `vendor/` gitignored. Версия и хеши источника
+  закреплены в `tools/engine.lock.json` (npm-зависимость — точная `1.19.5`), поэтому
+  повторный вендоринг воспроизводим; бинарь поставляется артефактом CI, не через git.
 - Рантайм без сети и npm: флаги `OPENCODE_DISABLE_MODELS_FETCH`,
   `..._DEFAULT_PLUGINS`, `..._LSP_DOWNLOAD`, `OPENCODE_MODELS_PATH`. Провайдер
   `@ai-sdk/openai-compatible` встроен в бинарь opencode.

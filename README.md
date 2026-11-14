@@ -172,7 +172,7 @@ eco-pack dev-install D:\apps\my-app `
 ## Сборка дистрибутива
 
 ```powershell
-powershell -File tools\vendor.ps1     # vendor/engine: opencode.exe + models.json + хеши
+powershell -File tools\vendor.ps1     # vendor/engine + сверка с tools/engine.lock.json
 powershell -File tools\build-installer.ps1 -Trust   # сборка + dev-подпись (self-signed)
 cargo tauri build                     # NSIS per-machine, WebView2 offlineInstaller
 ```
@@ -279,7 +279,8 @@ cd tools\ui-smoke; npm install; npm test                        # mock UI
 | `tools/package.ps1` | сборка/подпись/установка пакета одной командой |
 | `tools/pack/` | `eco-pack`: офлайн-упаковка мини-приложений для авторов |
 | `tools/build-pack.ps1` | сборка и Authenticode-подпись `eco-pack.exe` |
-| `tools/vendor.ps1` | вендоринг движка в `vendor/engine` |
+| `tools/vendor.ps1` | вендоринг движка в `vendor/engine` с проверкой `tools/engine.lock.json` |
+| `tools/engine.lock.json` | пин движка: точная версия opencode и sha256 бинаря/моделей |
 | `tools/docx-export/` | исходник конвертера и PyInstaller-сборка |
 | `tools/stub-llm/` | локальная заглушка OpenAI-совместимого API |
 | `tools/e2e-docx.ps1` | e2e: реальный агент создаёт markdown и конвертирует в `.docx` |
@@ -295,7 +296,8 @@ cd tools\ui-smoke; npm install; npm test                        # mock UI
 
 - Authenticode — только dev self-signed сертификат; нет production-сертификата УЦ и
   проверки установки на чистой машине; вендоринг движка — скриптом
-  `tools/vendor.ps1`, артефакты не в git.
+  `tools/vendor.ps1` с пином `tools/engine.lock.json` (версия + sha256), `opencode.exe`
+  ~198 МиБ не коммитится в git и поставляется артефактом CI.
 - Нет песочницы процессов; пакетный exe работает с правами пользователя.
 - Доставка allowlist через GPO/Intune/SCCM и мониторинг на стороне ИБ пока
   организационные: платформа проверяет файл, но сама его не распространяет.

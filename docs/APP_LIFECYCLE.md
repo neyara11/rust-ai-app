@@ -323,7 +323,8 @@ eco-platform.exe --allowlist-verify allowlist.json   # на машине ИБ/а
 ## 8. Платформа и поставка
 
 - `tools/vendor.ps1` → `vendor/engine` (opencode + models.json), попадает в
-  `engine/` рядом с `eco-platform.exe`.
+  `engine/` рядом с `eco-platform.exe`. Источник сверяется с `tools/engine.lock.json`
+  (точная версия + sha256); обновление движка — только через `-UpdateLock`.
 - `bundle.active: true`, NSIS `perMachine`, WebView2 `offlineInstaller`.
 - Подпись установщика: `tools/build-installer.ps1`. Для dev — self-signed
   (`-Trust`), для поставки — сертификат УЦ/ИБ (`-Thumbprint`), для HSM —
