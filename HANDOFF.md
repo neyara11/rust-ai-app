@@ -199,14 +199,19 @@ eco-platform.exe --trust dev\keys\trusted.pub
 - Офлайн-движок: vendored `opencode.exe` + `models.json`, мёртвый прокси, чат через
   `--chat-async` завершился (`prompt finished`), внешних TCP-соединений у движка нет,
   npm/node_modules в профиле не создаются.
+- Инсталляторы собраны `cargo tauri build`: MSI 285.5 МБ и NSIS 267 МБ.
+  Административное извлечение MSI (`msiexec /a`) дало раскладку
+  `eco-platform.exe` + `engine\opencode.exe` + `engine\models.json`; чат из этой
+  раскладки без `ECO_OPENCODE_BIN` и с мёртвым прокси работает.
 
 ## 6. Что НЕ реализовано (важно)
 
 ### Блокеры для «настоящего» продукта
-1. **Инсталлятор собран, но не подписан.** `bundle.active: true`, NSIS `perMachine`,
-   WebView2 `offlineInstaller`; Authenticode-сертификата нет, CI, SBOM, SAST/SCA нет.
-   Для офлайн-сборки нужны локальные NSIS/WiX и bootstrapper WebView2 (или
-   `fixedRuntime` с локальной папкой рантайма).
+1. **Установщик не подписан.** `bundle.active: true`, NSIS `perMachine`, WebView2
+   `offlineInstaller`; MSI/NSIS собираются. Authenticode-сертификата нет, CI, SBOM,
+   SAST/SCA нет, установка на чистую машину не проверялась. Для офлайн-сборки нужны
+   кеши Tauri: `%LOCALAPPDATA%\tauri\{NSIS,WixTools314,x64}` (там bootstrapper
+   WebView2) или `fixedRuntime` с локальной папкой рантайма.
 2. **opencode вендорен скриптом, а не артефактом в git.** `tools/vendor.ps1` кладёт
    `opencode.exe` и `models.json` в `vendor/engine` (gitignored); платформа ищет бинарь
    в `<home>/engine`, рядом с exe (`engine/opencode.exe`) и `tools/oc`. С флагами
@@ -248,8 +253,9 @@ eco-platform.exe --trust dev\keys\trusted.pub
 - Windows 10/11, rustc/cargo 1.97.1, MSVC Build Tools 2022, WebView2 157,
   Node 22 (npm работает только через `npm.cmd`; `npm.ps1` блокируется
   ExecutionPolicy), Python не требуется.
-- Tauri CLI на dev-машине не установлен, поэтому `cargo tauri build` и сам
-  инсталлятор здесь не проверялись; конфиг бандла собирается `cargo build`.
+- Tauri CLI 2 установлен (`cargo install tauri-cli --version "^2"`); `cargo tauri build`
+  в `src-tauri` собирает MSI и NSIS. NSIS/WiX/WebView2-bootstrapper скачиваются при
+  первой сборке и кешируются в `%LOCALAPPDATA%\tauri`.
 - crates.io и registry.npmjs.org доступны **на этой машине**. В целевом контуре —
   нет, нужен vendor/mirror.
 - **rustls не проходит** к `mcp.context7.com` (таймаут 60 с), Schannel проходит.
@@ -358,7 +364,7 @@ eco-platform.exe --trust dev\keys\trusted.pub
   вернул `ok: true`, установка прошла; повторный прогон без изменений не меняет
   манифест; подмена хеша в копии пакета исправляется прогоном.
 
-### P2. Инсталлятор и вендоринг — сделано частично (2026-11-14)
+### P2. Инсталлятор и вендоринг — сделано (2026-11-14, кроме Authenticode)
 
 - `bundle.active: true`: NSIS `perMachine`, WebView2 `offlineInstaller`, ресурс
   `vendor/engine` → `engine/` рядом с `eco-platform.exe`.
@@ -368,10 +374,11 @@ eco-platform.exe --trust dev\keys\trusted.pub
   `..._DEFAULT_PLUGINS`, `..._LSP_DOWNLOAD`, `OPENCODE_MODELS_PATH`. Провайдер
   `@ai-sdk/openai-compatible` встроен в бинарь opencode.
 - Проверено: `--chat-async` с vendored бинарём и мёртвым прокси завершился успешно,
-  внешних соединений 0, `node_modules`/`package.json` в профиле не создаются.
-- Осталось: Authenticode-подпись установщика (нужен сертификат); офлайн-сборка
-  требует локальных NSIS/WiX и bootstrapper WebView2 (или `fixedRuntime`); CI, SBOM,
-  SAST/SCA; проверка установки на чистой машине.
+  внешних соединений 0, `node_modules`/`package.json` в профиле не создаются;
+  MSI/NSIS собраны, MSI-раскладка содержит `engine\opencode.exe` и работает офлайн.
+- Осталось: Authenticode-подпись установщика (нужен сертификат); проверка установки
+  на чистой машине; для офлайн-сборки — кеши Tauri (NSIS/WiX/WebView2) или
+  `fixedRuntime`; CI, SBOM, SAST/SCA.
 
 ### P3. Реестр версий и откат
 

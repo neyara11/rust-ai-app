@@ -132,8 +132,12 @@ cargo tauri build                     # NSIS per-machine, WebView2 offlineInstal
   провайдер `@ai-sdk/openai-compatible` встроен в бинарь opencode.
 - Порядок поиска движка: `ECO_OPENCODE_BIN` → `<home>/engine/opencode.exe` →
   `engine/opencode.exe` рядом с платформой → `tools/oc` (dev).
-- Для полностью офлайн-сборки нужны локальные NSIS/WiX и bootstrapper WebView2;
+- Для полностью офлайн-сборки нужны кеши Tauri
+  `%LOCALAPPDATA%\tauri\{NSIS,WixTools314,x64}` (в `x64` — bootstrapper WebView2);
   вместо `offlineInstaller` можно указать `fixedRuntime` с папкой рантайма.
+- Результат: MSI ~286 МБ и NSIS ~267 МБ в `src-tauri/target/release/bundle/`;
+  административное извлечение MSI подтверждает `engine\opencode.exe` рядом с
+  `eco-platform.exe`.
 - Authenticode-подпись установщика пока не настроена (нужен сертификат).
 
 ## Файловые инструменты
