@@ -616,7 +616,6 @@ fn default_dev_key(home: &Path) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
-#[tauri::command(rename_all = "snake_case")]
 fn tool_info(home: &Path) -> PackToolInfo {
     let bin = pack_bin(home);
     let version = bin.as_ref().and_then(|path| {

@@ -90,16 +90,10 @@ struct InstallMode {
     environment: Environment,
 }
 
-pub fn install_mode_path() -> Option<PathBuf> {
-    let base = std::env::var_os("ProgramData")?;
-    if base.is_empty() {
-        return None;
-    }
-    Some(
-        PathBuf::from(base)
-            .join("EcoAIOps")
-            .join("install-mode.json"),
-    )
+pub fn install_mode_path() -> PathBuf {
+    crate::allowlist::program_data()
+        .join("EcoAIOps")
+        .join("install-mode.json")
 }
 
 pub fn read_install_mode() -> Option<Environment> {
@@ -108,10 +102,34 @@ pub fn read_install_mode() -> Option<Environment> {
     if cfg!(debug_assertions) {
         return None;
     }
-    install_mode_path()
-        .and_then(|path| fs::read_to_string(path).ok())
-        .and_then(|raw| serde_json::from_str::<InstallMode>(&raw).ok())
-        .map(|mode| mode.environment)
+    let path = install_mode_path();
+    match fs::metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!(
+                "eco-platform: cannot stat {} ({e}); treating the install mode as corporate",
+                path.display()
+            );
+            return Some(Environment::Corporate);
+        }
+        Ok(_) => {}
+    }
+    match fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|raw| serde_json::from_str::<InstallMode>(&raw).map_err(|e| e.to_string()))
+    {
+        Ok(mode) => Some(mode.environment),
+        Err(e) => {
+            // The installer pinned a mode, but the file is unreadable or
+            // corrupt. Stay locked and fail closed to corporate instead of
+            // silently unlocking the contour.
+            eprintln!(
+                "eco-platform: cannot read {} ({e}); treating the install mode as corporate",
+                path.display()
+            );
+            Some(Environment::Corporate)
+        }
+    }
 }
 
 pub fn install_mode_locked() -> bool {
@@ -286,17 +304,48 @@ fn path(home: &Path) -> std::path::PathBuf {
 }
 
 pub fn load(home: &Path) -> UserConfig {
-    let cfg = fs::read_to_string(path(home))
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
+    let file = path(home);
+    let cfg = match fs::read_to_string(&file) {
+        Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!(
+                    "eco-platform: config {} is invalid ({e}); using defaults",
+                    file.display()
+                );
+                UserConfig::default()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => UserConfig::default(),
+        Err(e) => {
+            eprintln!(
+                "eco-platform: cannot read config {} ({e}); using defaults",
+                file.display()
+            );
+            UserConfig::default()
+        }
+    };
     apply_install_mode(cfg, read_install_mode())
 }
 
+static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn save(home: &Path, cfg: &UserConfig) -> Result<()> {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     fs::create_dir_all(home)?;
     let raw = serde_json::to_string_pretty(cfg)?;
-    fs::write(path(home), raw)?;
+    let target = path(home);
+    let tmp = home.join(format!("config.json.tmp-{}", std::process::id()));
+    {
+        use std::io::Write;
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(raw.as_bytes())?;
+        file.sync_all()?;
+    }
+    if let Err(e) = fs::rename(&tmp, &target) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -343,6 +392,7 @@ pub fn policy(home: &Path) -> crate::artifacts::Policy {
     policy.session_quota_bytes = cfg.session_quota_mb * 1024 * 1024;
     policy.global_quota_bytes = cfg.global_quota_mb * 1024 * 1024;
     policy.ttl_hours = cfg.ttl_hours;
+    policy.orphan_hours = cfg.ttl_hours;
     policy
 }
 

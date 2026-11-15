@@ -162,12 +162,12 @@ fn program_data_from_registry() -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
-fn program_data() -> PathBuf {
+pub(crate) fn program_data() -> PathBuf {
     program_data_from_registry().unwrap_or_else(|| PathBuf::from("C:\\ProgramData"))
 }
 
 #[cfg(not(windows))]
-fn program_data() -> PathBuf {
+pub(crate) fn program_data() -> PathBuf {
     std::env::var("ProgramData")
         .ok()
         .filter(|value| !value.is_empty())

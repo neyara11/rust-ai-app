@@ -64,12 +64,9 @@ pub fn app_id_ok(value: &str) -> bool {
 }
 
 pub fn semver_ok(value: &str) -> bool {
-    let core = value.split(['-', '+']).next().unwrap_or("");
+    let core = value.trim().split(['-', '+']).next().unwrap_or("");
     let parts: Vec<&str> = core.split('.').collect();
-    parts.len() == 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    parts.len() == 3 && parts.iter().all(|p| p.parse::<u64>().is_ok())
 }
 
 pub fn rel_path_ok(value: &str) -> bool {

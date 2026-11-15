@@ -4,6 +4,7 @@ use crate::manifest::{self, Capabilities, Connection, Manifest, ToolDef};
 use ed25519_dalek::VerifyingKey;
 use serde::Serialize;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -399,7 +400,7 @@ pub fn is_elevated() -> bool {
 /// Verifies a package according to the active environment. Local mode trusts
 /// the local seal (or a valid signature for packages installed before the seal
 /// existed); corporate mode keeps the signature + allowlist gate.
-fn verify_for(
+pub(crate) fn verify_for(
     home: &Path,
     app_id: &str,
     dir: &Path,
@@ -417,8 +418,11 @@ fn verify_for(
         Ok(()) => report,
         Err(seal_error) => {
             // A package installed before local seals existed may still carry
-            // a valid signature. Accept it once and seal it lazily.
-            if !trusted.is_empty() {
+            // a valid signature. Accept it once and seal it lazily, but only
+            // when no seal exists: a present seal that does not match means
+            // the installed files changed after installation.
+            let seal_missing = !crate::seal::seal_path(home, app_id).exists();
+            if seal_missing && !trusted.is_empty() {
                 let signed = manifest::verify_package(dir, trusted);
                 if signed.ok {
                     let _ = crate::seal::write(home, app_id, dir);
@@ -602,10 +606,177 @@ fn prune_versions(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn archive_current(home: &Path, app_id: &str, src: &Path) -> Result<Option<PathBuf>> {
-    let Ok(manifest) = manifest::load(src) else {
-        return Ok(None);
+struct RuntimeKeep {
+    dir: PathBuf,
+    moved: Vec<(&'static str, PathBuf)>,
+}
+
+/// Moves per-app runtime state out of the package directory before the package
+/// is replaced, so chat history and artifact dumps survive installs/rollbacks.
+fn park_runtime(home: &Path, app_id: &str, dest: &Path) -> Result<RuntimeKeep> {
+    let dir = home
+        .join("staging")
+        .join(format!("keep-{}-{}", now_secs(), app_id));
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    fs::create_dir_all(&dir)?;
+    let mut moved: Vec<(&'static str, PathBuf)> = Vec::new();
+    for name in ["engine", "sessions"] {
+        let src = dest.join(name);
+        if !src.exists() {
+            continue;
+        }
+        let target = dir.join(name);
+        if let Err(e) = fs::rename(&src, &target) {
+            // Put already-moved entries back: the caller cannot restore what
+            // it never received.
+            for (moved_name, moved_path) in moved.iter().rev() {
+                let _ = fs::rename(moved_path, dest.join(moved_name));
+            }
+            let _ = fs::remove_dir_all(&dir);
+            return Err(e.into());
+        }
+        moved.push((name, target));
+    }
+    Ok(RuntimeKeep { dir, moved })
+}
+
+/// Restores runtime state and keeps the parked copy if any move fails, so a
+/// failed swap never destroys the only copy of chat history/artifacts.
+fn restore_runtime(keep: Option<RuntimeKeep>, dest: &Path) -> Result<()> {
+    let Some(keep) = keep else {
+        return Ok(());
     };
+    if !dest.exists() {
+        fs::create_dir_all(dest)?;
+    }
+    let mut failed: Option<Error> = None;
+    for (name, path) in &keep.moved {
+        if !path.exists() {
+            continue;
+        }
+        let target = dest.join(name);
+        if target.exists() {
+            let _ = fs::remove_dir_all(&target);
+        }
+        if let Err(e) = fs::rename(path, &target) {
+            eprintln!(
+                "eco-platform: cannot restore {} from {}: {e}",
+                name,
+                path.display()
+            );
+            failed = Some(e.into());
+        }
+    }
+    if failed.is_none() {
+        let _ = fs::remove_dir_all(&keep.dir);
+    }
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Restores any `staging/keep-<ts>-<app_id>` directory left by an interrupted
+/// install or rollback, before the staging sweep can delete it.
+pub fn recover_runtime(home: &Path) {
+    let root = home.join("staging");
+    let Ok(entries) = fs::read_dir(&root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(rest) = name.strip_prefix("keep-") else {
+            continue;
+        };
+        let Some((_ts, app_id)) = rest.split_once('-') else {
+            continue;
+        };
+        if manifest::parse_id(app_id, "app").is_err() {
+            continue;
+        }
+        let keep = entry.path();
+        let dest = apps_dir(home).join(app_id);
+        if let Err(e) = fs::create_dir_all(&dest) {
+            eprintln!("eco-platform: cannot recover runtime for {app_id}: {e}");
+            continue;
+        }
+        let mut failed = false;
+        for sub in ["engine", "sessions"] {
+            let src = keep.join(sub);
+            if !src.exists() {
+                continue;
+            }
+            let target = dest.join(sub);
+            if target.exists() {
+                // A newer runtime already exists; keep the backup untouched.
+                failed = true;
+                continue;
+            }
+            if let Err(e) = fs::rename(&src, &target) {
+                eprintln!("eco-platform: cannot recover {sub} for {app_id}: {e}");
+                failed = true;
+            }
+        }
+        if !failed {
+            let _ = fs::remove_dir_all(&keep);
+        }
+    }
+}
+
+pub fn installed_ids(home: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(apps_dir(home)) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        if manifest::parse_id(&id, "app").is_ok() {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// Read-only variant of `verify_for`: it never writes a seal, so CLI checks
+/// do not mutate an installed profile.
+pub(crate) fn verify_for_readonly(
+    home: &Path,
+    app_id: &str,
+    dir: &Path,
+    trusted: &[VerifyingKey],
+    policy: Policy,
+) -> manifest::VerifyReport {
+    if !policy.local() {
+        return manifest::verify_package(dir, trusted);
+    }
+    let mut report = manifest::verify_integrity(dir);
+    if !report.ok {
+        return report;
+    }
+    match crate::seal::verify(home, app_id, dir) {
+        Ok(()) => report,
+        Err(seal_error) => {
+            let seal_missing = !crate::seal::seal_path(home, app_id).exists();
+            if seal_missing && !trusted.is_empty() {
+                let signed = manifest::verify_package(dir, trusted);
+                if signed.ok {
+                    return signed;
+                }
+            }
+            report.ok = false;
+            report.problems.push(seal_error.to_string());
+            report
+        }
+    }
+}
+
+fn archive_current(home: &Path, app_id: &str, src: &Path) -> Result<PathBuf> {
+    let manifest = manifest::load(src)?;
     let dir = versions_dir(home, app_id);
     fs::create_dir_all(&dir)?;
     let mut stamp = now_secs();
@@ -616,7 +787,7 @@ fn archive_current(home: &Path, app_id: &str, src: &Path) -> Result<Option<PathB
     }
     copy_package_dir(src, &dst)?;
     prune_versions(&dir)?;
-    Ok(Some(dst))
+    Ok(dst)
 }
 
 fn audit_rollback(home: &Path, app_id: &str, from: &str, to: &str) {
@@ -717,8 +888,25 @@ pub fn rollback(home: &Path, app_id: &str, version: Option<&str>) -> Result<Inst
     }
 
     archive_current(home, app_id, &dest)?;
-    fs::remove_dir_all(&dest)?;
-    fs::rename(&staging, &dest)?;
+    let mut parked = Some(park_runtime(home, app_id, &dest)?);
+    if let Err(e) = fs::remove_dir_all(&dest) {
+        if let Err(restore) = restore_runtime(parked.take(), &dest) {
+            eprintln!("eco-platform: runtime restore failed for {app_id}: {restore}");
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e.into());
+    }
+    if let Err(e) = fs::rename(&staging, &dest) {
+        if let Err(restore) = restore_runtime(parked.take(), &dest) {
+            eprintln!("eco-platform: runtime restore failed for {app_id}: {restore}");
+        }
+        return Err(e.into());
+    }
+    if let Err(e) = restore_runtime(parked.take(), &dest) {
+        return msg(format!(
+            "package rolled back, but chat history could not be restored (data kept in staging): {e}"
+        ));
+    }
 
     if policy.local() {
         if let Err(e) = crate::seal::write(home, app_id, &dest) {
@@ -787,6 +975,18 @@ pub fn verified_manifest(home: &Path, app_id: &str) -> Result<Manifest> {
 }
 
 pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
+    install_with(home, src, |_| {})
+}
+
+/// `before_replace` runs after the package passed verification, allowlist and
+/// downgrade checks, immediately before the installed directory is replaced.
+/// The UI uses it to stop the app's engine at the last safe moment.
+pub fn install_with<F: FnOnce(&str)>(
+    home: &Path,
+    src: &Path,
+    before_replace: F,
+) -> Result<InstalledApp> {
+    let mut before_replace = Some(before_replace);
     let staging = home.join("staging").join(format!("{}", now_secs()));
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
@@ -821,9 +1021,9 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
     let trusted = load_trusted_keys(home);
     let policy = crate::config::policy_for(home);
     let report = if policy.local() {
-        manifest::verify_integrity(&staging)
+        manifest::verify_integrity_install(&staging)
     } else {
-        manifest::verify_package(&staging, &trusted)
+        manifest::verify_package_install(&staging, &trusted)
     };
     if !report.ok {
         crate::commands::audit(
@@ -869,26 +1069,35 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
     }
 
     let dest = apps_dir(home).join(&manifest.app_id);
+    let mut parked: Option<RuntimeKeep> = None;
     if dest.exists() {
-        if let Ok(existing) = manifest::load(&dest) {
-            if let Err(e) = manifest::ensure_not_downgrade(&existing.version, &manifest.version) {
-                crate::commands::audit(
-                    home,
-                    &manifest.app_id,
-                    serde_json::json!({
-                        "ts": now_secs(),
-                        "source": "user",
-                        "action": "install",
-                        "app_id": manifest.app_id,
-                        "version": manifest.version,
-                        "installed": existing.version,
-                        "ok": false,
-                        "reason": "downgrade"
-                    }),
-                );
+        let existing = match manifest::load(&dest) {
+            Ok(existing) => existing,
+            Err(e) => {
                 let _ = fs::remove_dir_all(&staging);
-                return Err(e);
+                return msg(format!(
+                    "installed package {} is unreadable ({e}); restore or remove it before updating",
+                    manifest.app_id
+                ));
             }
+        };
+        if let Err(e) = manifest::ensure_not_downgrade(&existing.version, &manifest.version) {
+            crate::commands::audit(
+                home,
+                &manifest.app_id,
+                serde_json::json!({
+                    "ts": now_secs(),
+                    "source": "user",
+                    "action": "install",
+                    "app_id": manifest.app_id,
+                    "version": manifest.version,
+                    "installed": existing.version,
+                    "ok": false,
+                    "reason": "downgrade"
+                }),
+            );
+            let _ = fs::remove_dir_all(&staging);
+            return Err(e);
         }
         if let Err(e) = archive_current(home, &manifest.app_id, &dest) {
             let _ = fs::remove_dir_all(&staging);
@@ -896,10 +1105,45 @@ pub fn install(home: &Path, src: &Path) -> Result<InstalledApp> {
                 "cannot archive the installed version before update: {e}"
             ));
         }
-        fs::remove_dir_all(&dest)?;
+        if let Some(hook) = before_replace.take() {
+            hook(&manifest.app_id);
+        }
+        parked = match park_runtime(home, &manifest.app_id, &dest) {
+            Ok(keep) => Some(keep),
+            Err(e) => {
+                let _ = fs::remove_dir_all(&staging);
+                return msg(format!(
+                    "cannot preserve chat history and artifacts before update: {e}"
+                ));
+            }
+        };
+        if let Err(e) = fs::remove_dir_all(&dest) {
+            if let Err(restore) = restore_runtime(parked.take(), &dest) {
+                eprintln!(
+                    "eco-platform: runtime restore failed for {}: {restore}",
+                    manifest.app_id
+                );
+            }
+            let _ = fs::remove_dir_all(&staging);
+            return Err(e.into());
+        }
+    } else {
+        fs::create_dir_all(apps_dir(home))?;
     }
-    fs::create_dir_all(apps_dir(home))?;
-    fs::rename(&staging, &dest)?;
+    if let Err(e) = fs::rename(&staging, &dest) {
+        if let Err(restore) = restore_runtime(parked.take(), &dest) {
+            eprintln!(
+                "eco-platform: runtime restore failed for {}: {restore}",
+                manifest.app_id
+            );
+        }
+        return Err(e.into());
+    }
+    if let Err(e) = restore_runtime(parked.take(), &dest) {
+        return msg(format!(
+            "package updated, but chat history could not be restored (data kept in staging): {e}"
+        ));
+    }
 
     if policy.local() {
         if let Err(e) = crate::seal::write(home, &manifest.app_id, &dest) {
@@ -947,9 +1191,20 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+const MAX_ZIP_ENTRIES: usize = 10_000;
+const MAX_ZIP_BYTES: u64 = 512 * 1024 * 1024;
+
 fn extract_zip(src: &Path, dest: &Path) -> Result<()> {
     let file = fs::File::open(src)?;
     let mut archive = zip::ZipArchive::new(file)?;
+    if archive.len() > MAX_ZIP_ENTRIES {
+        return Err(Error::Msg(format!(
+            "zip has {} entries; at most {} are supported",
+            archive.len(),
+            MAX_ZIP_ENTRIES
+        )));
+    }
+    let mut total: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         let Some(rel) = entry.enclosed_name().map(|p| p.to_path_buf()) else {
@@ -963,7 +1218,21 @@ fn extract_zip(src: &Path, dest: &Path) -> Result<()> {
                 fs::create_dir_all(parent)?;
             }
             let mut f = fs::File::create(&out)?;
-            std::io::copy(&mut entry, &mut f)?;
+            let remaining = MAX_ZIP_BYTES.saturating_sub(total);
+            let written = {
+                // Bound the declared entry size, not just the final total.
+                let mut limited = (&mut entry).take(remaining.saturating_add(1));
+                std::io::copy(&mut limited, &mut f)?
+            };
+            if written > remaining {
+                drop(f);
+                let _ = fs::remove_file(&out);
+                return Err(Error::Msg(format!(
+                    "zip expands to more than {} bytes; refusing to extract",
+                    MAX_ZIP_BYTES
+                )));
+            }
+            total = total.saturating_add(written);
         }
     }
     Ok(())
@@ -1475,6 +1744,77 @@ mod tests {
         .unwrap();
         let err = verified_manifest(&home, "demo").unwrap_err().to_string();
         assert!(err.contains("revoked"), "{err}");
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn update_and_rollback_preserve_runtime_state() {
+        let home = std::env::temp_dir().join(format!("eco-registry-runtime-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+
+        let key = SigningKey::from_bytes(&[13u8; 32]);
+        fs::write(
+            trusted_pub_path(&home),
+            hex::encode(key.verifying_key().to_bytes()),
+        )
+        .unwrap();
+
+        let pkg = home.join("pkg");
+        write_package(&pkg, "1.0.0", &key);
+        install(&home, &pkg).unwrap();
+
+        let db = home.join("apps/demo/engine/data/opencode.db");
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        fs::write(&db, b"chat history").unwrap();
+        let dump = home.join("apps/demo/sessions/s1/dumps.ndjson");
+        fs::create_dir_all(dump.parent().unwrap()).unwrap();
+        fs::write(&dump, b"dump").unwrap();
+
+        write_package(&pkg, "1.1.0", &key);
+        install(&home, &pkg).unwrap();
+        assert!(db.exists(), "update removed chat history");
+        assert!(dump.exists(), "update removed artifacts");
+
+        rollback(&home, "demo", None).unwrap();
+        assert!(db.exists(), "rollback removed chat history");
+        assert!(dump.exists(), "rollback removed artifacts");
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn uncovered_skill_is_rejected_before_sealing() {
+        let home = std::env::temp_dir().join(format!("eco-registry-cover-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        use_local_mode(&home, crate::config::Role::User);
+
+        let pkg = home.join("pkg");
+        write_unsigned_package(&pkg, "1.0.0");
+        fs::create_dir_all(pkg.join("skills/evil")).unwrap();
+        fs::write(pkg.join("skills/evil/SKILL.md"), b"evil").unwrap();
+
+        let err = install(&home, &pkg).unwrap_err().to_string();
+        assert!(err.contains("skill is not covered by hashes"), "{err}");
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn recover_runtime_restores_parked_state() {
+        let home = std::env::temp_dir().join(format!("eco-registry-recover-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+
+        let keep = home.join("staging").join("keep-123-demo");
+        fs::create_dir_all(keep.join("engine")).unwrap();
+        fs::write(keep.join("engine/opencode.db"), b"db").unwrap();
+
+        recover_runtime(&home);
+        assert!(home.join("apps/demo/engine/opencode.db").is_file());
+        assert!(!keep.exists());
 
         let _ = fs::remove_dir_all(home);
     }

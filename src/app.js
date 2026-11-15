@@ -789,7 +789,9 @@ function chatItemKey(item) {
   return [
     item.role,
     item.kind,
-    item.text || "",
+    (item.text || "").length,
+    (item.text || "").slice(0, 32),
+    (item.text || "").slice(-32),
     item.tokens_in ?? "",
     item.tokens_out ?? "",
     item.reasoning_tokens ?? "",
@@ -907,7 +909,9 @@ function renderChat(items) {
     const fingerprint = chatItemKey(items[i]);
     const entry = rendered[i];
     const current = log.children[i];
-    if (entry && entry.fingerprint === fingerprint && entry.node === current) continue;
+    // The last item may still be streaming; always rebuild it so equal-length
+    // deltas are not missed. Older items are stable and keyed cheaply.
+    if (i < items.length - 1 && entry && entry.fingerprint === fingerprint && entry.node === current) continue;
 
     const node = buildChatNode(items[i]);
     if (entry && entry.node && entry.node.tagName === "DETAILS" && entry.node.open) {
@@ -1479,8 +1483,10 @@ function renderArtifactApps() {
 }
 
 let artifactRefreshToken = 0;
+let artifactsLastRefresh = 0;
 
 async function refreshArtifacts() {
+  artifactsLastRefresh = Date.now();
   const appId = $("artifact-app").value;
   const sessionSelect = $("artifact-session");
   const dumpsBox = $("artifact-dumps");
@@ -2066,7 +2072,9 @@ function bind() {
       document
         .querySelectorAll(".tab-body")
         .forEach((b) => b.classList.toggle("active", b.id === `tab-${tab.dataset.tab}`));
-      if (tab.dataset.tab === "settings") guard(refreshArtifacts);
+      if (tab.dataset.tab === "settings" && Date.now() - artifactsLastRefresh > 30000) {
+        guard(refreshArtifacts);
+      }
       if (tab.dataset.tab === "dev") guard(refreshPackTool);
     });
   });

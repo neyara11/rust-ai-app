@@ -16,13 +16,27 @@ pub mod state;
 
 use secrets::SecretStore;
 use state::AppState;
+use tauri::Manager;
 
 pub fn run() {
     let state = AppState::new();
-    startup_sweep(&state.home);
+    // Restore runtime state parked by an interrupted install/rollback.
+    registry::recover_runtime(&state.home);
+    // Reap engines left by a previous crash before the window is interactive:
+    // in a background thread `kill_leftover` could kill a freshly started one.
+    for app_id in registry::installed_ids(&state.home) {
+        let _ = engine::kill_leftover(&state.home, &app_id);
+    }
 
     tauri::Builder::default()
         .manage(state)
+        .setup(|app| {
+            // The sweep hashes every installed package and kills leftover
+            // engines; do it after the window exists so startup stays fast.
+            let home = app.state::<AppState>().home.clone();
+            std::thread::spawn(move || startup_sweep(&home));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::platform_info,
             commands::set_mode,
@@ -91,13 +105,39 @@ pub fn startup_sweep(home: &std::path::Path) {
     identity::sweep(home);
     let policy = config::policy(home);
     for app in registry::list(home) {
-        // A hard crash leaves opencode.exe holding the app database; the pid
-        // file lets us kill only the exact recorded process.
-        let _ = engine::kill_leftover(home, &app.app_id);
         let root = artifacts::sessions_root(home, &app.app_id);
         let _ = artifacts::sweep(&root, &policy);
     }
-    let _ = std::fs::remove_dir_all(home.join("staging"));
+    sweep_staging(home);
+}
+
+/// Removes only old staging directories. A concurrent CLI install/rollback may
+/// be using a fresh one, so never wipe the whole tree.
+fn sweep_staging(home: &std::path::Path) {
+    let root = home.join("staging");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Keep-* holds runtime state awaiting recovery; never sweep it.
+        if name.starts_with("keep-") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .map(|age| age.as_secs() > 6 * 3600)
+            .unwrap_or(false);
+        if old {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Headless verification of a package directory or zip. Used by CI and by
@@ -235,6 +275,26 @@ pub fn cli_rollback(app: Option<&String>, version: Option<&String>) -> i32 {
 /// Local mode checks integrity only; corporate mode keeps the signature gate.
 fn verify_by_policy(home: &std::path::Path, dir: &std::path::Path) -> manifest::VerifyReport {
     let policy = config::policy_for(home);
+    let app = match manifest::load(dir) {
+        Ok(app) => app,
+        Err(e) => return manifest::VerifyReport::fail(vec![e.to_string()]),
+    };
+    // Only an installed directory has a seal: for a package being reviewed
+    // before install, integrity/signature checks are the right gate.
+    let installed = registry::find(home, &app.app_id)
+        .and_then(|installed| std::fs::canonicalize(installed).ok())
+        .zip(std::fs::canonicalize(dir).ok())
+        .map(|(installed, dir)| installed == dir)
+        .unwrap_or(false);
+    if installed {
+        return registry::verify_for_readonly(
+            home,
+            &app.app_id,
+            dir,
+            &registry::load_trusted_keys(home),
+            policy,
+        );
+    }
     if policy.local() {
         manifest::verify_integrity(dir)
     } else {
@@ -516,13 +576,10 @@ pub fn mcp_call_for_app(
             "tool {tool} is not in the allow-list of {app_id}"
         ));
     };
-    if definition.stream == "write" && !manifest::external_writes_allowed(&app) {
+    if definition.stream == "write" && !manifest::external_write_allowed(&app, server_id) {
         return error::msg(format!(
-            "tool {tool} is a write tool and {app_id} declares no external writes"
+            "tool {tool} is a write tool and {app_id} does not grant writes to {server_id}"
         ));
-    }
-    if definition.stream == "read" && manifest::external_writes_allowed(&app) {
-        // write-capable apps still get read tools; nothing to do here
     }
 
     let started = std::time::Instant::now();

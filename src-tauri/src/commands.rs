@@ -109,8 +109,13 @@ pub fn set_role(state: tauri::State<'_, AppState>, role: config::Role) -> Result
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn list_apps(state: tauri::State<'_, AppState>) -> Vec<registry::InstalledApp> {
-    registry::list(&state.home)
+pub async fn list_apps(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<registry::InstalledApp>> {
+    let home = state.home.clone();
+    Ok(tauri::async_runtime::spawn_blocking(move || registry::list(&home))
+        .await
+        .unwrap_or_default())
 }
 
 /// Resolves a package path typed by the user. Relative paths are looked up in
@@ -145,14 +150,27 @@ fn resolve_package_path(app: &tauri::AppHandle, raw: &str) -> Option<PathBuf> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn install_app(
+pub async fn install_app(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> Result<registry::InstalledApp> {
     let src = resolve_package_path(&app, &path)
         .ok_or_else(|| Error::Msg(format!("package path does not exist: {path}")))?;
-    registry::install(&state.home, &src)
+    let home = state.home.clone();
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        registry::install_with(&home, &src, |app_id| {
+            // Verification and downgrade checks passed: only now stop the
+            // target app's engine, right before its directory is replaced.
+            let state = handle.state::<AppState>();
+            if let Ok(mut engines) = state.engines.lock() {
+                engines.remove(app_id);
+            };
+        })
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("install task failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -184,7 +202,7 @@ pub fn app_history(state: tauri::State<'_, AppState>, app_id: String) -> Vec<reg
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn rollback_app(
+pub async fn rollback_app(
     state: tauri::State<'_, AppState>,
     app_id: String,
     version: Option<String>,
@@ -193,7 +211,11 @@ pub fn rollback_app(
     if let Ok(mut engines) = state.engines.lock() {
         engines.remove(&app_id);
     }
-    registry::rollback(&home, &app_id, version.as_deref())
+    tauri::async_runtime::spawn_blocking(move || {
+        registry::rollback(&home, &app_id, version.as_deref())
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("rollback task failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -213,7 +235,17 @@ pub fn save_config(state: tauri::State<'_, AppState>, config: UserConfig) -> Res
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn probe_endpoint(url: String) -> Probe {
+pub async fn probe_endpoint(url: String) -> Probe {
+    tauri::async_runtime::spawn_blocking(move || probe_endpoint_blocking(url))
+        .await
+        .unwrap_or(Probe {
+            ok: false,
+            millis: 0,
+            detail: "probe task failed".into(),
+        })
+}
+
+fn probe_endpoint_blocking(url: String) -> Probe {
     let Some((host, port)) = parse_host_port(&url) else {
         return Probe {
             ok: false,
@@ -289,15 +321,20 @@ pub fn secret_delete(state: tauri::State<'_, AppState>, name: String) -> Result<
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn open_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<SessionInfo> {
+pub async fn open_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<SessionInfo> {
     manifest::parse_id(&app_id, "app")?;
-    // Fail-closed: the package is re-verified on every open.
-    registry::verified_manifest(&state.home, &app_id)?;
-    let workspace = config::workspace(&state.home, &app_id);
-    Ok(SessionInfo {
-        app_id,
-        workspace: workspace.display().to_string(),
+    let home = state.home.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<SessionInfo> {
+        // Fail-closed: the package is re-verified on every open.
+        registry::verified_manifest(&home, &app_id)?;
+        let workspace = config::workspace(&home, &app_id);
+        Ok(SessionInfo {
+            app_id,
+            workspace: workspace.display().to_string(),
+        })
     })
+    .await
+    .map_err(|e| Error::Msg(format!("open task failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -625,6 +662,19 @@ pub async fn chat_open(
     .map_err(|e| Error::Msg(format!("engine start task failed: {e}")))?
 }
 
+struct StartingGuard<'a> {
+    state: &'a AppState,
+    app_id: String,
+}
+
+impl Drop for StartingGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut starting) = self.state.starting.lock() {
+            starting.remove(&self.app_id);
+        }
+    }
+}
+
 fn chat_open_blocking(state: &AppState, app_id: String) -> Result<crate::engine::ChatInfo> {
     {
         let engines = engines_lock(state)?;
@@ -633,23 +683,39 @@ fn chat_open_blocking(state: &AppState, app_id: String) -> Result<crate::engine:
         }
     }
 
-    // The agent works in the user-chosen workspace.
-    let workspace = config::workspace(&state.home, &app_id);
-    let engine = crate::engine::Engine::start(&app_id, &state.home, &workspace)?;
-
-    let mut engines = engines_lock(state)?;
-    if let Some(existing) = engines.get(&app_id) {
-        return Ok(existing.info());
+    {
+        let mut starting = state
+            .starting
+            .lock()
+            .map_err(|_| Error::Msg("engine start lock poisoned".to_string()))?;
+        if !starting.insert(app_id.clone()) {
+            return msg("the engine is already starting for this app");
+        }
     }
-    let info = engine.info();
-    let repair = engine.snapshot();
-    engines.insert(app_id, engine);
-    // Legacy chats still titled by app name are renamed from their first user
-    // message in the background; this never blocks opening the app.
-    std::thread::spawn(move || {
-        let _ = repair.repair_generic_titles();
-    });
-    Ok(info)
+    let _starting = StartingGuard {
+        state,
+        app_id: app_id.clone(),
+    };
+    let result = (|| -> Result<crate::engine::ChatInfo> {
+        // The agent works in the user-chosen workspace.
+        let workspace = config::workspace(&state.home, &app_id);
+        let engine = crate::engine::Engine::start(&app_id, &state.home, &workspace)?;
+
+        let mut engines = engines_lock(state)?;
+        if let Some(existing) = engines.get(&app_id) {
+            return Ok(existing.info());
+        }
+        let info = engine.info();
+        let repair = engine.snapshot();
+        engines.insert(app_id.clone(), engine);
+        // Legacy chats still titled by app name are renamed from their first
+        // user message in the background; this never blocks opening the app.
+        std::thread::spawn(move || {
+            let _ = repair.repair_generic_titles();
+        });
+        Ok(info)
+    })();
+    result
 }
 #[tauri::command(rename_all = "snake_case")]
 pub fn chat_send(
@@ -831,29 +897,50 @@ pub fn chat_abort(state: tauri::State<'_, AppState>, app_id: String) -> Result<(
     engine.snapshot().abort()
 }
 #[tauri::command(rename_all = "snake_case")]
-pub fn chat_list(
-    state: tauri::State<'_, AppState>,
+pub async fn chat_list(
+    app: tauri::AppHandle,
     app_id: String,
 ) -> Result<Vec<crate::engine::ChatSummary>> {
-    let engines = engines_lock(&state)?;
-    let engine = engines
-        .get(&app_id)
-        .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
-    engine.sessions()
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<crate::engine::ChatSummary>> {
+        let state = app.state::<AppState>();
+        let session = {
+            let engines = engines_lock(&state)?;
+            let engine = engines
+                .get(&app_id)
+                .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
+            engine.snapshot()
+        };
+        // HTTP runs without holding the engine map lock.
+        session.sessions()
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("chat list task failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn chat_new(
-    state: tauri::State<'_, AppState>,
+pub async fn chat_new(
+    app: tauri::AppHandle,
     app_id: String,
 ) -> Result<crate::engine::ChatInfo> {
-
-    let mut engines = engines_lock(&state)?;
-    let engine = engines
-        .get_mut(&app_id)
-        .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
-    engine.new_session("Новый чат")?;
-    Ok(engine.info())
+    tauri::async_runtime::spawn_blocking(move || -> Result<crate::engine::ChatInfo> {
+        let state = app.state::<AppState>();
+        let session = {
+            let engines = engines_lock(&state)?;
+            let engine = engines
+                .get(&app_id)
+                .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
+            engine.snapshot()
+        };
+        let id = session.new_session("\u{041d}\u{043e}\u{0432}\u{044b}\u{0439} \u{0447}\u{0430}\u{0442}")?;
+        let mut engines = engines_lock(&state)?;
+        let engine = engines
+            .get_mut(&app_id)
+            .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
+        engine.select_session(&id)?;
+        Ok(engine.info())
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("chat create task failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -871,60 +958,100 @@ pub fn chat_select(
     Ok(engine.info())
 }
 #[tauri::command(rename_all = "snake_case")]
-pub fn chat_delete(
-    state: tauri::State<'_, AppState>,
+pub async fn chat_delete(
+    app: tauri::AppHandle,
     app_id: String,
     session_id: String,
 ) -> Result<crate::engine::ChatInfo> {
-    let busy_key = format!("{}:{}", app_id, session_id);
-    if let Ok(busy) = state.busy.lock() {
-        if busy.contains(&busy_key) {
-            return msg("stop this chat before deleting it");
+    tauri::async_runtime::spawn_blocking(move || -> Result<crate::engine::ChatInfo> {
+        let state = app.state::<AppState>();
+        let busy_key = format!("{}:{}", app_id, session_id);
+        if let Ok(busy) = state.busy.lock() {
+            if busy.contains(&busy_key) {
+                return msg("stop this chat before deleting it");
+            }
         }
-    }
-    let mut engines = engines_lock(&state)?;
-    let engine = engines
-        .get_mut(&app_id)
-        .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
-
-    let was_current = engine.session_id == session_id;
-    engine.delete_session(&session_id)?;
-
-    if was_current {
-        let sessions = engine.sessions()?;
-        if let Some(first) = sessions.first() {
-            engine.select_session(&first.id)?;
+        let (session, was_current) = {
+            let engines = engines_lock(&state)?;
+            let engine = engines
+                .get(&app_id)
+                .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
+            (engine.snapshot(), engine.session_id == session_id)
+        };
+        session.delete_session(&session_id)?;
+        let next = if was_current {
+            let sessions = session.sessions()?;
+            Some(match sessions.first() {
+                Some(first) => first.id.clone(),
+                None => session.new_session("\u{041d}\u{043e}\u{0432}\u{044b}\u{0439} \u{0447}\u{0430}\u{0442}")?,
+            })
         } else {
-            engine.new_session("\u{041d}\u{043e}\u{0432}\u{044b}\u{0439} \u{0447}\u{0430}\u{0442}")?;
+            None
+        };
+        let mut engines = engines_lock(&state)?;
+        let engine = engines
+            .get_mut(&app_id)
+            .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
+        if let Some(id) = next {
+            engine.select_session(&id)?;
         }
-    }
-    Ok(engine.info())
+        Ok(engine.info())
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("chat delete task failed: {e}")))?
 }
 #[tauri::command(rename_all = "snake_case")]
-pub fn chat_history(
-    state: tauri::State<'_, AppState>,
+pub async fn chat_history(
+    app: tauri::AppHandle,
     app_id: String,
 ) -> Result<Vec<crate::engine::ChatItem>> {
-    let engines = engines_lock(&state)?;
-    let engine = engines
-        .get(&app_id)
-        .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
-    engine.history()
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<crate::engine::ChatItem>> {
+        let state = app.state::<AppState>();
+        let session = {
+            let engines = engines_lock(&state)?;
+            let engine = engines
+                .get(&app_id)
+                .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
+            engine.snapshot()
+        };
+        session.history()
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("chat history task failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn chat_reset(state: tauri::State<'_, AppState>, app_id: String) -> Result<()> {
-    let mut engines = engines_lock(&state)?;
-    let engine = engines
-        .get_mut(&app_id)
-        .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
-    engine.reset()
+pub async fn chat_reset(app: tauri::AppHandle, app_id: String) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<()> {
+        let state = app.state::<AppState>();
+        let session = {
+            let engines = engines_lock(&state)?;
+            let engine = engines
+                .get(&app_id)
+                .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
+            engine.snapshot()
+        };
+        let id = session.new_session("chat")?;
+        let mut engines = engines_lock(&state)?;
+        let engine = engines
+            .get_mut(&app_id)
+            .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
+        engine.select_session(&id)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("chat reset task failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn chat_stop(state: tauri::State<'_, AppState>, app_id: String) -> Result<()> {
-    let mut engines = engines_lock(&state)?;
-    engines.remove(&app_id);
-    Ok(())
+pub async fn chat_stop(app: tauri::AppHandle, app_id: String) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<()> {
+        let state = app.state::<AppState>();
+        let mut engines = engines_lock(&state)?;
+        engines.remove(&app_id);
+        Ok(())
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("chat stop task failed: {e}")))?
 }
 

@@ -45,8 +45,42 @@ pub fn get(secrets: &SecretStore, id: &str) -> Result<ServerDef> {
     serde_json::from_str(&raw).map_err(Error::Json)
 }
 
+/// Remote MCP endpoints must use TLS: the bearer token and every tool call
+/// payload travel to this URL. Plain HTTP is allowed only for loopback.
+fn validate_url(raw: &str) -> Result<()> {
+    let trimmed = raw.trim();
+    if trimmed.to_ascii_lowercase().starts_with("https://") {
+        return Ok(());
+    }
+    let Some(rest) = trimmed.strip_prefix("http://") else {
+        return msg("mcp server url must use https:// (http:// is allowed only for loopback)");
+    };
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    // Userinfo before '@' must not be able to masquerade as the host.
+    if authority.contains('@') {
+        return msg("mcp server url must not contain userinfo");
+    }
+    let host = if let Some(after) = authority.strip_prefix('[') {
+        after.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1";
+    if loopback {
+        Ok(())
+    } else {
+        msg("mcp server url must use https:// (http:// is allowed only for loopback)")
+    }
+}
+
 pub fn put(secrets: &SecretStore, def: &ServerDef) -> Result<()> {
     validate_id(&def.id)?;
+    validate_url(&def.url)?;
     let raw = serde_json::to_string(def)?;
     secrets.store(&key(&def.id), &raw)
 }
@@ -69,6 +103,7 @@ pub struct McpSession {
 
 impl McpSession {
     pub fn connect(def: ServerDef) -> Result<Self> {
+        validate_url(&def.url)?;
         // Native TLS (Schannel on Windows) instead of rustls: corporate TLS
         // inspection in a closed network is handled by the system store.
         let tls = ureq::native_tls::TlsConnector::new()
@@ -285,5 +320,17 @@ mod tests {
         assert!(truncated);
         assert!(bytes > MAX_RESPONSE_BYTES);
         assert!(text.len() < MAX_RESPONSE_BYTES + 100);
+    }
+
+    #[test]
+    fn remote_mcp_urls_require_tls_outside_loopback() {
+        assert!(validate_url("https://example.com/mcp").is_ok());
+        assert!(validate_url("https://example.com/mcp?x=1").is_ok());
+        assert!(validate_url("http://127.0.0.1:8080/mcp").is_ok());
+        assert!(validate_url("http://localhost/mcp").is_ok());
+        assert!(validate_url("http://[::1]:8080/mcp").is_ok());
+        assert!(validate_url("http://evil.example/mcp").is_err());
+        assert!(validate_url("http://localhost:80@evil.example/mcp").is_err());
+        assert!(validate_url("ftp://example.com/mcp").is_err());
     }
 }

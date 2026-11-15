@@ -8,6 +8,9 @@ pub struct AppState {
     pub home: PathBuf,
     pub engines: Mutex<HashMap<String, Engine>>,
     pub busy: Mutex<std::collections::HashSet<String>>,
+    /// Apps whose engine is currently starting, so two `chat_open` calls do
+    /// not spawn two sidecars for the same app.
+    pub starting: Mutex<std::collections::HashSet<String>>,
 }
 
 impl AppState {
@@ -18,6 +21,7 @@ impl AppState {
             home,
             engines: Mutex::new(HashMap::new()),
             busy: Mutex::new(std::collections::HashSet::new()),
+            starting: Mutex::new(std::collections::HashSet::new()),
         }
     }
 }

@@ -126,7 +126,7 @@ pub struct VerifyReport {
 }
 
 impl VerifyReport {
-    fn fail(problems: Vec<String>) -> Self {
+    pub(crate) fn fail(problems: Vec<String>) -> Self {
         Self {
             ok: problems.is_empty(),
             problems,
@@ -184,7 +184,13 @@ pub fn ensure_not_downgrade(current: &str, next: &str) -> Result<()> {
 /// anchor. Local mode pairs this with a local seal; corporate mode uses
 /// [`verify_package`].
 pub fn verify_integrity(dir: &Path) -> VerifyReport {
-    verify_impl(dir, None)
+    verify_impl(dir, None, false)
+}
+
+/// Install-time verification: additionally requires the signed hash list to
+/// cover every file the engine will read or execute.
+pub fn verify_integrity_install(dir: &Path) -> VerifyReport {
+    verify_impl(dir, None, true)
 }
 
 /// Verifies the package in `dir`: schema version, detached signature over
@@ -192,10 +198,18 @@ pub fn verify_integrity(dir: &Path) -> VerifyReport {
 /// package unusable. The signature may be made by any of the active anchors,
 /// which allows staged key rotation.
 pub fn verify_package(dir: &Path, trusted: &[VerifyingKey]) -> VerifyReport {
-    verify_impl(dir, Some(trusted))
+    verify_impl(dir, Some(trusted), false)
 }
 
-fn verify_impl(dir: &Path, trusted: Option<&[VerifyingKey]>) -> VerifyReport {
+pub fn verify_package_install(dir: &Path, trusted: &[VerifyingKey]) -> VerifyReport {
+    verify_impl(dir, Some(trusted), true)
+}
+
+fn verify_impl(
+    dir: &Path,
+    trusted: Option<&[VerifyingKey]>,
+    require_coverage: bool,
+) -> VerifyReport {
     let manifest_bytes = match fs::read(dir.join("manifest.json")) {
         Ok(b) => b,
         Err(e) => return VerifyReport::fail(vec![format!("manifest.json unreadable: {e}")]),
@@ -298,6 +312,49 @@ fn verify_impl(dir: &Path, trusted: Option<&[VerifyingKey]>) -> VerifyReport {
         }
     }
 
+    // Install-time only: a package must cover every file the engine will read
+    // or execute. Already-installed packages stay openable after an upgrade.
+    if require_coverage {
+        if !manifest.profile.system_prompt.is_empty() {
+            let rel = manifest.profile.system_prompt.replace('\\', "/");
+            if !manifest.hashes.contains_key(&rel) {
+                problems.push(format!("system prompt is not covered by hashes: {rel}"));
+            }
+        }
+        if let Ok(entries) = fs::read_dir(dir.join("skills")) {
+            for entry in entries.flatten() {
+                if !entry.path().is_dir() || !entry.path().join("SKILL.md").is_file() {
+                    continue;
+                }
+                let rel = format!("skills/{}/SKILL.md", entry.file_name().to_string_lossy());
+                if !manifest.hashes.contains_key(&rel) {
+                    problems.push(format!("skill is not covered by hashes: {rel}"));
+                }
+            }
+        }
+        for tool in &manifest.tools {
+            if let Some(bin) = &tool.bin {
+                let rel = bin.replace('\\', "/");
+                if !manifest.hashes.contains_key(&rel) {
+                    problems.push(format!("tool binary is not covered by hashes: {rel}"));
+                }
+            }
+        }
+    }
+
+    // Reserved platform secrets are never valid for package code, including
+    // for already-installed packages (the proxy also filters them at runtime).
+    for tool in &manifest.tools {
+        for secret in tool.secrets.values() {
+            if is_reserved_secret(secret) {
+                problems.push(format!(
+                    "tool {} requests reserved platform secret '{secret}'",
+                    tool.tool
+                ));
+            }
+        }
+    }
+
     VerifyReport {
         ok: problems.is_empty(),
         problems,
@@ -309,8 +366,19 @@ pub fn find_tool<'a>(manifest: &'a Manifest, tool: &str) -> Option<&'a ToolDef> 
     manifest.tools.iter().find(|t| t.tool == tool)
 }
 
-pub fn external_writes_allowed(manifest: &Manifest) -> bool {
-    !manifest.capabilities.external_writes.is_empty()
+/// Platform secrets that must never be handed to package code. Windows file
+/// names are case-insensitive, so the comparison is case-folded.
+pub fn is_reserved_secret(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    name == "llm_api_key" || name.starts_with("mcp.")
+}
+
+pub fn external_write_allowed(manifest: &Manifest, connection_id: &str) -> bool {
+    manifest
+        .capabilities
+        .external_writes
+        .iter()
+        .any(|id| id == connection_id)
 }
 
 pub fn parse_id(raw: &str, what: &str) -> Result<()> {
@@ -429,6 +497,94 @@ mod tests {
         let report = verify_package(&dir, &[signing.verifying_key()]);
         assert!(report.ok, "{:?}", report.problems);
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn external_writes_are_scoped_per_connection() {
+        let app: Manifest = serde_json::from_str(
+            r#"{"schema_version":2,"app_id":"a","name":"A","version":"1.0.0",
+                "profile":{"system_prompt":""},
+                "capabilities":{"external_writes":["alpha"]}}"#,
+        )
+        .unwrap();
+        assert!(external_write_allowed(&app, "alpha"));
+        assert!(!external_write_allowed(&app, "beta"));
+    }
+
+    #[test]
+    fn skills_and_bins_must_be_covered_by_hashes() {
+        // Install-time gate only; opening an already-installed package must
+        // not be blocked by a legacy manifest without full coverage.
+        let dir = tmp("coverage");
+        std::fs::create_dir_all(dir.join("prompt")).unwrap();
+        std::fs::create_dir_all(dir.join("skills/extra")).unwrap();
+        std::fs::write(dir.join("prompt/system.md"), b"p").unwrap();
+        std::fs::write(dir.join("skills/extra/SKILL.md"), b"s").unwrap();
+        let body = format!(
+            r#"{{"schema_version":2,"app_id":"a","name":"A","version":"1.0.0","profile":{{"system_prompt":"prompt/system.md"}},"hashes":{{"prompt/system.md":"sha256:{}"}}}}"#,
+            sha256_hex(b"p")
+        );
+        std::fs::write(dir.join("manifest.json"), &body).unwrap();
+        let report = verify_integrity_install(&dir);
+        assert!(!report.ok);
+        assert!(
+            report.problems.iter().any(|p| p.contains("skill is not covered")),
+            "{:?}",
+            report.problems
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn package_tools_cannot_request_platform_secrets() {
+        let dir = tmp("tools-secret");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/x.exe"), b"x").unwrap();
+        let body = format!(
+            r#"{{"schema_version":2,"app_id":"a","name":"A","version":"1.0.0",
+                "profile":{{"system_prompt":""}},
+                "tools":[{{"tool":"x","bin":"bin/x.exe","secrets":{{"TOKEN":"mcp.1"}}}}],
+                "hashes":{{"bin/x.exe":"sha256:{}"}}}}"#,
+            sha256_hex(b"x")
+        );
+        std::fs::write(dir.join("manifest.json"), &body).unwrap();
+        let report = verify_integrity(&dir);
+        assert!(!report.ok);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("reserved platform secret")),
+            "{:?}",
+            report.problems
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reserved_secrets_are_case_insensitive() {
+        let dir = tmp("secret-case");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/x.exe"), b"x").unwrap();
+        let body = format!(
+            r#"{{"schema_version":2,"app_id":"a","name":"A","version":"1.0.0",
+                "profile":{{"system_prompt":""}},
+                "tools":[{{"tool":"x","bin":"bin/x.exe","secrets":{{"TOKEN":"MCP.1"}}}}],
+                "hashes":{{"bin/x.exe":"sha256:{}"}}}}"#,
+            sha256_hex(b"x")
+        );
+        std::fs::write(dir.join("manifest.json"), &body).unwrap();
+        let report = verify_integrity(&dir);
+        assert!(!report.ok);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("reserved platform secret")),
+            "{:?}",
+            report.problems
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

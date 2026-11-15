@@ -464,6 +464,26 @@ struct RuntimeInfo {
     created: u64,
 }
 
+/// Kills a just-spawned sidecar if startup fails before `Engine` is built.
+struct ChildGuard {
+    child: Option<Child>,
+    pid_file: PathBuf,
+    pid: u32,
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        if recorded_pid(&self.pid_file) == Some(self.pid) {
+            let _ = std::fs::remove_file(&self.pid_file);
+        }
+    }
+}
+
 impl Drop for Engine {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -537,7 +557,23 @@ fn agent() -> ureq::Agent {
 /// The event stream stays open for the whole turn, so it must not inherit the
 /// 300 s request timeout used for regular calls.
 fn stream_agent() -> ureq::Agent {
-    let mut builder = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(5));
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        // The stream is long-lived, but an idle socket must not pin a reader
+        // thread forever after a turn is aborted.
+        .timeout_read(Duration::from_secs(120));
+    if let Ok(tls) = ureq::native_tls::TlsConnector::new() {
+        builder = builder.tls_connector(std::sync::Arc::new(tls));
+    }
+    builder.build()
+}
+
+/// Short-timeout agent for readiness probes: `wait_ready` must honour its own
+/// budget instead of inheriting the 300 s request timeout.
+fn probe_agent() -> ureq::Agent {
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(2))
+        .timeout(Duration::from_secs(2));
     if let Ok(tls) = ureq::native_tls::TlsConnector::new() {
         builder = builder.tls_connector(std::sync::Arc::new(tls));
     }
@@ -1093,11 +1129,19 @@ impl Engine {
         let child = command
             .spawn()
             .map_err(|e| Error::Msg(format!("cannot start opencode: {e}")))?;
-
-        let agent = agent();
-        wait_ready(&agent, &base, &auth, Duration::from_secs(25))?;
         let runtime = runtime_info(child.id(), &binary);
+        let mut child_guard = ChildGuard {
+            child: Some(child),
+            pid_file: pid_file.clone(),
+            pid: runtime.pid,
+        };
+        // Write the pid immediately so a failed start can always be cleaned
+        // up by `kill_leftover`, even after an early return.
         std::fs::write(&pid_file, serde_json::to_string(&runtime)?)?;
+
+        let probe = probe_agent();
+        wait_ready(&probe, &base, &auth, Duration::from_secs(25))?;
+        let agent = agent();
 
         let session_id = match existing_session(&agent, &base, &auth)? {
             Some(id) => id,
@@ -1151,6 +1195,10 @@ impl Engine {
         }
 
         artifact_guard.armed = false;
+        let child = child_guard
+            .child
+            .take()
+            .ok_or_else(|| Error::Msg("engine child disappeared during startup".to_string()))?;
         Ok(Self {
             child,
             base,
@@ -1180,14 +1228,11 @@ impl Engine {
     }
 
     pub fn sessions(&self) -> Result<Vec<ChatSummary>> {
-        let agent = agent();
-        let raw = http(&agent, &self.base, &self.auth, "GET", "/session", None)?;
-        Ok(parse_sessions(&raw))
+        self.snapshot().sessions()
     }
 
     pub fn new_session(&mut self, title: &str) -> Result<()> {
-        let agent = agent();
-        self.session_id = create_session(&agent, &self.base, &self.auth, title)?;
+        self.session_id = self.snapshot().new_session(title)?;
         Ok(())
     }
 
@@ -1198,17 +1243,7 @@ impl Engine {
     }
 
     pub fn delete_session(&mut self, id: &str) -> Result<()> {
-        crate::manifest::parse_id(id, "session")?;
-        let agent = agent();
-        http(
-            &agent,
-            &self.base,
-            &self.auth,
-            "DELETE",
-            &format!("/session/{id}"),
-            None,
-        )?;
-        Ok(())
+        self.snapshot().delete_session(id)
     }
 
     pub fn snapshot(&self) -> ChatSession {
@@ -1238,20 +1273,7 @@ impl Engine {
     }
 
     pub fn reset(&mut self) -> Result<()> {
-        let agent = agent();
-        let session = http(
-            &agent,
-            &self.base,
-            &self.auth,
-            "POST",
-            "/session",
-            Some(&json!({ "title": "chat" })),
-        )?;
-        self.session_id = session
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Msg("engine did not return a session id".to_string()))?
-            .to_string();
+        self.session_id = self.snapshot().new_session("chat")?;
         Ok(())
     }
 }
@@ -1274,6 +1296,33 @@ pub struct ChatSession {
 }
 
 impl ChatSession {
+    /// Session operations that only need the connection details, so callers
+    /// can release the engine map lock before doing HTTP.
+    pub fn sessions(&self) -> Result<Vec<ChatSummary>> {
+        let agent = agent();
+        let raw = http(&agent, &self.base, &self.auth, "GET", "/session", None)?;
+        Ok(parse_sessions(&raw))
+    }
+
+    pub fn new_session(&self, title: &str) -> Result<String> {
+        let agent = agent();
+        create_session(&agent, &self.base, &self.auth, title)
+    }
+
+    pub fn delete_session(&self, id: &str) -> Result<()> {
+        crate::manifest::parse_id(id, "session")?;
+        let agent = agent();
+        http(
+            &agent,
+            &self.base,
+            &self.auth,
+            "DELETE",
+            &format!("/session/{id}"),
+            None,
+        )?;
+        Ok(())
+    }
+
     /// Synchronous prompt: returns when the agent finishes the turn. Callers
     /// run it on a worker thread so the UI stays responsive.
     pub fn prompt(&self, text: &str, variant: Option<&str>) -> Result<()> {

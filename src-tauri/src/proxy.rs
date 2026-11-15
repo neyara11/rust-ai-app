@@ -43,6 +43,20 @@ fn env_name_ok(value: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// Platform secrets (the LLM gateway key and remote MCP definitions, which
+/// contain bearer tokens) must never be handed to package code.
+fn secret_allowed_for_package(value: &str) -> bool {
+    !manifest::is_reserved_secret(value)
+}
+
+fn read_capped_file(path: &Path) -> Result<(Vec<u8>, u64)> {
+    let file = fs::File::open(path)?;
+    let total = file.metadata()?.len();
+    let mut bytes = Vec::new();
+    file.take(MAX_READ_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    Ok((bytes, total))
+}
+
 fn secret_name_ok(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -86,7 +100,6 @@ pub fn has_skills(package_dir: &Path) -> bool {
 /// Shared by the engine config (permission entries) and the proxy.
 pub fn gateway_tool_names(app: &Manifest, package_dir: &Path) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let writes_allowed = manifest::external_writes_allowed(app);
 
     if has_skills(package_dir) {
         out.push("skill".to_string());
@@ -96,6 +109,7 @@ pub fn gateway_tool_names(app: &Manifest, package_dir: &Path) -> Vec<String> {
         if connection.kind != "http-mcp" {
             continue;
         }
+        let writes_allowed = manifest::external_write_allowed(app, &connection.id);
         for tool in &app.tools {
             if tool.bin.is_some() {
                 continue;
@@ -164,6 +178,9 @@ pub struct Proxy {
     built: bool,
     identity: ProxyIdentity,
     call_seq: u64,
+    /// Last successful allowlist check, cached briefly to keep the per-call
+    /// path from re-reading and re-verifying the signed document every time.
+    allow_checked: Option<(Instant, String)>,
 }
 
 /// Resolves the agent identity passed by the engine. A missing token is a hard
@@ -227,6 +244,7 @@ impl Proxy {
             built: false,
             identity,
             call_seq: 0,
+            allow_checked: None,
         })
     }
 
@@ -282,10 +300,11 @@ impl Proxy {
                 continue;
             }
             if tool.secrets.len() > 16
-                || tool
-                    .secrets
-                    .iter()
-                    .any(|(env, secret)| !env_name_ok(env) || !secret_name_ok(secret))
+                || tool.secrets.iter().any(|(env, secret)| {
+                    !env_name_ok(env)
+                        || !secret_name_ok(secret)
+                        || !secret_allowed_for_package(secret)
+                })
             {
                 eprintln!("eco-platform mcp proxy: invalid secrets mapping for {exposed}, skipped");
                 continue;
@@ -313,11 +332,11 @@ impl Proxy {
         }
 
         let secrets = SecretStore::new(&self.home);
-        let writes_allowed = manifest::external_writes_allowed(&self.app);
         for connection in self.app.connections.clone() {
             if connection.kind != "http-mcp" {
                 continue;
             }
+            let writes_allowed = manifest::external_write_allowed(&self.app, &connection.id);
             let schemas = self.load_schemas(&secrets, &connection.id);
             for tool in self.app.tools.clone() {
                 if tool.bin.is_some() {
@@ -616,6 +635,40 @@ impl Proxy {
                 }),
             );
             return Err(e);
+        }
+        // Allowlist/CRL may change while the gateway is running; re-check on
+        // every call instead of trusting the decision made at startup.
+        let policy = crate::config::policy_for(&self.home);
+        if policy.enforce_allowlist() {
+            let fresh = self
+                .allow_checked
+                .as_ref()
+                .map(|(checked, version)| {
+                    version == &self.app.version
+                        && checked.elapsed() < Duration::from_secs(5)
+                })
+                .unwrap_or(false);
+            if !fresh {
+                let trusted = registry::load_trusted_keys(&self.home);
+                let allow = crate::allowlist::guard(&self.home, &trusted);
+                if let Err(e) = allow.decision(&self.app.app_id, &self.app.version) {
+                    crate::commands::audit(
+                        &self.home,
+                        &self.app.app_id,
+                        json!({
+                            "ts": crate::artifacts::now_secs(),
+                            "app_id": self.app.app_id,
+                            "app_version": self.app.version,
+                            "source": "agent",
+                            "action": "tool_denied",
+                            "token_id": self.identity.token_id,
+                            "reason": e.to_string()
+                        }),
+                    );
+                    return Err(e);
+                }
+                self.allow_checked = Some((Instant::now(), self.app.version.clone()));
+            }
         }
         self.ensure_tools();
         let route = match self.routes.get(name).cloned() {
@@ -1172,9 +1225,9 @@ fn skill_call(package_dir: &Path, args: &Value) -> Result<Value> {
             if !path.is_file() {
                 return msg(format!("skill '{name}' not found"));
             }
-            let bytes = fs::read(&path)?;
-            let total = bytes.len();
-            let bytes = if total > MAX_READ_BYTES {
+            let (bytes, total) = read_capped_file(&path)?;
+            let truncated = bytes.len() > MAX_READ_BYTES;
+            let bytes = if truncated {
                 &bytes[..MAX_READ_BYTES]
             } else {
                 &bytes[..]
@@ -1184,7 +1237,7 @@ fn skill_call(package_dir: &Path, args: &Value) -> Result<Value> {
             Ok(json!({
                 "name": name,
                 "text": text,
-                "truncated": total > MAX_READ_BYTES,
+                "truncated": truncated,
                 "bytes": total
             }))
         }
@@ -1233,9 +1286,9 @@ fn file_call(workspace: &Path, name: &str, args: &Value) -> Result<Value> {
             if !path.is_file() {
                 return msg(format!("not a file: {}", path.display()));
             }
-            let bytes = fs::read(&path)?;
-            let total = bytes.len();
-            let bytes = if total > MAX_READ_BYTES {
+            let (bytes, total) = read_capped_file(&path)?;
+            let truncated = bytes.len() > MAX_READ_BYTES;
+            let bytes = if truncated {
                 &bytes[..MAX_READ_BYTES]
             } else {
                 &bytes[..]
@@ -1245,7 +1298,7 @@ fn file_call(workspace: &Path, name: &str, args: &Value) -> Result<Value> {
             Ok(json!({
                 "path": raw,
                 "text": text,
-                "truncated": total > MAX_READ_BYTES,
+                "truncated": truncated,
                 "bytes": total
             }))
         }
