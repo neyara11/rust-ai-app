@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ECO AIOps — design-next</title>
+<script>(function(){try{var t=localStorage.getItem("eco.theme");try{t=JSON.parse(t)}catch(e){}if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;}catch(e){}})();</script>
+<link rel="stylesheet" href="fonts.css" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<div class="app" id="app">
+
+  <!-- ═══ сайдбар ═══ -->
+  <aside class="side">
+    <button class="agent-btn" data-pop="pop-agent" title="Сменить агента">
+      <span class="av" id="side-av">DW</span>
+      <span class="nm"><b id="side-name">Документы и Word</b><span><i class="dot" id="side-dot"></i><span id="side-sub">doc-writer · подпись ок</span></span></span>
+      <svg class="chev2" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 10l5 5 5-5"/></svg>
+    </button>
+
+    <button class="new" id="btn-new" title="Новый диалог (Ctrl+N)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      <span>Новый диалог</span><kbd>Ctrl N</kbd>
+    </button>
+
+    <div class="search" id="search-wrap">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input id="search-input" placeholder="Поиск по истории" aria-label="Поиск по истории" />
+      <kbd>Ctrl K</kbd>
+    </div>
+
+    <button class="search rail-hist" id="btn-rail-hist" title="История чатов" aria-label="История чатов">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 2"/></svg>
+    </button>
+
+    <nav class="hist" id="hist" aria-label="История сессий"></nav>
+
+    <div class="hist-flyout" id="hist-flyout" aria-label="История чатов">
+      <div class="hf-head">
+        <b>История чатов</b>
+        <button class="ib" id="hf-close" title="Закрыть">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="hf-search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input id="hf-search" placeholder="Поиск по истории" aria-label="Поиск по истории" />
+      </div>
+      <div class="hist" id="hist-flyout-list"></div>
+    </div>
+
+    <div class="foot">
+      <button class="nav" data-view="catalog" id="nav-catalog" title="Каталог агентов" aria-label="Каталог агентов">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        <span>Каталог агентов</span><span class="r" id="nav-count">5</span>
+      </button>
+      <button class="nav" data-sheet="sheet-agent" title="Права и инструменты" aria-label="Права и инструменты">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/><path d="M9 12l2 2 4-4"/></svg>
+        <span>Права и инструменты</span><span class="r" id="nav-tools">3</span>
+      </button>
+      <button class="nav" data-view="tools" title="MCP-консоль" aria-label="MCP-консоль">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        <span>MCP-консоль</span>
+      </button>
+      <button class="nav" data-view="wizard" title="Мастер пакета" aria-label="Мастер пакета">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/></svg>
+        <span>Мастер пакета</span>
+      </button>
+      <button class="nav" data-sheet="sheet-settings" title="Настройки" aria-label="Настройки">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>Настройки</span>
+      </button>
+      <div class="foot-row">
+        <button class="ib" id="btn-collapse" title="Свернуть панель (Ctrl+B)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+        </button>
+        <button class="ib" id="btn-theme" title="Сменить тему">
+          <svg class="ic-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+          <svg class="ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M20.5 14.3A8.5 8.5 0 0 1 9.7 3.5 8.5 8.5 0 1 0 20.5 14.3z"/></svg>
+        </button>
+        <span class="mode" id="mode-label" title="Режим и роль">корп · польз</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ═══ основная область ═══ -->
+  <main class="main">
+    <div class="topbar">
+      <div class="tb-left">
+        <button class="ib sm hidden" id="btn-back" title="К каталогу">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        </button>
+        <div class="tb-title" id="tb-title" title="Переименовать сессию">План проверки деградации БД</div>
+        <span class="badge" id="tb-badge">ses-301</span>
+      </div>
+      <div class="tb-right" id="tb-actions"></div>
+    </div>
+
+    <!-- ── диалог ── -->
+    <section class="view on" id="view-chat">
+      <div class="thread" id="thread"><div class="col" id="thread-col"></div></div>
+
+      <div class="composer-wrap">
+        <div class="attachments" id="attachments"></div>
+        <div class="composer">
+          <textarea id="chat-text" rows="1" placeholder="Сообщение агенту…"></textarea>
+          <div class="c-row">
+            <button class="chip" id="btn-attach" title="Прикрепить файл">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </button>
+            <input type="file" id="file-input" multiple hidden accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.csv,.log,.yaml,.yml,.xml,.html,.css,.js,.ts,.rs,.py,.toml,.ini" />
+            <button class="chip" data-pop="pop-folder" data-place="above" title="Рабочая папка">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+              <span class="mono clamp" id="folder-label">db-degradation</span>
+            </button>
+            <button class="chip" data-pop="pop-effort" data-place="above" title="Глубина рассуждений">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 18h4M4 12h10M4 6h16"/></svg>
+              <span id="effort-label">Авто</span>
+            </button>
+            <span class="sp"></span>
+            <button class="chip" data-pop="pop-model" data-place="above" title="Модель и шлюз">
+              <i class="dot" id="engine-dot"></i><span class="mono" id="model-label">deepseek-v4-flash</span>
+            </button>
+            <button class="stop" id="btn-stop" hidden>Остановить</button>
+            <button class="send" id="btn-send" title="Отправить (Enter)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="c-hint" id="c-hint"></div>
+      </div>
+    </section>
+
+    <!-- ── каталог ── -->
+    <section class="view" id="view-catalog">
+      <div class="scroller">
+        <div class="cat-page">
+          <div class="hero">
+            <div class="hero-copy">
+              <div class="eyebrow">Реестр мини-приложений · целостность проверена</div>
+              <h1>Изолированные агентские пакеты</h1>
+              <p>Каждое мини-приложение работает в собственном контуре: фиксированный системный промпт, белый список инструментов и доступ к файлам только в выбранной рабочей папке.</p>
+            </div>
+
+            <div class="install">
+              <div class="lbl"><b>Установка пакета</b> · .zip или каталог</div>
+              <div class="inst-row">
+                <span class="inp">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  <input id="install-path" placeholder="Путь к .zip или папке пакета" />
+                </span>
+                <button class="btn pri" id="install-btn">Установить</button>
+              </div>
+              <div class="inst-acts">
+                <button class="btn ghost sm" id="install-zip">Выбрать .zip…</button>
+                <button class="btn ghost sm" id="install-folder">Выбрать папку…</button>
+                <span class="badge" id="install-status" hidden></span>
+              </div>
+              <div class="quick">
+                <span class="lbl">Быстрая установка dev-пакетов:</span>
+                <button class="qbtn" data-quick="dev-apps/doc-writer">doc-writer</button>
+                <button class="qbtn" data-quick="dev-apps/sla-metrics">sla-metrics</button>
+                <button class="qbtn" data-quick="dev-apps/incident-brief">incident-brief</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="cat-bar">
+            <h2>Установленные пакеты <span class="pill-count" id="apps-count">5</span></h2>
+            <div class="legend">
+              <span><i class="dot"></i> подпись или локальный seal</span>
+              <span><i class="dot bad"></i> заблокировано</span>
+            </div>
+          </div>
+
+          <div class="cards" id="cards"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── MCP-консоль ── -->
+    <section class="view" id="view-tools">
+      <div class="scroller">
+        <div class="tools-page">
+          <aside class="tpanel">
+            <h3>Allow-list манифеста</h3>
+            <p class="desc">Только перечисленные инструменты разрешены контрактом пакета. Все вызовы идут через Tool Host и пишутся в аудит.</p>
+            <div class="manifest-tools" id="manifest-tools"></div>
+            <div class="divider"></div>
+            <div class="sec-label">Профиль агента</div>
+            <div id="tools-profile"></div>
+          </aside>
+
+          <div>
+            <div class="console-head">
+              <div class="grow">
+                <h2>Отладка и ручной вызов MCP</h2>
+                <p>Прямой запрос к зарегистрированному MCP-серверу через шлюз платформы · лимит ответа 64 КиБ</p>
+              </div>
+              <span class="badge" id="tool-meta">готов к вызову</span>
+            </div>
+
+            <div class="tpanel">
+              <div class="console-grid">
+                <label>MCP-сервер
+                  <select class="switch" id="server-select"></select>
+                </label>
+                <label>Разрешённый инструмент
+                  <select class="switch" id="tool-select"></select>
+                </label>
+              </div>
+
+              <div class="tools-block">
+                <div class="bhead">
+                  <span class="lbl">JSON-аргументы вызова</span>
+                  <button class="btn ghost sm" id="tool-sample" style="margin-left:auto">Подставить шаблон</button>
+                </div>
+                <textarea class="inp args" id="tool-args" spellcheck="false"></textarea>
+              </div>
+
+              <div class="row-acts" style="margin-bottom:12px">
+                <button class="btn pri" id="tool-call">Выполнить вызов</button>
+                <span class="inline-note" style="margin:0 0 0 8px">ответ обрезается до 64 КиБ, вызов пишется в аудит</span>
+              </div>
+
+              <div class="sec-label">Конверт ответа</div>
+              <pre class="result" id="tool-result" hidden></pre>
+              <div class="result-empty" id="tool-empty">Выполните вызов инструмента, чтобы увидеть ответ MCP-сервера и размер полезной нагрузки.</div>
+            </div>
+
+            <div class="tpanel" style="margin-top:12px">
+              <div class="console-head" style="margin-bottom:8px">
+                <div class="grow">
+                  <h3 style="margin:0 0 2px">Аудит вызовов</h3>
+                  <p style="margin:0;font-size:12px;color:var(--muted)">Все вызовы, включая отказы, попадают в журнал сессии.</p>
+                </div>
+                <span class="badge" id="audit-count">0</span>
+              </div>
+              <div class="artifact-list" id="tool-audit"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── мастер пакета ── -->
+    <section class="view" id="view-wizard">
+      <div class="scroller">
+        <div class="wiz-page">
+          <div class="wiz-head">
+            <div class="grow">
+              <div class="eyebrow">Разработка мини-приложений</div>
+              <h1>Мастер пакета</h1>
+              <p>Каркас, редактирование prompt/skills/manifest, проверка, сборка zip и dev-подпись через офлайн-утилиту eco-pack.</p>
+            </div>
+            <span class="badge" id="pack-status">eco-pack: доступен</span>
+          </div>
+
+          <div class="policy-note" id="wiz-role-note" hidden style="max-width:640px">
+            <div class="kv"><span>Роль</span><b>мастер доступен в режиме разработчика</b></div>
+            <div class="form-actions" style="margin-top:6px">
+              <button class="btn ghost sm" id="wiz-role-enable">Включить режим разработчика</button>
+              <span class="inline-note" style="margin:0">пакеты для локальной сборки и dev-подписи</span>
+            </div>
+          </div>
+
+          <div class="wiz-grid">
+            <div class="panel">
+              <div class="panel-h">
+                <span class="pn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg></span>
+                <div>
+                  <h2>1. Пакет</h2>
+                  <p>Достаточно <code>AGENTS.md</code> и навыка — «Создать манифест из исходников» соберёт <code>manifest.json</code> сам.</p>
+                </div>
+              </div>
+
+              <div class="form-grid">
+                <label class="field full">Папка пакета
+                  <span class="row-acts" style="gap:6px">
+                    <input id="pack-dir" placeholder="D:\apps\my-app" style="flex:1;min-width:0" />
+                    <button class="btn ghost sm" id="pack-pick">Выбрать…</button>
+                    <button class="btn ghost sm" id="pack-load">Загрузить</button>
+                  </span>
+                </label>
+                <label class="field">app_id<input id="pack-app-id" placeholder="my-app" /></label>
+                <label class="field">Название<input id="pack-name" placeholder="My App" /></label>
+                <label class="field full">Шаблон
+                  <select class="switch" id="pack-template">
+                    <option value="minimal">minimal — только prompt и skill</option>
+                    <option value="files">files — доступ к рабочей папке</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="row-acts" style="margin-top:9px">
+                <button class="btn ghost sm" id="pack-apply-template">Применить шаблон</button>
+                <button class="btn sm" id="pack-import">Манифест из исходников</button>
+                <button class="btn ghost sm" id="pack-init">Создать каркас</button>
+                <button class="btn ghost sm" id="pack-validate">Проверить</button>
+                <button class="btn ghost sm" id="pack-build">Собрать zip</button>
+                <button class="btn ghost sm" id="pack-install">Установить</button>
+              </div>
+
+              <div class="divider"></div>
+
+              <div class="sec-label">MCP-подключения</div>
+              <div class="policy-note">
+                <div class="kv"><span>Endpoint и токен</span><b>Настройки → Реестр MCP</b></div>
+                <div class="kv"><span>В манифесте</span><b>только id подключения</b></div>
+              </div>
+              <div id="pack-mcp" class="pack-files" style="max-height:120px"></div>
+              <div class="row-acts">
+                <input class="inp" id="pack-mcp-id" placeholder="context7" style="flex:1;min-width:110px;padding:6px 9px" />
+                <label class="check" style="padding:0"><input id="pack-mcp-write" type="checkbox" /><span>разрешить запись</span></label>
+                <button class="btn ghost sm" id="pack-mcp-add">Добавить</button>
+              </div>
+
+              <div class="divider"></div>
+
+              <div class="form-grid">
+                <label class="field full">Dev-ключ
+                  <span class="row-acts" style="gap:6px">
+                    <input id="pack-key" placeholder="D:\keys\me\dev.key" style="flex:1;min-width:0" />
+                    <button class="btn ghost sm" id="pack-keygen">Создать ключ…</button>
+                    <button class="btn sm" id="pack-sign">Подписать</button>
+                  </span>
+                </label>
+              </div>
+              <div class="policy-note" style="margin-top:9px">
+                <div class="kv"><span>Порядок для ИБ</span><b>build → sign (prod) → allowlist</b></div>
+                <div class="kv"><span>Dev-ключ</span><b>только для локального теста</b></div>
+              </div>
+
+              <pre class="log" id="pack-log" hidden></pre>
+            </div>
+
+            <div class="panel">
+              <div class="panel-h">
+                <span class="pn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
+                <div>
+                  <h2>2. Файлы пакета</h2>
+                  <p>Редактируются manifest.json, prompt/** и skills/**. Остальные файлы — через папку пакета.</p>
+                </div>
+              </div>
+
+              <div class="pack-files" id="pack-files"></div>
+              <div class="row-acts" style="margin-bottom:9px">
+                <input class="inp" id="pack-new-file" placeholder="skills/new/SKILL.md" style="flex:1;min-width:0;padding:6px 9px;font-size:11.5px" />
+                <button class="btn ghost sm" id="pack-new">Создать файл</button>
+              </div>
+              <textarea class="editor" id="pack-editor" spellcheck="false" placeholder="Выберите файл слева или создайте новый"></textarea>
+              <div class="row-acts" style="margin-top:8px">
+                <button class="btn sm" id="pack-save">Сохранить файл</button>
+                <span class="mono" style="font-size:10.5px;color:var(--dim)" id="pack-editor-path"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- ═══ попапы ═══ -->
+<div class="pop" id="pop-agent"></div>
+<div class="pop" id="pop-folder"></div>
+<div class="pop" id="pop-effort">
+  <div class="h">Глубина рассуждений</div>
+  <button class="it" data-effort="">Авто</button>
+  <button class="it" data-effort="low">Быстро<small>low</small></button>
+  <button class="it" data-effort="medium">Средне<small>medium</small></button>
+  <button class="it" data-effort="high">Глубоко<small>high</small></button>
+</div>
+<div class="pop" id="pop-model">
+  <div class="h">Модель</div>
+  <button class="it sel" data-model="~deepseek/deepseek-v4-flash-latest"><span class="t2">deepseek-v4-flash<em>быстрая · 128k</em></span></button>
+  <button class="it" data-model="~deepseek/deepseek-v4"> <span class="t2">deepseek-v4<em>сбалансированная · 256k</em></span></button>
+  <button class="it" data-model="~local/qwen3-coder"><span class="t2">qwen3-coder<em>локальный шлюз</em></span></button>
+  <div class="sep"></div>
+  <button class="it" data-sheet="sheet-settings">Настроить шлюз…</button>
+</div>
+<div class="pop" id="pop-more">
+  <button class="it" id="mi-rename">Переименовать</button>
+  <button class="it" id="mi-export">Экспорт протокола в Markdown</button>
+  <button class="it" id="mi-artifacts">Артефакты сессии<small id="mi-artifacts-n">2</small></button>
+  <div class="sep"></div>
+  <button class="it" id="mi-end">Завершить сессию</button>
+  <button class="it" id="mi-delete" style="color:var(--bad)">Удалить сессию</button>
+</div>
+
+<!-- ═══ шторка: паспорт агента ═══ -->
+<div class="scrim"></div>
+<aside class="sheet wide" id="sheet-agent" aria-label="Права и инструменты">
+  <div class="sheet-h">
+    <span class="av lg" id="sh-av">DW</span>
+    <div class="st">
+      <h2 id="sh-name">Документы и Word</h2>
+      <div class="sub" id="sh-sub">doc-writer · v0.1.0 · CN=ECO AIOps Dev</div>
+    </div>
+    <button class="ib" data-close title="Закрыть (Esc)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="sheet-tabs" id="sheet-agent-tabs">
+    <button class="sheet-tab on" data-atab="access">Доступ</button>
+    <button class="sheet-tab" data-atab="mcp">MCP приложения</button>
+    <button class="sheet-tab" data-atab="secrets">Секреты</button>
+  </div>
+  <div class="sheet-b" id="sheet-agent-body"></div>
+  <div class="sheet-f">
+    <button class="btn ghost sm" id="agent-open-catalog">Открыть каталог</button>
+    <span class="sp"></span>
+    <button class="btn sm" id="agent-open-console">Консоль MCP-вызовов</button>
+  </div>
+</aside>
+
+<!-- ═══ шторка: настройки платформы ═══ -->
+<aside class="sheet wide" id="sheet-settings" aria-label="Настройки платформы">
+  <div class="sheet-h">
+    <div class="st">
+      <h2>Настройки платформы</h2>
+      <div class="sub">контур · шлюз LLM · квоты · MCP · секреты</div>
+    </div>
+    <button class="ib" data-close title="Закрыть (Esc)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="sheet-b">
+
+    <div class="grp">
+      <div class="grp-h">Контур доверия<span class="sp"></span><span class="badge ok" id="set-mode-badge">корпоративный</span></div>
+      <div class="kv"><span>Роль</span><b id="set-role">пользователь</b></div>
+      <div class="kv"><span>Trust anchor</span><b class="ok" id="set-anchor">CN=ECO Root 2026</b></div>
+      <div class="kv"><span>Allowlist</span><b id="set-allowlist">5 пакетов</b></div>
+      <div class="kv"><span>Платформа</span><b>v0.1.0 · schema 2</b></div>
+      <div class="kv"><span>Профиль</span><b class="mono" id="set-profile">%APPDATA%\eco-aiops</b></div>
+      <div class="form-actions">
+        <button class="btn ghost sm" id="set-role-toggle">Включить режим разработчика</button>
+        <button class="btn ghost sm" id="set-mode-change">Сменить режим…</button>
+      </div>
+    </div>
+
+    <div class="grp">
+      <div class="grp-h">Шлюз языковой модели</div>
+      <label class="field">Endpoint (OpenAI-compatible)<input id="set-llm-endpoint" /></label>
+      <label class="field">Идентификатор модели<input id="set-llm-model" /></label>
+      <div class="form-actions">
+        <button class="btn ghost sm" id="set-probe">Проверить доступность</button>
+        <span class="badge" id="set-probe-out">не проверялось</span>
+      </div>
+      <div class="divider"></div>
+      <label class="field">Ключ шлюза (DPAPI)<input id="set-llm-key" type="password" placeholder="ключ не задан" /></label>
+      <div class="form-actions">
+        <button class="btn sm" id="set-key-save">Записать в DPAPI</button>
+        <button class="btn ghost sm" id="set-key-del">Удалить ключ</button>
+        <span class="badge mono" id="set-key-status">не задан</span>
+      </div>
+      <div class="divider"></div>
+      <label class="check"><input type="checkbox" id="set-vision" /><span>Принимает изображения</span></label>
+      <label class="check"><input type="checkbox" id="set-reasoning" /><span>Поддерживает рассуждения</span></label>
+      <div class="form-grid" style="margin-top:6px">
+        <label class="field">Варианты reasoning<input id="set-efforts" placeholder="low,medium,high" /></label>
+        <label class="field">Контекст, токенов<input id="set-context" type="number" min="1000" /></label>
+        <label class="field">Максимум вывода<input id="set-output" type="number" min="1" /></label>
+      </div>
+      <label class="check danger" style="margin-top:8px"><input type="checkbox" id="set-insecure" /><span>Не проверять TLS-сертификат шлюза (закрытый контур, private CA)</span></label>
+    </div>
+
+    <div class="grp">
+      <div class="grp-h">Квоты и временные файлы</div>
+      <div class="form-grid">
+        <label class="field">Квота сессии, МБ<input id="set-q-session" type="number" min="1" /></label>
+        <label class="field">Глобальная квота, МБ<input id="set-q-global" type="number" min="1" /></label>
+        <label class="field">TTL, часов<input id="set-q-ttl" type="number" min="1" /></label>
+      </div>
+      <div class="policy-note" style="margin-top:9px">
+        <div class="kv"><span>Лимит ответа MCP</span><b>64 КиБ (жёсткий)</b></div>
+        <div class="kv"><span>Очистка при закрытии</span><b>автоматически</b></div>
+      </div>
+    </div>
+
+    <div class="grp">
+      <div class="grp-h">Реестр MCP-серверов</div>
+      <div class="form-grid">
+        <label class="field">ID подключения<input id="set-mcp-id" placeholder="context7" /></label>
+        <label class="field">Endpoint URL<input id="set-mcp-url" placeholder="https://mcp.context7.com/mcp" /></label>
+        <label class="field full">Bearer-токен (опционально)<input id="set-mcp-token" type="password" placeholder="необязательно" /></label>
+      </div>
+      <label class="check danger" style="margin-top:6px"><input type="checkbox" id="set-mcp-insecure" /><span>Не проверять TLS этого сервера</span></label>
+      <div class="form-actions">
+        <button class="btn sm" id="set-mcp-save">Сохранить сервер</button>
+      </div>
+      <div id="set-mcp-list" style="margin-top:9px"></div>
+    </div>
+
+    <div class="grp">
+      <div class="grp-h">Хранилище секретов (DPAPI)</div>
+      <div class="form-grid">
+        <label class="field">Имя секрета<input id="set-secret-name" placeholder="opensearch_token" /></label>
+        <label class="field">Значение<input id="set-secret-value" type="password" placeholder="••••••••" /></label>
+      </div>
+      <div class="form-actions">
+        <button class="btn sm" id="set-secret-save">Зашифровать и сохранить</button>
+      </div>
+      <div id="set-secret-list" style="margin-top:9px"></div>
+    </div>
+
+    <div class="grp">
+      <div class="grp-h">Артефакты сессий</div>
+      <div class="form-grid">
+        <label class="field">Приложение<select class="switch" id="set-art-app"></select></label>
+        <label class="field">Сессия<select class="switch" id="set-art-session"><option value="">все сессии</option></select></label>
+        <label class="field full">Поиск по дампам<input id="set-art-query" placeholder="error или имя файла" /></label>
+      </div>
+      <div class="form-actions">
+        <button class="btn sm" id="set-art-search">Искать</button>
+        <button class="btn ghost sm" id="set-art-export">Экспорт дампов…</button>
+        <button class="btn danger sm" id="set-art-cleanup">Очистить</button>
+        <span class="badge mono" id="set-art-usage">42 МБ / 5 ГБ</span>
+      </div>
+      <div class="artifact-list" id="set-art-list"></div>
+    </div>
+
+  </div>
+  <div class="sheet-f">
+    <span class="inline-note" id="set-saved-at" style="margin:0">изменения хранятся локально</span>
+    <span class="sp"></span>
+    <button class="btn ghost sm" id="set-reset">Сбросить</button>
+    <button class="btn pri sm" id="set-save">Сохранить конфигурацию</button>
+  </div>
+</aside>
+
+<!-- ═══ шторка: артефакты ═══ -->
+<aside class="sheet" id="sheet-artifacts" aria-label="Артефакты сессии">
+  <div class="sheet-h">
+    <div class="st"><h2>Артефакты сессии</h2><div class="sub" id="art-sub">ses-301</div></div>
+    <button class="ib" data-close title="Закрыть (Esc)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="sheet-b">
+    <div class="policy-note">
+      <div class="kv"><span>Рабочая папка</span><b id="art-folder">D:\reports\db-degradation</b></div>
+      <div class="kv"><span>Использование</span><b>84 МБ · TTL 168 ч</b></div>
+    </div>
+    <div class="sec-label">Файлы</div>
+    <div class="artifact-list" id="art-list"></div>
+    <div class="sec-label" style="margin-top:14px">Дампы tool-ответов (NDJSON)</div>
+    <div class="artifact-list" id="art-dumps"></div>
+  </div>
+  <div class="sheet-f">
+    <button class="btn ghost sm" id="art-export">Экспорт…</button>
+    <span class="sp"></span>
+    <button class="btn sm" id="art-clean">Очистить дампы</button>
+  </div>
+</aside>
+
+<!-- ═══ оверлей выбора режима ═══ -->
+<div class="overlay" id="mode-overlay">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="mode-title">
+    <div class="eyebrow">Первый запуск</div>
+    <h1 id="mode-title">Как вы будете использовать платформу?</h1>
+    <p class="lead">Режим определяет, какие пакеты можно ставить и как проверяется их неизменность. Его можно сменить позже в настройках.</p>
+
+    <div class="mode-grid" id="mode-grid">
+      <button class="mode-card" data-mode="local">
+        <span class="mt">Локальный</span>
+        <span class="md">Любые пакеты — подписанные и без подписи. Установленное приложение нельзя изменить: целостность держит подпись или локальный слепок. Trust anchor и allowlist не нужны.</span>
+        <span class="mtag">для личного и командного использования</span>
+      </button>
+      <button class="mode-card on" data-mode="corporate">
+        <span class="mt">Корпоративный</span>
+        <span class="md">Только пакеты с подписью доверенного ключа и разрешением allowlist. Контур, ключи и обновления задаёт администратор.</span>
+        <span class="mtag">для тиражирования по политике ИБ</span>
+      </button>
+    </div>
+
+    <div class="sec-label">Роль</div>
+    <div class="radio-row">
+      <label class="radio"><input type="radio" name="mode-role" value="user" checked /> Пользователь — ставит и запускает приложения</label>
+      <label class="radio"><input type="radio" name="mode-role" value="developer" /> Разработчик — собирает и подписывает пакеты</label>
+    </div>
+
+    <p class="err-box" id="mode-error" hidden></p>
+
+    <div class="dialog-foot">
+      <span class="inline-note" id="mode-note" style="margin:0">Выбрано: корпоративный · пользователь</span>
+      <span class="sp"></span>
+      <button class="btn ghost sm" id="mode-cancel" hidden>Отмена</button>
+      <button class="btn pri" id="mode-confirm">Начать работу</button>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="core.js"></script>
+<script src="data.js"></script>
+<script src="sessions.js"></script>
+<script src="ui-chat.js"></script>
+<script src="ui-views.js"></script>
+<script src="ui-settings.js"></script>
+<script src="chat.js"></script>
+<script src="mode.js"></script>
+<script src="events.js"></script>
+</body>
+</html>
