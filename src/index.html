@@ -14,73 +14,99 @@
 <body>
   <div class="app">
     <aside class="side">
-      <div class="brand">
-        <div class="logo" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2L3 7v10l9 5 9-5V7l-9-5z" />
-            <path d="M12 22V12" />
-            <path d="M21 7l-9 5-9-5" />
-            <circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none" />
-          </svg>
-        </div>
-        <div class="brand-copy">
-          <div class="brand-title-row">
-            <span class="brand-title">ECO AIOps</span>
-            <span class="brand-tag">DESKTOP</span>
+      <div class="side-top">
+        <div class="agent-card">
+          <div class="agent-av" id="ws-app-icon">AI</div>
+          <div class="agent-copy">
+            <div class="agent-name" id="ws-title">Агент не выбран</div>
+            <div class="agent-sub">
+              <i class="engine-dot" id="agent-dot"></i>
+              <span id="ws-publisher">выберите приложение в каталоге</span>
+            </div>
           </div>
-          <span class="brand-sub">офлайн-контур</span>
+          <span class="version-pill" id="ws-version">v0.1.0</span>
+          <span class="badge ok" id="ws-trust-badge" title="Подпись пакета проверена">подпись ок</span>
+          <select id="app-switch" class="agent-pick" aria-label="Переключить приложение" hidden></select>
         </div>
+
+        <button class="new-chat" id="chat-new" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          <span>Новый диалог</span>
+        </button>
+
+        <label class="history-search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" />
+            <path d="M21 21l-4.3-4.3" />
+          </svg>
+          <input id="chat-search" type="search" placeholder="Поиск по истории" aria-label="Поиск по истории" />
+        </label>
+
+        <div id="chat-list" class="chat-list hist"></div>
       </div>
 
-      <nav class="tabs" aria-label="Основные разделы">
-        <button class="tab active" data-tab="apps" type="button">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="3" y="3" width="7" height="7" rx="1.8" />
-            <rect x="14" y="3" width="7" height="7" rx="1.8" />
-            <rect x="3" y="14" width="7" height="7" rx="1.8" />
-            <rect x="14" y="14" width="7" height="7" rx="1.8" />
-          </svg>
-          <span>Каталог приложений</span>
-        </button>
-        <button class="tab" data-tab="dev" type="button" aria-label="Мастер пакета" title="Мастер пакета">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21 8l-9-5-9 5 9 5 9-5z" />
-            <path d="M3 8v8l9 5 9-5V8" />
-            <path d="M12 13v8" />
-          </svg>
-          <span>Мастер пакета</span>
-        </button>
-        <button class="tab" data-tab="settings" type="button" aria-label="Контур и секреты" title="Контур и секреты">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.9 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 8.9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z" />
-          </svg>
-          <span>Контур и секреты</span>
-        </button>
-      </nav>
-
       <div class="side-foot">
-        <button id="theme-toggle" class="ib" type="button" aria-label="Переключить тему" title="Переключить тему">
-          <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="4" />
-            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
-          </svg>
-          <svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M20.5 14.3A8.5 8.5 0 0 1 9.7 3.5 8.5 8.5 0 1 0 20.5 14.3z" />
-          </svg>
-        </button>
-        <span id="mode-badge" class="badge mono" title="Режим установки и роль">режим…</span>
+        <nav class="side-nav" aria-label="Основные разделы">
+          <button class="tab active" data-tab="apps" type="button" title="Каталог агентов">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="3" width="7" height="7" rx="1.8" />
+              <rect x="14" y="3" width="7" height="7" rx="1.8" />
+              <rect x="3" y="14" width="7" height="7" rx="1.8" />
+              <rect x="14" y="14" width="7" height="7" rx="1.8" />
+            </svg>
+            <span>Каталог агентов</span>
+          </button>
+          <button class="tab" data-tab="dev" type="button" title="Мастер пакета">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 8l-9-5-9 5 9 5 9-5z" />
+              <path d="M3 8v8l9 5 9-5V8" />
+              <path d="M12 13v8" />
+            </svg>
+            <span>Мастер пакета</span>
+          </button>
+          <button class="tab" data-tab="settings" type="button" title="Контур и секреты">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.9 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 8.9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z" />
+            </svg>
+            <span>Контур и секреты</span>
+          </button>
+        </nav>
+        <div class="foot-row">
+          <button id="theme-toggle" class="ib" type="button" aria-label="Переключить тему" title="Переключить тему">
+            <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+            </svg>
+            <svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M20.5 14.3A8.5 8.5 0 0 1 9.7 3.5 8.5 8.5 0 1 0 20.5 14.3z" />
+            </svg>
+          </button>
+          <span id="mode-badge" class="badge mono" title="Режим установки и роль">режим…</span>
+        </div>
       </div>
     </aside>
 
     <main class="main">
       <div class="topbar">
         <div class="tb-left">
-          <span class="tb-title">ECO AIOps Platform</span>
+          <button class="ib sm" id="ws-back" type="button" title="Вернуться к каталогу" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M19 12H5M12 19l-7-7 7-7" />
+            </svg>
+          </button>
+          <div class="tb-title" id="tb-title">Каталог агентов</div>
           <span class="badge mono">офлайн-контур</span>
         </div>
-        <div class="tb-right">
-          <span class="mono small muted">локальные данные · без внешних запросов</span>
+        <div class="tb-right" id="ws-actions" hidden>
+          <div class="ws-tabs" role="tablist" aria-label="Режимы приложения">
+            <button class="ws-tab active" data-ws="chat" type="button" role="tab">Диалог</button>
+            <button class="ws-tab" data-ws="tools" type="button" role="tab">Инструменты<span class="tab-counter" id="ws-tools-count">0</span></button>
+            <button class="ws-tab" data-ws="settings" type="button" role="tab">Настройки</button>
+          </div>
+          <button class="ghost small" id="ws-close" type="button">Завершить сессию</button>
         </div>
       </div>
 
@@ -137,137 +163,62 @@
       </div>
       <!-- Full-Height App Workspace View -->
       <div class="workspace-shell" id="workspace" hidden>
-        <div class="ws-topbar">
-          <div class="ws-identity">
-            <button class="ghost icon-back" id="ws-back" type="button" title="Вернуться к каталогу приложений">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M19 12H5M12 19l-7-7 7-7" />
-              </svg>
-              <span>Каталог</span>
-            </button>
-            <div class="ws-divider"></div>
-            <div class="ws-app-badge" id="ws-app-icon">AI</div>
-            <div class="ws-title-stack">
-              <div class="ws-title-row">
-                <h2 id="ws-title">—</h2>
-                <select id="app-switch" class="switch app-switcher" aria-label="Переключить приложение" hidden></select>
-                <span class="version-pill" id="ws-version">v0.1.0</span>
-                <span class="badge ok" id="ws-trust-badge">подпись ок</span>
-              </div>
-              <div class="ws-submeta">
-                <span class="mono muted small" id="ws-publisher"></span>
-              </div>
-            </div>
-          </div>
-
-          <div class="ws-workspace">
-            <span class="muted small">Рабочая папка</span>
-            <span class="mono small ws-folder" id="ws-folder" title="Полный путь рабочей папки">—</span>
-            <button class="ghost small" id="ws-folder-open" type="button" title="Открыть рабочую папку в проводнике">Открыть</button>
-            <button class="ghost small" id="ws-folder-pick" type="button">Выбрать</button>
-          </div>
-
-          <div class="ws-tabs" role="tablist" aria-label="Режимы приложения">
-            <button class="ws-tab active" data-ws="chat" type="button" role="tab" aria-label="Диалог с агентом" title="Диалог с агентом">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-              </svg>
-              <span>Диалог с агентом</span>
-            </button>
-            <button class="ws-tab" data-ws="tools" type="button" role="tab" aria-label="MCP-инструменты" title="MCP-инструменты">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="16 18 22 12 16 6" />
-                <polyline points="8 6 2 12 8 18" />
-              </svg>
-              <span>MCP-инструменты</span>
-              <span class="tab-counter" id="ws-tools-count">0</span>
-            </button>
-            <button class="ws-tab" data-ws="settings" type="button" role="tab" aria-label="Настройки приложения" title="Настройки приложения">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
-              <span>Настройки приложения</span>
-            </button>
-          </div>
-
-          <div class="ws-right-actions">
-            <button class="ghost small danger-hover" id="ws-close" type="button">Завершить сессию</button>
-          </div>
-        </div>
-
         <!-- Chat Mode -->
         <div class="ws-body" id="ws-chat">
           <div class="chat-layout">
-            <aside class="chat-sidebar">
-              <div class="sidebar-top">
-                <button class="chat-new" id="chat-new" type="button">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-                    <path d="M12 5v14M5 12h14" />
-                  </svg>
-                  <span>Новый диалог</span>
-                </button>
-              </div>
-              <div class="sidebar-section-head">
-                <span class="sidebar-label">История сессий</span>
-              </div>
-              <div id="chat-list" class="chat-list"></div>
-              <div class="chat-sidebar-foot">
-                <div class="sidebar-label">Профиль безопасности</div>
-                <div class="security-summary" id="ws-security-summary">
-                  <div class="sec-row"><span>Файлы в рабочей папке</span><strong class="mono" id="sec-file-scope">DENY</strong></div>
-                  <div class="sec-row"><span>Allow-list tools</span><strong class="mono" id="sec-tools-count">0</strong></div>
-                  <div class="sec-row"><span>Внешняя запись</span><strong class="mono" id="sec-writes">БЛОК</strong></div>
-                </div>
-              </div>
-            </aside>
+            <div class="chat-log thread" id="chat-log"></div>
 
-            <div class="chat-main">
-              <div class="chat-head">
-                <div class="chat-status-group">
-                  <span class="engine-dot" id="engine-dot"></span>
-                  <span class="mono small" id="chat-model">движок не запущен</span>
-                  <span class="badge bad" id="chat-warning" title="endpoint — локальная заглушка" hidden><span class="chat-warning-text">endpoint — локальная заглушка</span></span>
-                </div>
-                <div class="row-actions">
-                  <label class="inline-select-label" id="chat-reasoning-wrap">
-                    <span>Reasoning</span>
-                    <select id="chat-reasoning" class="switch" title="Уровень размышлений модели">
+            <div class="chat-composer-wrap composer-wrap">
+              <div id="chat-permission" class="chat-permission" hidden></div>
+              <div id="chat-attachments" class="chat-attachments" hidden></div>
+              <div class="composer">
+                <textarea id="chat-text" rows="1" placeholder="Сообщение агенту…"></textarea>
+                <div class="c-row">
+                  <label class="chip" title="Прикрепить изображение или текстовый файл">
+                    <input id="chat-file-input" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.csv,.log,.yaml,.yml,.xml,.html,.css,.js,.ts,.rs,.py,.toml,.ini" hidden />
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                    </svg>
+                  </label>
+                  <button class="chip" id="ws-folder-pick" type="button" title="Выбрать рабочую папку">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                    </svg>
+                    <span class="mono clamp" id="ws-folder" title="Полный путь рабочей папки">—</span>
+                  </button>
+                  <button class="chip icon-only" id="ws-folder-open" type="button" title="Открыть рабочую папку в проводнике">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                      <path d="M15 3h6v6" />
+                      <path d="M10 14L21 3" />
+                    </svg>
+                  </button>
+                  <label class="chip" id="chat-reasoning-wrap" title="Глубина рассуждений">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                      <path d="M4 18h4M4 12h10M4 6h16" />
+                    </svg>
+                    <select id="chat-reasoning" title="Уровень размышлений модели">
                       <option value="">Авто</option>
                       <option value="low">Низкий (low)</option>
                       <option value="medium">Средний (medium)</option>
                       <option value="high">Глубокий (high)</option>
                     </select>
                   </label>
-                </div>
-              </div>
-
-              <div id="chat-log" class="chat-log thread"></div>
-
-              <div class="chat-composer-wrap composer-wrap">
-                <div id="chat-permission" class="chat-permission" hidden></div>
-                <div id="chat-attachments" class="chat-attachments" hidden></div>
-                <div class="chat-input composer">
-                  <label class="chat-attach-btn" title="Прикрепить изображение или текстовый файл">
-                    <input id="chat-file-input" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.csv,.log,.yaml,.yml,.xml,.html,.css,.js,.ts,.rs,.py,.toml,.ini" hidden />
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                  <span class="sp"></span>
+                  <span class="chip model-chip" title="Модель и шлюз">
+                    <i class="engine-dot" id="engine-dot"></i>
+                    <span class="mono clamp" id="chat-model">движок не запущен</span>
+                  </span>
+                  <span class="badge bad" id="chat-warning" title="endpoint — локальная заглушка" hidden><span class="chat-warning-text">endpoint — локальная заглушка</span></span>
+                  <button id="chat-stop" class="stop" type="button" hidden>Остановить</button>
+                  <button id="chat-send" class="send" type="button" title="Отправить (Enter)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M12 19V5M5 12l7-7 7 7" />
                     </svg>
-                  </label>
-                  <textarea id="chat-text" placeholder="Попросите агента создать или поправить файл в рабочей папке либо сконвертировать markdown в Word… (Enter — отправить, Shift+Enter — новая строка)" rows="2"></textarea>
-                  <div class="chat-input-actions c-row">
-                    <span class="kbd-hint mono">Enter ↵</span>
-                    <button id="chat-stop" class="stop" type="button" hidden>Остановить</button>
-                    <button id="chat-send" type="button">
-                      <span>Отправить</span>
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <line x1="22" y1="2" x2="11" y2="13" />
-                        <polygon points="22 2 15 22 11 13 2 9 22 2" />
-                      </svg>
-                    </button>
-                  </div>
+                  </button>
                 </div>
               </div>
+              <div class="c-hint">Enter — отправить · Shift+Enter — новая строка</div>
             </div>
           </div>
         </div>
@@ -276,7 +227,13 @@
         <div class="ws-body" id="ws-tools" hidden>
           <div class="tools-workspace">
             <aside class="tools-sidebar">
-              <div class="sidebar-label">Allow-list манифеста</div>
+              <div class="sidebar-label">Профиль безопасности</div>
+              <div class="security-summary" id="ws-security-summary">
+                <div class="sec-row"><span>Файлы в рабочей папке</span><strong class="mono" id="sec-file-scope">DENY</strong></div>
+                <div class="sec-row"><span>Allow-list tools</span><strong class="mono" id="sec-tools-count">0</strong></div>
+                <div class="sec-row"><span>Внешняя запись</span><strong class="mono" id="sec-writes">БЛОК</strong></div>
+              </div>
+              <div class="sidebar-label" style="margin-top:16px">Allow-list манифеста</div>
               <p class="muted small tools-sidebar-desc">Только перечисленные ниже инструменты разрешены контрактом пакета. Все вызовы проходят через Tool Host и пишутся в аудит.</p>
               <div id="manifest-tools-list" class="manifest-tools-list"></div>
             </aside>

@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+﻿import { createServer } from "node:http";
 import { mkdir, readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, normalize, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -197,17 +197,17 @@ try {
 
   const assistantBox = await page.locator("#chat-log .msg.assistant").first().evaluate((el) => {
     const s = getComputedStyle(el);
+    const box = el.getBoundingClientRect();
     return {
+      width: box.width,
       padding: parseFloat(s.paddingTop) + parseFloat(s.paddingLeft),
       background: s.backgroundColor,
       backgroundImage: s.backgroundImage,
     };
   });
-  assert(assistantBox.padding > 0, "assistant message has no padding");
-  assert(
-    assistantBox.background !== "rgba(0, 0, 0, 0)" || assistantBox.backgroundImage !== "none",
-    "assistant message background is transparent",
-  );
+  // The design renders assistant answers as plain text on the chat surface,
+  // so width (not card padding) is what proves the body is laid out.
+  assert(assistantBox.width > 200, "assistant message has no width");
 
   const codeBox = await page.locator("#chat-log .md-code").first().evaluate((el) => {
     const s = getComputedStyle(el);
@@ -704,12 +704,12 @@ try {
         docScrollWidth: document.documentElement.scrollWidth,
         bodyScrollWidth: document.body.scrollWidth,
         workspace: read("#workspace"),
-        topbar: read(".ws-topbar"),
-        head: read(".chat-head"),
+        topbar: read(".topbar"),
+        head: read(".c-row"),
         log: read("#chat-log"),
         composer: read(".chat-composer-wrap"),
-        topbarOverflow: overflowItems(document.querySelector(".ws-topbar")),
-        headOverflow: overflowItems(document.querySelector(".chat-head")),
+        topbarOverflow: overflowItems(document.querySelector(".topbar")),
+        headOverflow: overflowItems(document.querySelector(".c-row")),
         logOverflowY: logStyle.overflowY,
         logScrollTop: log.scrollTop,
         logScrollHeight: log.scrollHeight,
@@ -752,8 +752,8 @@ try {
       `chat elements wider than viewport at ${width}x${height}: ${chat.offenders.join(", ")}`,
     );
     assert(
-      chat.topbar && chat.topbar.height <= 112,
-      `workspace topbar is ${chat.topbar && chat.topbar.height}px tall at ${width}x${height} (max 112)`,
+      chat.topbar && chat.topbar.height > 40 && chat.topbar.height <= 64,
+      `topbar is ${chat.topbar && chat.topbar.height}px tall at ${width}x${height} (expected 40..64)`,
     );
     assert(
       chat.topbarOverflow.length === 0,

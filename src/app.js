@@ -664,6 +664,11 @@ async function openApp(appId) {
 
     $("workspace").hidden = false;
     $("apps-panel").hidden = true;
+    const actions = $("ws-actions");
+    if (actions) actions.hidden = false;
+    const back = $("ws-back");
+    if (back) back.hidden = false;
+    activateTab("apps");
     renderAppSwitcher();
 
     const wsIcon = $("ws-app-icon");
@@ -695,7 +700,8 @@ async function openApp(appId) {
     ensureChat().catch((e) => chatError(String(e)));
 
     $("ws-title").textContent = ctx.appMeta.name || appId;
-    $("ws-title").hidden = true;
+    $("ws-title").hidden = false;
+    setViewTitle(ctx.appMeta.name || appId);
     const wsFolder = $("ws-folder");
     if (wsFolder) wsFolder.textContent = info.workspace || "—";
 
@@ -720,6 +726,11 @@ async function closeApp() {
     $("apps-panel").hidden = false;
     $("app-switch").hidden = true;
     $("workspace").hidden = true;
+    const actions = $("ws-actions");
+    if (actions) actions.hidden = true;
+    const back = $("ws-back");
+    if (back) back.hidden = true;
+    setViewTitle("Каталог агентов");
   });
 }
 
@@ -1673,7 +1684,11 @@ async function syncBusy() {
 function renderChatList() {
   const box = $("chat-list");
   box.innerHTML = "";
-  for (const chat of ctx.chats || []) {
+  const query = (ctx.chatQuery || "").trim().toLowerCase();
+  const chats = (ctx.chats || []).filter(
+    (chat) => !query || String(chat.title || "").toLowerCase().includes(query),
+  );
+  for (const chat of chats) {
     const row = document.createElement("div");
     row.className = "chat-row";
 
@@ -1693,6 +1708,50 @@ function renderChatList() {
     row.appendChild(del);
     box.appendChild(row);
   }
+  if (!chats.length && query) {
+    const empty = document.createElement("p");
+    empty.className = "muted small hist-empty";
+    empty.textContent = "Ничего не найдено";
+    box.appendChild(empty);
+  }
+}
+
+function setViewTitle(text) {
+  const title = document.getElementById("tb-title");
+  if (title) title.textContent = text;
+}
+
+function activateTab(name) {
+  document
+    .querySelectorAll(".tab")
+    .forEach((tab) => tab.classList.toggle("active", tab.dataset.tab === name));
+  document
+    .querySelectorAll(".tab-body")
+    .forEach((body) => body.classList.toggle("active", body.id === `tab-${name}`));
+}
+
+/** Shows the catalog without stopping the running app session. */
+function showCatalog() {
+  $("workspace").hidden = true;
+  $("apps-panel").hidden = false;
+  const actions = $("ws-actions");
+  if (actions) actions.hidden = true;
+  const back = $("ws-back");
+  if (back) back.hidden = true;
+  setViewTitle("Каталог агентов");
+}
+
+/** Returns to the chat of the selected app (the engine keeps running). */
+function showWorkspace() {
+  if (!ctx.appId) return;
+  activateTab("apps");
+  $("workspace").hidden = false;
+  $("apps-panel").hidden = true;
+  const actions = $("ws-actions");
+  if (actions) actions.hidden = false;
+  const back = $("ws-back");
+  if (back) back.hidden = false;
+  setViewTitle((ctx.appMeta && ctx.appMeta.name) || ctx.appId);
 }
 
 async function refreshChats() {
@@ -1738,7 +1797,12 @@ async function ensureChat() {
 }
 
 async function newChat() {
+  if (!ctx.appId) {
+    toast("Сначала выберите приложение в каталоге", true);
+    return;
+  }
   await guard(async () => {
+    showWorkspace();
     await ensureChat().catch(() => {});
     const info = await invoke("chat_new", { app_id: ctx.appId });
     ctx.chatId = info.session;
@@ -1755,6 +1819,7 @@ async function newChat() {
 async function selectChat(sessionId) {
   if (!sessionId || sessionId === ctx.chatId) return;
   await guard(async () => {
+    showWorkspace();
     await invoke("chat_select", { app_id: ctx.appId, session_id: sessionId });
     ctx.chatId = sessionId;
     setBusy(false);
@@ -3153,6 +3218,13 @@ function bind() {
         guard(refreshArtifacts);
       }
       if (tab.dataset.tab === "dev") guard(refreshPackTool);
+      if (tab.dataset.tab === "apps") {
+        showCatalog();
+      } else if (tab.dataset.tab === "dev") {
+        setViewTitle("Мастер пакета");
+      } else if (tab.dataset.tab === "settings") {
+        setViewTitle("Контур и секреты");
+      }
     });
   });
 
@@ -3185,8 +3257,16 @@ function bind() {
   });
 
   const wsBack = $("ws-back");
-  if (wsBack) wsBack.addEventListener("click", closeApp);
+  if (wsBack) wsBack.addEventListener("click", showCatalog);
   $("ws-close").addEventListener("click", closeApp);
+
+  const chatSearch = $("chat-search");
+  if (chatSearch) {
+    chatSearch.addEventListener("input", () => {
+      ctx.chatQuery = chatSearch.value;
+      renderChatList();
+    });
+  }
 
   $("app-switch").addEventListener("change", (e) => {
     if (e.target.value && e.target.value !== ctx.appId) openApp(e.target.value);
