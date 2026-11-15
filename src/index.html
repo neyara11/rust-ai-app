@@ -3,21 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-src 'none'"
+  />
   <title>ECO AIOps Platform</title>
-  <script>
-    (() => {
-      try {
-        const saved = localStorage.getItem("theme");
-        const dark = saved ? saved === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
-        document.documentElement.dataset.theme = dark ? "dark" : "light";
-      } catch (_) {
-        document.documentElement.dataset.theme = "dark";
-      }
-    })();
-  </script>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Syne:wght@600;700&display=swap" />
+  <script src="theme-boot.js"></script>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -203,6 +194,13 @@
               <span>MCP-инструменты</span>
               <span class="tab-counter" id="ws-tools-count">0</span>
             </button>
+            <button class="ws-tab" data-ws="settings" type="button" role="tab">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+              <span>Настройки приложения</span>
+            </button>
           </div>
 
           <div class="ws-right-actions">
@@ -331,6 +329,53 @@
                 <span class="sidebar-label">Конверт ответа</span>
                 <pre id="tool-result" class="tool-result" hidden></pre>
                 <div id="tool-empty-result" class="tool-empty-result muted small">Выполните вызов инструмента, чтобы увидеть ответ MCP-сервера и размер полезной нагрузки.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Per-App Settings -->
+        <div class="ws-body" id="ws-settings" hidden>
+          <div class="app-settings">
+            <div class="app-settings-head">
+              <div>
+                <div class="sidebar-label">Настройки приложения</div>
+                <p class="muted small">Переопределения действуют только для этого пакета. Глобальные настройки остаются значениями по умолчанию.</p>
+              </div>
+              <button class="ghost small" id="app-settings-refresh" type="button">Обновить</button>
+            </div>
+
+            <div class="app-settings-grid">
+              <div class="panel">
+                <div class="panel-icon-head">
+                  <div class="panel-badge-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h2>MCP для приложения</h2>
+                    <p class="panel-desc">Один и тот же id может иметь разные URL, токены и TLS-политику в разных приложениях. Без override используется глобальный реестр.</p>
+                  </div>
+                </div>
+                <div id="app-mcp-list" class="app-settings-list"></div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-icon-head">
+                  <div class="panel-badge-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h2>Переменные инструментов</h2>
+                    <p class="panel-desc">Секреты, объявленные в <code class="mono">tools[].secrets</code>. Значения хранятся в DPAPI с namespace приложения и не попадают в пакет.</p>
+                  </div>
+                </div>
+                <div id="app-secrets-list" class="app-settings-list"></div>
               </div>
             </div>
           </div>
@@ -542,6 +587,14 @@
             <label>Контекст модели (токенов)<input id="llm-context" type="number" min="1000" placeholder="напр. 128000" /></label>
             <label>Максимум вывода (токенов)<input id="llm-output" type="number" min="1" placeholder="напр. 32000" /></label>
           </div>
+
+          <div class="divider"></div>
+
+          <label class="check-row danger-check">
+            <input id="llm-insecure" type="checkbox" />
+            <span>Не проверять TLS-сертификат и имя хоста LLM-шлюза (закрытый контур, private CA)</span>
+          </label>
+          <p class="muted small">Отключает проверку цепочки и имени хоста для исходящих запросов движка. Включайте только если сертификат выдан внутренним УЦ.</p>
         </div>
 
         <div class="panel">
@@ -626,6 +679,10 @@
             <label>Endpoint URL<input id="mcp-url" placeholder="https://mcp.context7.com/mcp" /></label>
             <label>Bearer-токен (опционально)<input id="mcp-token" type="password" placeholder="необязательно" /></label>
           </div>
+          <label class="check-row danger-check">
+            <input id="mcp-insecure" type="checkbox" />
+            <span>Не проверять TLS-сертификат и имя хоста этого MCP-сервера</span>
+          </label>
           <div class="row-actions" style="margin-top:12px">
             <button class="small" id="mcp-save" type="button">Сохранить сервер</button>
             <button class="ghost small" id="mcp-refresh" type="button">Обновить список</button>
@@ -662,6 +719,8 @@
   </main>
 
   <div id="toast" class="toast" hidden></div>
+  <script src="vendor/mermaid.min.js"></script>
+  <script src="vendor/chart.umd.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

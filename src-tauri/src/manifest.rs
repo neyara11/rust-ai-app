@@ -370,7 +370,10 @@ pub fn find_tool<'a>(manifest: &'a Manifest, tool: &str) -> Option<&'a ToolDef> 
 /// names are case-insensitive, so the comparison is case-folded.
 pub fn is_reserved_secret(name: &str) -> bool {
     let name = name.trim().to_ascii_lowercase();
-    name == "llm_api_key" || name.starts_with("mcp.")
+    name == "llm_api_key"
+        || name.starts_with("mcp.")
+        || name.starts_with("llm.")
+        || name.starts_with("app.")
 }
 
 pub fn external_write_allowed(manifest: &Manifest, connection_id: &str) -> bool {

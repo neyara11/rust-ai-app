@@ -76,7 +76,7 @@ const browserMock = (() => {
           {
             role: "assistant",
             kind: "text",
-            text: "### Готово\n\nСоздал в рабочей папке:\n\n- `report.md` — план проверки\n- `report.docx` — Word-версия через `docx_export`\n\nФайлы можно править и пересобирать.",
+            text: "### Готово\n\nСоздал в рабочей папке:\n\n- `report.md` — план проверки\n- `report.docx` — Word-версия через `docx_export`\n\nФайлы можно править и пересобирать.\n\n```mermaid\nflowchart LR\n  A[report.md] --> B[docx_export]\n  B --> C[report.docx]\n```\n\n```chart\n{\"type\":\"bar\",\"labels\":[\"read\",\"write\"],\"datasets\":[{\"label\":\"files\",\"data\":[2,1]}]}\n```\n\n```mermaid\nxychart-beta\n    title \"Sales\"\n    x-axis [янв, фев, мар]\n    y-axis \"k\" 0 --> 250\n    bar [120, 170, 100]\n```",
             tokens_in: 980,
             tokens_out: 210,
             reasoning_tokens: 120,
@@ -101,8 +101,9 @@ const browserMock = (() => {
   let mcpServers = ["context7"];
   let packManifest = false;
   let config = {
-    llm_endpoint: "https://routerai.ru/api/v1",
+    llm_endpoint: "https://llm-gateway.internal/v1",
     llm_model: "~deepseek/deepseek-v4-flash-latest",
+    llm_allow_invalid_certs: false,
     llm_capabilities: {
       vision: false,
       reasoning: true,
@@ -171,6 +172,15 @@ const browserMock = (() => {
         return null;
       case "mcp_servers":
         return mcpServers;
+      case "mcp_server_get":
+        return {
+          id: args.id,
+          url: "https://mcp.example.internal/…",
+          has_token: true,
+          allow_invalid_certs: false,
+          scope: "global",
+          has_app_override: false,
+        };
       case "mcp_server_save":
         if (args.id && !mcpServers.includes(args.id)) mcpServers.push(args.id);
         return null;
@@ -178,11 +188,35 @@ const browserMock = (() => {
         mcpServers = mcpServers.filter((s) => s !== args.id);
         return null;
       case "mcp_probe":
+      case "mcp_app_probe":
         return {
           protocol: "2025-06-18",
           server: { name: args.id },
           tools: ["resolve-library-id", "query-docs"],
         };
+      case "mcp_app_servers": {
+        const app = mockApps.find((a) => a.app_id === args.app_id);
+        return ((app && app.connections) || [])
+          .filter((c) => c.type === "http-mcp")
+          .map((c) => ({
+            id: c.id,
+            url: "https://mcp.example.internal/…",
+            has_token: true,
+            allow_invalid_certs: false,
+            scope: "global",
+            has_app_override: false,
+          }));
+      }
+      case "mcp_app_server_save":
+      case "mcp_app_server_delete":
+        return null;
+      case "save_diagram":
+        return `${config.workspaces?.[args.app_id] || "workspace"}/${args.filename}`;
+      case "app_secrets":
+        return [];
+      case "app_secret_set":
+      case "app_secret_delete":
+        return null;
       case "mcp_call":
         return {
           bytes: 482,
@@ -199,7 +233,7 @@ const browserMock = (() => {
           ),
         };
       case "probe_endpoint":
-        return { ok: true, millis: 38, detail: "TCP connect ok (routerai.ru:443)" };
+        return { ok: true, millis: 38, detail: "TCP connect ok (llm-gateway.internal:443)" };
       case "open_app":
         return {
           app_id: args.app_id,
@@ -388,6 +422,11 @@ function setTheme(theme) {
     const next = theme === "dark" ? "светлую" : "тёмную";
     toggle.title = `Включить ${next} тему`;
     toggle.setAttribute("aria-label", `Включить ${next} тему`);
+  }
+  const log = $("chat-log");
+  if (log && ctx.chatItems && ctx.chatItems.length) {
+    destroyCharts(log);
+    renderChat([...(ctx.chatItems || []), ...(ctx.streamingItems || [])]);
   }
 }
 
@@ -618,6 +657,7 @@ async function openApp(appId) {
     document.querySelectorAll(".ws-tab").forEach((t) => t.classList.toggle("active", t.dataset.ws === "chat"));
     $("ws-chat").hidden = false;
     $("ws-tools").hidden = true;
+    $("ws-settings").hidden = true;
     $("chat-log").innerHTML = "";
     renderChatList();
     renderChat([]);
@@ -630,6 +670,7 @@ async function openApp(appId) {
     if (wsFolder) wsFolder.textContent = info.workspace || "—";
 
     if (hasMcp) renderToolSelectors();
+    await refreshAppSettings();
   });
 }
 
@@ -702,10 +743,29 @@ function inlineMd(text) {
     .replace(/\*([^*]+)\*/g, "<em>$1</em>");
 }
 
+const DIAGRAM_KINDS = new Set(["mermaid", "chart"]);
+
+function diagramBlockHtml(kind, code) {
+  const label = kind === "mermaid" ? "Mermaid" : "Chart.js";
+  return `<div class="diagram-block" data-diagram="${kind}" data-pending="1">
+    <div class="diagram-toolbar">
+      <span class="diagram-label">${label}</span>
+      <span class="diagram-spacer"></span>
+      <button class="ghost small" type="button" data-diagram-action="source">Код</button>
+      ${kind === "mermaid" ? '<button class="ghost small" type="button" data-diagram-action="svg">SVG</button>' : ""}
+      <button class="ghost small" type="button" data-diagram-action="png">PNG</button>
+    </div>
+    <div class="diagram-canvas"><div class="diagram-loading">Рендер схемы…</div></div>
+    <pre class="diagram-source" hidden>${code}</pre>
+  </div>`;
+}
+
 function renderMarkdown(source) {
   const lines = escapeHtml(source).split("\n");
   let html = "";
   let inCode = false;
+  let codeLang = "";
+  let code = [];
   let list = null;
   const closeList = () => {
     if (list) {
@@ -713,17 +773,33 @@ function renderMarkdown(source) {
       list = null;
     }
   };
+  const flushCode = () => {
+    const body = code.join("\n");
+    if (DIAGRAM_KINDS.has(codeLang) && body.trim()) {
+      html += diagramBlockHtml(codeLang, body);
+    } else if (body) {
+      const lang = codeLang ? ` class="language-${escapeHtml(codeLang)}"` : "";
+      html += `<pre><code${lang}>${body}</code></pre>`;
+    }
+    code = [];
+    codeLang = "";
+  };
 
   for (const raw of lines) {
     const line = raw.replace(/\s+$/, "");
     if (line.trimStart().startsWith("```")) {
-      closeList();
-      html += inCode ? "</code></pre>" : "<pre><code>";
-      inCode = !inCode;
+      if (inCode) {
+        flushCode();
+        inCode = false;
+      } else {
+        closeList();
+        inCode = true;
+        codeLang = line.trim().slice(3).trim().split(/\s+/)[0].toLowerCase();
+      }
       continue;
     }
     if (inCode) {
-      html += line + "\n";
+      code.push(line);
       continue;
     }
     if (!line.trim()) {
@@ -761,8 +837,296 @@ function renderMarkdown(source) {
     html += `<p>${inlineMd(line)}</p>`;
   }
   closeList();
-  if (inCode) html += "</code></pre>";
+  // An unfinished fence is still streaming: show it as code, not a half diagram.
+  flushCode();
   return html;
+}
+
+/* ---------- diagrams (offline) ---------- */
+
+const mermaidCache = new Map();
+const activeCharts = new Set();
+let mermaidTheme = null;
+let mermaidSeq = 0;
+
+function hashText(text) {
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function currentTheme() {
+  return document.documentElement.dataset.theme === "light" ? "default" : "dark";
+}
+
+function cleanupMermaidErrors() {
+  for (const text of document.querySelectorAll(".error-text")) {
+    const svg = text.ownerSVGElement;
+    if (svg) svg.remove();
+  }
+}
+
+function ensureMermaid() {
+  if (!window.mermaid) return null;
+  const theme = currentTheme();
+  if (mermaidTheme !== theme) {
+    window.mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme,
+      fontFamily: "Golos Text",
+      htmlLabels: false,
+      suppressErrorRendering: true,
+      flowchart: { htmlLabels: false, useMaxWidth: true },
+      sequence: { useMaxWidth: true },
+      maxTextSize: 100000,
+      maxEdges: 1000,
+    });
+    mermaidTheme = theme;
+    mermaidCache.clear();
+    cleanupMermaidErrors();
+  }
+  return window.mermaid;
+}
+
+// Mermaid's xychart grammar requires quoted categorical labels. Models often
+// emit `x-axis [янв, фев]`, which fails on Cyrillic bare words, so quote only
+// that one axis form and leave every other diagram untouched.
+function normalizeMermaid(source) {
+  if (!/^\s*xychart-beta\b/i.test(source)) return source;
+  return source
+    .split("\n")
+    .map((line) => {
+      const match = line.match(/^(\s*x-axis\s+)\[(.*)\]\s*$/);
+      if (!match) return line;
+      const labels = match[2]
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => {
+          if (/^"(?:[^"\\]|\\.)*"$/.test(item) || /^'(?:[^'\\]|\\.)*'$/.test(item)) return item;
+          if (/^-?\d+(?:\.\d+)?$/.test(item)) return item;
+          return `"${item.replace(/"/g, '\\"')}"`;
+        });
+      return `${match[1]}[${labels.join(", ")}]`;
+    })
+    .join("\n");
+}
+
+function diagramError(block, message) {
+  const canvas = block.querySelector(".diagram-canvas");
+  if (!canvas) return;
+  canvas.innerHTML = "";
+  const err = document.createElement("div");
+  err.className = "diagram-error";
+  err.textContent = message;
+  canvas.appendChild(err);
+}
+
+function setDiagramSvg(block, svg) {
+  const canvas = block.querySelector(".diagram-canvas");
+  if (!canvas) return;
+  canvas.innerHTML = svg;
+  block.removeAttribute("data-pending");
+}
+
+function renderMermaidBlock(block, source) {
+  const mermaid = ensureMermaid();
+  if (!mermaid) {
+    diagramError(block, "Mermaid не загружен: проверьте vendor/mermaid.min.js");
+    return;
+  }
+  if (source.length > 100000) {
+    diagramError(block, "Схема слишком большая для безопасного рендера (лимит 100 КБ)");
+    block.removeAttribute("data-pending");
+    return;
+  }
+  const normalized = normalizeMermaid(source);
+  const key = `${currentTheme()}\u0001${normalized}`;
+  if (mermaidCache.has(key)) {
+    setDiagramSvg(block, mermaidCache.get(key));
+    return;
+  }
+  const id = `diagram-${hashText(normalized)}-${++mermaidSeq}`;
+  Promise.resolve()
+    .then(() => mermaid.render(id, normalized))
+    .then((result) => {
+      const svg = result && result.svg ? result.svg : "";
+      if (!svg) throw new Error("пустой SVG");
+      mermaidCache.set(key, svg);
+      if (mermaidCache.size > 80) mermaidCache.delete(mermaidCache.keys().next().value);
+      if (block.isConnected) setDiagramSvg(block, svg);
+    })
+    .catch((error) => {
+      cleanupMermaidErrors();
+      if (block.isConnected) diagramError(block, `Не удалось построить схему: ${error.message || error}`);
+      block.removeAttribute("data-pending");
+    });
+}
+
+function chartThemeColor(name, fallback) {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function renderChartBlock(block, source) {
+  if (source.length > 200000) {
+    diagramError(block, "Описание графика слишком большое (лимит 200 КБ)");
+    block.removeAttribute("data-pending");
+    return;
+  }
+  let spec;
+  try {
+    spec = JSON.parse(source);
+  } catch (error) {
+    diagramError(block, `Chart JSON: ${error.message}`);
+    block.removeAttribute("data-pending");
+    return;
+  }
+  if (!window.Chart) {
+    diagramError(block, "Chart.js не загружен: проверьте vendor/chart.umd.min.js");
+    return;
+  }
+  const canvas = block.querySelector(".diagram-canvas");
+  if (!canvas) return;
+  canvas.innerHTML = '<canvas aria-label="График"></canvas>';
+  const element = canvas.querySelector("canvas");
+  const config = spec.data
+    ? { ...spec }
+    : {
+        type: spec.type || "bar",
+        data: { labels: spec.labels || [], datasets: spec.datasets || [] },
+        options: spec.options || {},
+      };
+  config.options = {
+    responsive: true,
+    maintainAspectRatio: false,
+    ...(config.options || {}),
+  };
+  config.options.plugins = {
+    ...(config.options.plugins || {}),
+    legend: {
+      ...((config.options.plugins || {}).legend || {}),
+      labels: {
+        color: chartThemeColor("--text-secondary", "#cbd5e1"),
+        ...(((config.options.plugins || {}).legend || {}).labels || {}),
+      },
+    },
+  };
+  try {
+    const chart = new window.Chart(element, config);
+    activeCharts.add(chart);
+    element.__chart = chart;
+    block.removeAttribute("data-pending");
+  } catch (error) {
+    diagramError(block, `Chart.js: ${error.message}`);
+    block.removeAttribute("data-pending");
+  }
+}
+
+function destroyCharts(root) {
+  if (!root || !root.querySelectorAll) return;
+  for (const canvas of root.querySelectorAll("canvas")) {
+    const chart = canvas.__chart;
+    if (chart) {
+      activeCharts.delete(chart);
+      try {
+        chart.destroy();
+      } catch (_) {}
+      canvas.__chart = null;
+    }
+  }
+}
+
+function enhanceDiagrams(root) {
+  if (!root || !root.querySelectorAll) return;
+  for (const block of root.querySelectorAll(".diagram-block[data-pending]")) {
+    const source = (block.querySelector(".diagram-source") || {}).textContent || "";
+    if (!source.trim()) {
+      block.removeAttribute("data-pending");
+      continue;
+    }
+    if (block.dataset.diagram === "mermaid") renderMermaidBlock(block, source);
+    else if (block.dataset.diagram === "chart") renderChartBlock(block, source);
+  }
+}
+
+function diagramFileName(block, ext) {
+  const source = (block.querySelector(".diagram-source") || {}).textContent || "";
+  return `${block.dataset.diagram || "diagram"}-${hashText(source)}.${ext}`;
+}
+
+async function saveDiagramFile(block, format, content) {
+  if (!ctx.appId) return toast("Сначала откройте приложение", true);
+  const path = await invoke("save_diagram", {
+    app_id: ctx.appId,
+    filename: diagramFileName(block, format),
+    format,
+    content,
+  });
+  if (path) toast(`Сохранено: ${path}`);
+}
+
+async function exportDiagram(block, kind) {
+  const canvas = block.querySelector(".diagram-canvas");
+  if (!canvas) return;
+  if (kind === "svg") {
+    const svg = canvas.querySelector("svg");
+    if (!svg) return toast("SVG ещё не готов", true);
+    const text = new XMLSerializer().serializeToString(svg);
+    await saveDiagramFile(block, "svg", text);
+    return;
+  }
+  if (kind === "png") {
+    const svg = canvas.querySelector("svg");
+    const sourceCanvas = canvas.querySelector("canvas");
+    if (sourceCanvas) {
+      await saveDiagramFile(block, "png", sourceCanvas.toDataURL("image/png").split(",")[1]);
+      return;
+    }
+    if (!svg) return toast("Схема ещё не готова", true);
+    const text = new XMLSerializer().serializeToString(svg);
+    const image = new Image();
+    const url = URL.createObjectURL(new Blob([text], { type: "image/svg+xml" }));
+    try {
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = () => reject(new Error("не удалось отрисовать SVG"));
+        image.src = url;
+      });
+      const scale = 2;
+      const width = Math.max(1, image.naturalWidth || svg.clientWidth || 800);
+      const height = Math.max(1, image.naturalHeight || svg.clientHeight || 600);
+      const out = document.createElement("canvas");
+      out.width = width * scale;
+      out.height = height * scale;
+      const context = out.getContext("2d");
+      context.scale(scale, scale);
+      context.drawImage(image, 0, 0, width, height);
+      await saveDiagramFile(block, "png", out.toDataURL("image/png").split(",")[1]);
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+}
+
+function handleDiagramAction(event) {
+  const button = event.target.closest("[data-diagram-action]");
+  if (!button) return;
+  const block = button.closest(".diagram-block");
+  if (!block) return;
+  const action = button.dataset.diagramAction;
+  if (action === "source") {
+    const source = block.querySelector(".diagram-source");
+    if (source) source.hidden = !source.hidden;
+    return;
+  }
+  guard(() => exportDiagram(block, action));
 }
 
 function getStartersForApp(appId) {
@@ -879,6 +1243,7 @@ function renderChat(items) {
 
   if (!items || !items.length) {
     if (log.querySelector(".chat-empty")) return;
+    destroyCharts(log);
     log.innerHTML = "";
     rendered.length = 0;
     const starters = getStartersForApp(ctx.appId)
@@ -901,6 +1266,7 @@ function renderChat(items) {
   }
 
   if (log.querySelector(".chat-empty")) {
+    destroyCharts(log);
     log.innerHTML = "";
     rendered.length = 0;
   }
@@ -918,6 +1284,7 @@ function renderChat(items) {
       node.open = true;
     }
     if (current) {
+      destroyCharts(current);
       log.replaceChild(node, current);
     } else {
       log.appendChild(node);
@@ -927,14 +1294,19 @@ function renderChat(items) {
 
   while (rendered.length > items.length) {
     const entry = rendered.pop();
-    if (entry.node.parentNode === log) log.removeChild(entry.node);
+    if (entry.node.parentNode === log) {
+      destroyCharts(entry.node);
+      log.removeChild(entry.node);
+    }
   }
   while (log.children.length > items.length) {
     const last = log.lastElementChild;
     if (last && last.classList.contains("chat-thinking")) break;
+    destroyCharts(last);
     log.removeChild(last);
   }
 
+  enhanceDiagrams(log);
   if (atBottom) log.scrollTop = log.scrollHeight;
   if (ctx.busy) renderThinking();
 }
@@ -1350,9 +1722,14 @@ async function refreshMcpServers() {
   const box = $("mcp-servers");
   box.innerHTML = ctx.mcp.length ? "" : '<span class="muted small">зарегистрированных MCP-серверов нет</span>';
   for (const id of ctx.mcp) {
+    let info = null;
+    try {
+      info = await invoke("mcp_server_get", { id });
+    } catch (_) {}
     const row = document.createElement("div");
     row.className = "secret-row";
-    row.innerHTML = `<span>${esc(id)}</span><div class="row-actions">
+    const tls = info && info.allow_invalid_certs ? '<span class="badge bad">TLS off</span>' : "";
+    row.innerHTML = `<span>${esc(id)} ${tls}</span><div class="row-actions">
       <button class="ghost small" data-mcp-probe="${esc(id)}">Проверить tools</button>
       <button class="ghost small danger-hover" data-mcp-del="${esc(id)}">Удалить</button></div>`;
     box.appendChild(row);
@@ -1411,10 +1788,16 @@ async function saveMcpServer() {
   const url = $("mcp-url").value.trim();
   if (!id || !url) return toast("ID и URL обязательны", true);
   await guard(async () => {
-    await invoke("mcp_server_save", { id, url, token: $("mcp-token").value || null });
+    await invoke("mcp_server_save", {
+      id,
+      url,
+      token: $("mcp-token").value || null,
+      allow_invalid_certs: $("mcp-insecure").checked,
+    });
     $("mcp-id").value = "";
     $("mcp-url").value = "";
     $("mcp-token").value = "";
+    $("mcp-insecure").checked = false;
     toast("MCP-сервер сохранён в DPAPI");
     await refreshMcpServers();
   });
@@ -1425,6 +1808,147 @@ async function probeMcp(id) {
     const r = await invoke("mcp_probe", { id });
     const tools = (r.tools || []).join(", ");
     toast(`${(r.server && r.server.name) || id}: ${tools || "инструменты не найдены"}`);
+  });
+}
+
+/* ---------- per-app settings ---------- */
+
+function scopeBadge(scope) {
+  if (scope === "app") return '<span class="badge ok">override приложения</span>';
+  if (scope === "global") return '<span class="badge">глобальный</span>';
+  return '<span class="badge bad">не настроен</span>';
+}
+
+async function refreshAppSettings() {
+  if (!ctx.appId) return;
+  const appId = ctx.appId;
+  const [servers, secrets] = await Promise.all([
+    invoke("mcp_app_servers", { app_id: appId }),
+    invoke("app_secrets", { app_id: appId }),
+  ]);
+  if (ctx.appId !== appId) return;
+  ctx.appMcp = servers || [];
+  ctx.appSecrets = secrets || [];
+  renderAppMcp();
+  renderAppSecrets();
+}
+
+function renderAppMcp() {
+  const box = $("app-mcp-list");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!(ctx.appMcp || []).length) {
+    box.innerHTML = '<span class="muted small">В манифесте нет MCP-подключений.</span>';
+    return;
+  }
+  for (const server of ctx.appMcp) {
+    const card = document.createElement("div");
+    card.className = "app-setting-card";
+    card.dataset.appMcp = server.id;
+    card.innerHTML = `
+      <div class="app-setting-head">
+        <strong class="mono">${esc(server.id)}</strong>
+        ${scopeBadge(server.scope)}
+      </div>
+      <div class="grid">
+        <label>Endpoint URL<input data-field="url" placeholder="${esc(server.url || "https://…")}" /></label>
+        <label>Bearer-токен<input data-field="token" type="password" placeholder="${server.has_token ? "сохранить текущий" : "не задан"}" /></label>
+      </div>
+      <label class="check-row danger-check">
+        <input data-field="insecure" type="checkbox" ${server.allow_invalid_certs ? "checked" : ""} />
+        <span>Не проверять TLS-сертификат и имя хоста</span>
+      </label>
+      <div class="row-actions">
+        <button class="small" type="button" data-app-mcp-save="${esc(server.id)}">Сохранить</button>
+        <button class="ghost small" type="button" data-app-mcp-probe="${esc(server.id)}">Проверить tools</button>
+        <button class="ghost small danger-hover" type="button" data-app-mcp-reset="${esc(server.id)}" ${server.has_app_override ? "" : "disabled"}>Сбросить override</button>
+      </div>`;
+    box.appendChild(card);
+  }
+}
+
+function renderAppSecrets() {
+  const box = $("app-secrets-list");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!(ctx.appSecrets || []).length) {
+    box.innerHTML = '<span class="muted small">Пакет не объявляет переменных инструментов.</span>';
+    return;
+  }
+  for (const secret of ctx.appSecrets) {
+    const card = document.createElement("div");
+    card.className = "app-setting-card";
+    card.dataset.appSecret = secret.name;
+    const envs = (secret.envs || []).map((env) => `<code>${esc(env)}</code>`).join(", ");
+    card.innerHTML = `
+      <div class="app-setting-head">
+        <strong class="mono">${esc(secret.name)}</strong>
+        ${scopeBadge(secret.scope)}
+      </div>
+      <div class="muted small">Переменные: ${envs || "—"}</div>
+      <div class="grid">
+        <label>Новое значение<input data-field="value" type="password" placeholder="значение в DPAPI" /></label>
+      </div>
+      <div class="row-actions">
+        <button class="small" type="button" data-app-secret-save="${esc(secret.name)}">Сохранить</button>
+        <button class="ghost small danger-hover" type="button" data-app-secret-reset="${esc(secret.name)}" ${secret.scope === "app" ? "" : "disabled"}>Удалить override</button>
+      </div>`;
+    box.appendChild(card);
+  }
+}
+
+async function saveAppMcp(id) {
+  const card = document.querySelector(`.app-setting-card[data-app-mcp="${CSS.escape(id)}"]`);
+  if (!card) return;
+  const url = card.querySelector('[data-field="url"]').value.trim();
+  const token = card.querySelector('[data-field="token"]').value;
+  const allowInvalid = card.querySelector('[data-field="insecure"]').checked;
+  await guard(async () => {
+    await invoke("mcp_app_server_save", {
+      app_id: ctx.appId,
+      id,
+      url,
+      token: token === "" ? null : token,
+      allow_invalid_certs: allowInvalid,
+    });
+    toast(`MCP ${id}: настройки приложения сохранены`);
+    await refreshAppSettings();
+  });
+}
+
+async function resetAppMcp(id) {
+  await guard(async () => {
+    await invoke("mcp_app_server_delete", { app_id: ctx.appId, id });
+    toast(`MCP ${id}: override удалён, используется глобальный`);
+    await refreshAppSettings();
+  });
+}
+
+async function probeAppMcp(id) {
+  await guard(async () => {
+    const r = await invoke("mcp_app_probe", { app_id: ctx.appId, id });
+    const tools = (r.tools || []).join(", ");
+    toast(`${(r.server && r.server.name) || id}: ${tools || "инструменты не найдены"}`);
+  });
+}
+
+async function saveAppSecret(name) {
+  const card = document.querySelector(`.app-setting-card[data-app-secret="${CSS.escape(name)}"]`);
+  if (!card) return;
+  const value = card.querySelector('[data-field="value"]').value;
+  if (!value) return toast("Введите значение", true);
+  await guard(async () => {
+    await invoke("app_secret_set", { app_id: ctx.appId, name, value });
+    toast(`Секрет ${name}: значение приложения сохранено`);
+    await refreshAppSettings();
+  });
+}
+
+async function resetAppSecret(name) {
+  await guard(async () => {
+    await invoke("app_secret_delete", { app_id: ctx.appId, name });
+    toast(`Секрет ${name}: override удалён`);
+    await refreshAppSettings();
   });
 }
 
@@ -1939,6 +2463,7 @@ async function loadConfig() {
   ctx.config = await invoke("get_config");
   $("llm-endpoint").value = ctx.config.llm_endpoint || "";
   $("llm-model").value = ctx.config.llm_model || "";
+  $("llm-insecure").checked = !!ctx.config.llm_allow_invalid_certs;
   const caps = ctx.config.llm_capabilities || {};
   $("llm-vision").checked = !!caps.vision;
   $("llm-reasoning").checked = caps.reasoning !== false;
@@ -1965,6 +2490,7 @@ async function saveConfig() {
       ...(ctx.config || {}),
       llm_endpoint: $("llm-endpoint").value.trim() || null,
       llm_model: $("llm-model").value.trim() || null,
+      llm_allow_invalid_certs: $("llm-insecure").checked,
       llm_capabilities: {
         vision: $("llm-vision").checked,
         reasoning: $("llm-reasoning").checked,
@@ -2214,6 +2740,10 @@ function bind() {
       $("chat-text").focus();
       return;
     }
+    if (e.target.closest("[data-diagram-action]")) {
+      handleDiagramAction(e);
+      return;
+    }
     const copy = e.target.closest("[data-copy]");
     if (!copy) return;
     navigator.clipboard.writeText(copy.dataset.text || "").then(
@@ -2253,16 +2783,51 @@ function bind() {
     }
   });
 
-  const composer = document.querySelector(".chat-composer-wrap");
-  if (composer) {
-    composer.addEventListener("dragover", (event) => {
+  document.addEventListener("paste", async (event) => {
+    const target = event.target;
+    const editable =
+      target && (target.matches?.("input, textarea") || target.isContentEditable);
+    if (editable && target.id !== "chat-text") return;
+    const clipboard = event.clipboardData;
+    if (!clipboard) return;
+    const files = [...(clipboard.files || [])];
+    if (!files.length) {
+      for (const item of clipboard.items || []) {
+        if (item.kind === "file") {
+          const file = item.getAsFile();
+          if (file) files.push(file);
+        }
+      }
+    }
+    if (!files.length) return;
+    event.preventDefault();
+    await addAttachments(files);
+  });
+
+  const dropZone = document.querySelector(".chat-layout");
+  if (dropZone) {
+    let dragDepth = 0;
+    const hasFiles = (event) => [...((event.dataTransfer && event.dataTransfer.types) || [])].includes("Files");
+    dropZone.addEventListener("dragenter", (event) => {
+      if (!hasFiles(event)) return;
       event.preventDefault();
-      composer.classList.add("drop-active");
+      dragDepth += 1;
+      dropZone.classList.add("drop-active");
     });
-    composer.addEventListener("dragleave", () => composer.classList.remove("drop-active"));
-    composer.addEventListener("drop", (event) => {
+    dropZone.addEventListener("dragover", (event) => {
+      if (!hasFiles(event)) return;
       event.preventDefault();
-      composer.classList.remove("drop-active");
+      event.dataTransfer.dropEffect = "copy";
+    });
+    dropZone.addEventListener("dragleave", () => {
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (!dragDepth) dropZone.classList.remove("drop-active");
+    });
+    dropZone.addEventListener("drop", (event) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      dragDepth = 0;
+      dropZone.classList.remove("drop-active");
       addAttachments(event.dataTransfer.files);
     });
   }
@@ -2270,10 +2835,11 @@ function bind() {
   document.querySelectorAll(".ws-tab").forEach((tab) => {
     tab.addEventListener("click", () => {
       document.querySelectorAll(".ws-tab").forEach((t) => t.classList.toggle("active", t === tab));
-      for (const name of ["chat", "tools"]) {
+      for (const name of ["chat", "tools", "settings"]) {
         const body = $(`ws-${name}`);
         if (body) body.hidden = name !== tab.dataset.ws;
       }
+      if (tab.dataset.ws === "settings") guard(refreshAppSettings);
     });
   });
 
@@ -2292,6 +2858,22 @@ function bind() {
   $("secrets").addEventListener("click", (e) => {
     const del = e.target.closest("[data-secret]");
     if (del) deleteSecret(del.dataset.secret);
+  });
+
+  $("app-settings-refresh").addEventListener("click", () => guard(refreshAppSettings));
+  $("app-mcp-list").addEventListener("click", (e) => {
+    const save = e.target.closest("[data-app-mcp-save]");
+    if (save) return saveAppMcp(save.dataset.appMcpSave);
+    const probe = e.target.closest("[data-app-mcp-probe]");
+    if (probe) return probeAppMcp(probe.dataset.appMcpProbe);
+    const reset = e.target.closest("[data-app-mcp-reset]");
+    if (reset) return resetAppMcp(reset.dataset.appMcpReset);
+  });
+  $("app-secrets-list").addEventListener("click", (e) => {
+    const save = e.target.closest("[data-app-secret-save]");
+    if (save) return saveAppSecret(save.dataset.appSecretSave);
+    const reset = e.target.closest("[data-app-secret-reset]");
+    if (reset) return resetAppSecret(reset.dataset.appSecretReset);
   });
 }
 

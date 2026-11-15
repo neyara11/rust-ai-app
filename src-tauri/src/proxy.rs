@@ -380,7 +380,7 @@ impl Proxy {
     }
 
     fn load_schemas(&mut self, secrets: &SecretStore, server: &str) -> HashMap<String, Value> {
-        let def = match mcp::get(secrets, server) {
+        let def = match mcp::get_for_app(secrets, &self.app.app_id, server) {
             Ok(def) => def,
             Err(e) => {
                 eprintln!("eco-platform mcp proxy: {server} is not configured: {e}");
@@ -436,7 +436,7 @@ impl Proxy {
     ) -> Result<Value> {
         let secrets = SecretStore::new(&self.home);
         if !self.servers.contains_key(server) {
-            let def = mcp::get(&secrets, server)?;
+            let def = mcp::get_for_app(&secrets, &self.app.app_id, server)?;
             let session = McpSession::connect(def)?;
             self.servers.insert(server.to_string(), session);
         }
@@ -539,13 +539,13 @@ impl Proxy {
         if !secrets.is_empty() {
             let store = SecretStore::new(&self.home);
             for (env_name, secret_name) in secrets {
-                match store.load(secret_name)? {
+                match store.load_for_app(&self.app.app_id, secret_name)? {
                     Some(value) if !value.is_empty() => {
                         command.env(env_name, value);
                     }
                     _ => {
                         return msg(format!(
-                            "package tool {tool} needs secret '{secret_name}' for {env_name}; add it in Settings → Secrets"
+                            "package tool {tool} needs secret '{secret_name}' for {env_name}; add it in the application settings"
                         ));
                     }
                 }

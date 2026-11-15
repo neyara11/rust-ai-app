@@ -44,6 +44,7 @@ pub fn run() {
             commands::list_apps,
             commands::install_app,
             commands::pick_package,
+            commands::save_diagram,
             commands::remove_app,
             commands::app_history,
             commands::rollback_app,
@@ -80,8 +81,15 @@ pub fn run() {
             commands::mcp_server_get,
             commands::mcp_server_save,
             commands::mcp_server_delete,
+            commands::mcp_app_servers,
+            commands::mcp_app_server_save,
+            commands::mcp_app_server_delete,
             commands::mcp_probe,
+            commands::mcp_app_probe,
             commands::mcp_call,
+            commands::app_secrets,
+            commands::app_secret_set,
+            commands::app_secret_delete,
             commands::audit_tail,
             commands::chat_open,
             commands::chat_send,
@@ -486,6 +494,13 @@ pub fn cli_grep_artifacts(
     }
 }
 
+/// CLI-only TLS escape hatch for private CAs: `MCP_INSECURE=1`.
+fn cli_mcp_insecure() -> bool {
+    std::env::var("MCP_INSECURE")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Headless MCP probe: `--mcp-probe <url>`.
 pub fn cli_mcp_probe(url: Option<&String>) -> i32 {
     let Some(url) = url else {
@@ -496,6 +511,7 @@ pub fn cli_mcp_probe(url: Option<&String>) -> i32 {
         id: "cli".to_string(),
         url: url.clone(),
         token: std::env::var("MCP_TOKEN").ok(),
+        allow_invalid_certs: cli_mcp_insecure(),
     };
     match mcp::McpSession::connect(def).and_then(|s| {
         let tools = s.list_tools()?;
@@ -544,6 +560,7 @@ pub fn cli_mcp_call(url: Option<&String>, tool: Option<&String>, args: Option<&S
         id: "cli".to_string(),
         url: url.clone(),
         token: std::env::var("MCP_TOKEN").ok(),
+        allow_invalid_certs: cli_mcp_insecure(),
     };
     match mcp::McpSession::connect(def).and_then(|s| s.call(tool, arguments)) {
         Ok(value) => {
@@ -583,7 +600,7 @@ pub fn mcp_call_for_app(
     }
 
     let started = std::time::Instant::now();
-    let def = mcp::get(&SecretStore::new(home), server_id)?;
+    let def = mcp::get_for_app(&SecretStore::new(home), app_id, server_id)?;
     let session = mcp::McpSession::connect(def)?;
     let value = session.call(tool, arguments)?;
     let (text, truncated, bytes) = mcp::capped(&value);
@@ -616,6 +633,7 @@ pub fn cli_mcp_add(id: Option<&String>, url: Option<&String>, token: Option<&Str
         id: id.clone(),
         url: url.clone(),
         token: token.cloned(),
+        allow_invalid_certs: cli_mcp_insecure(),
     };
     match mcp::put(&SecretStore::new(&home), &def) {
         Ok(()) => {

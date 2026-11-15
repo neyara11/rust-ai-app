@@ -162,6 +162,10 @@ pub struct UserConfig {
     /// model block.
     #[serde(default)]
     pub llm_capabilities: ModelCapabilities,
+    /// Closed-contour escape hatch: an internal gateway may present a private
+    /// CA or a self-signed certificate. Off by default.
+    #[serde(default)]
+    pub llm_allow_invalid_certs: bool,
     #[serde(default)]
     pub enabled_apps: Vec<String>,
     /// User-chosen working folder per app. The agent's file tools are confined
@@ -271,6 +275,7 @@ impl Default for UserConfig {
             llm_endpoint: None,
             llm_model: None,
             llm_capabilities: ModelCapabilities::default(),
+            llm_allow_invalid_certs: false,
             enabled_apps: Vec::new(),
             workspaces: BTreeMap::new(),
             session_quota_mb: default_session_mb(),

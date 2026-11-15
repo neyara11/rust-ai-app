@@ -684,6 +684,12 @@ fn provider_config(
         ));
     }
 
+    // The engine is a Node process. A private CA/self-signed gateway can be
+    // accepted explicitly per profile; the default stays strict.
+    if cfg.llm_allow_invalid_certs {
+        envs.push(("NODE_TLS_REJECT_UNAUTHORIZED".to_string(), "0".to_string()));
+    }
+
     // The key never goes to disk: opencode substitutes {env:...} at runtime.
     let api_key = match secrets.load("llm_api_key")? {
         Some(key) if !key.trim().is_empty() => {

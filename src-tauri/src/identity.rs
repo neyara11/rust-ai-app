@@ -158,11 +158,28 @@ fn save(home: &Path, store: &Store) -> Result<()> {
         file.write_all(raw.as_bytes())?;
         file.sync_all()?;
     }
-    if let Err(e) = std::fs::rename(&tmp, path(home)) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(Error::Io(e));
+    // Windows can briefly return PermissionDenied when an antivirus scanner
+    // or another reader still has the destination open. The store lock already
+    // serializes writers, so a short retry is safe and avoids a spurious
+    // failure during concurrent token issuance.
+    let mut attempts = 0u32;
+    loop {
+        match std::fs::rename(&tmp, path(home)) {
+            Ok(()) => return Ok(()),
+            Err(e)
+                if attempts < 20
+                    && (e.kind() == std::io::ErrorKind::PermissionDenied
+                        || e.kind() == std::io::ErrorKind::AlreadyExists) =>
+            {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(Error::Io(e));
+            }
+        }
     }
-    Ok(())
 }
 
 fn hash_token(raw: &str) -> String {

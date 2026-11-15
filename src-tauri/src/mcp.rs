@@ -17,14 +17,26 @@ pub struct ServerDef {
     pub url: String,
     #[serde(default)]
     pub token: Option<String>,
+    /// Closed-contour escape hatch: an internal MCP server may use a private
+    /// CA or a self-signed certificate. Off by default and audited in the UI.
+    #[serde(default)]
+    pub allow_invalid_certs: bool,
 }
 
 fn key(id: &str) -> String {
     format!("mcp.{id}")
 }
 
+fn scoped_key(app_id: &str, id: &str) -> String {
+    format!("app.{app_id}.mcp.{id}")
+}
+
 fn validate_id(id: &str) -> Result<()> {
     crate::manifest::parse_id(id, "mcp server")
+}
+
+fn validate_app_id(app_id: &str) -> Result<()> {
+    crate::manifest::parse_id(app_id, "app")
 }
 
 pub fn list(secrets: &SecretStore) -> Result<Vec<String>> {
@@ -43,6 +55,39 @@ pub fn get(secrets: &SecretStore, id: &str) -> Result<ServerDef> {
         .load(&key(id))?
         .ok_or_else(|| Error::Msg(format!("mcp server {id} is not configured")))?;
     serde_json::from_str(&raw).map_err(Error::Json)
+}
+
+/// App-scoped definition first, then the global registry. This is what one
+/// application uses: the same MCP id can have different URLs, tokens and TLS
+/// policy in different apps.
+pub fn get_for_app(secrets: &SecretStore, app_id: &str, id: &str) -> Result<ServerDef> {
+    validate_app_id(app_id)?;
+    validate_id(id)?;
+    if let Some(raw) = secrets.load(&scoped_key(app_id, id))? {
+        return serde_json::from_str(&raw).map_err(Error::Json);
+    }
+    get(secrets, id)
+}
+
+/// Only the app-scoped definition, if the user created an override.
+pub fn get_scoped(secrets: &SecretStore, app_id: &str, id: &str) -> Result<Option<ServerDef>> {
+    validate_app_id(app_id)?;
+    validate_id(id)?;
+    match secrets.load(&scoped_key(app_id, id))? {
+        Some(raw) => Ok(Some(serde_json::from_str(&raw).map_err(Error::Json)?)),
+        None => Ok(None),
+    }
+}
+
+pub fn put_for_app(secrets: &SecretStore, app_id: &str, def: &ServerDef) -> Result<()> {
+    validate_app_id(app_id)?;
+    put_to(secrets, &scoped_key(app_id, &def.id), def)
+}
+
+pub fn delete_for_app(secrets: &SecretStore, app_id: &str, id: &str) -> Result<()> {
+    validate_app_id(app_id)?;
+    validate_id(id)?;
+    secrets.delete(&scoped_key(app_id, id))
 }
 
 /// Remote MCP endpoints must use TLS: the bearer token and every tool call
@@ -78,11 +123,15 @@ fn validate_url(raw: &str) -> Result<()> {
     }
 }
 
-pub fn put(secrets: &SecretStore, def: &ServerDef) -> Result<()> {
+fn put_to(secrets: &SecretStore, key: &str, def: &ServerDef) -> Result<()> {
     validate_id(&def.id)?;
     validate_url(&def.url)?;
     let raw = serde_json::to_string(def)?;
-    secrets.store(&key(&def.id), &raw)
+    secrets.store(key, &raw)
+}
+
+pub fn put(secrets: &SecretStore, def: &ServerDef) -> Result<()> {
+    put_to(secrets, &key(&def.id), def)
 }
 
 pub fn delete(secrets: &SecretStore, id: &str) -> Result<()> {
@@ -106,7 +155,13 @@ impl McpSession {
         validate_url(&def.url)?;
         // Native TLS (Schannel on Windows) instead of rustls: corporate TLS
         // inspection in a closed network is handled by the system store.
-        let tls = ureq::native_tls::TlsConnector::new()
+        let mut tls_builder = ureq::native_tls::TlsConnector::builder();
+        if def.allow_invalid_certs {
+            tls_builder.danger_accept_invalid_certs(true);
+            tls_builder.danger_accept_invalid_hostnames(true);
+        }
+        let tls = tls_builder
+            .build()
             .map_err(|e| Error::Msg(format!("TLS init failed: {e}")))?;
         let agent = ureq::AgentBuilder::new()
             .tls_connector(std::sync::Arc::new(tls))
@@ -320,6 +375,46 @@ mod tests {
         assert!(truncated);
         assert!(bytes > MAX_RESPONSE_BYTES);
         assert!(text.len() < MAX_RESPONSE_BYTES + 100);
+    }
+
+    #[test]
+    fn app_scoped_definition_overrides_global_and_falls_back() {
+        let home = std::env::temp_dir().join(format!(
+            "eco-mcp-scope-{}-{}",
+            std::process::id(),
+            crate::artifacts::now_secs()
+        ));
+        let secrets = SecretStore::new(&home);
+        let global = ServerDef {
+            id: "shared".into(),
+            url: "https://global.example/mcp".into(),
+            token: Some("global-token".into()),
+            allow_invalid_certs: false,
+        };
+        put(&secrets, &global).unwrap();
+        let app = ServerDef {
+            id: "shared".into(),
+            url: "https://app.example/mcp".into(),
+            token: Some("app-token".into()),
+            allow_invalid_certs: true,
+        };
+        put_for_app(&secrets, "doc-writer", &app).unwrap();
+
+        let resolved = get_for_app(&secrets, "doc-writer", "shared").unwrap();
+        assert_eq!(resolved.url, "https://app.example/mcp");
+        assert_eq!(resolved.token.as_deref(), Some("app-token"));
+        assert!(resolved.allow_invalid_certs);
+        assert_eq!(
+            get_for_app(&secrets, "other-app", "shared").unwrap().url,
+            "https://global.example/mcp"
+        );
+
+        delete_for_app(&secrets, "doc-writer", "shared").unwrap();
+        assert_eq!(
+            get_for_app(&secrets, "doc-writer", "shared").unwrap().url,
+            "https://global.example/mcp"
+        );
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

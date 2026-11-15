@@ -9,6 +9,7 @@ const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
+  ".woff2": "font/woff2",
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".ico": "image/x-icon",
@@ -40,7 +41,14 @@ const port = server.address().port;
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
 const pageErrors = [];
+const externalRequests = [];
 page.on("pageerror", (error) => pageErrors.push(error));
+page.on("request", (request) => {
+  const url = request.url();
+  if (!url.startsWith("http://127.0.0.1") && !url.startsWith("http://localhost")) {
+    externalRequests.push(url);
+  }
+});
 
 try {
   await page.goto(`http://127.0.0.1:${port}/index.html`);
@@ -64,6 +72,36 @@ try {
   );
   await page.waitForFunction(
     () => document.querySelector("#chat-log")?.textContent.includes("report.docx"),
+  );
+  await page.waitForSelector('.diagram-block[data-diagram="mermaid"] svg', { timeout: 15000 });
+  await page.waitForSelector('.diagram-block[data-diagram="chart"] canvas', { timeout: 15000 });
+  await page.waitForFunction(
+    () => {
+      const diagrams = [...document.querySelectorAll('.diagram-block[data-diagram="mermaid"]')];
+      return (
+        diagrams.length >= 2 &&
+        diagrams.every((block) => block.querySelector("svg")) &&
+        !document.querySelector(".diagram-error")
+      );
+    },
+    null,
+    { timeout: 15000 },
+  );
+  assert(
+    (await page.locator('.diagram-block[data-diagram="chart"] [data-diagram-action="svg"]').count()) === 0,
+    "Chart.js must not offer a vector SVG export",
+  );
+  await page.click('.diagram-block[data-diagram="mermaid"] [data-diagram-action="svg"]');
+  await page.waitForFunction(
+    () => document.querySelector("#toast")?.textContent.includes(".svg"),
+    null,
+    { timeout: 5000 },
+  );
+  await page.click('.diagram-block[data-diagram="chart"] [data-diagram-action="png"]');
+  await page.waitForFunction(
+    () => document.querySelector("#toast")?.textContent.includes(".png"),
+    null,
+    { timeout: 5000 },
   );
 
   const stats = await page.locator("#chat-log").textContent();
@@ -92,9 +130,41 @@ try {
   await page.locator("[data-remove-attachment]").click();
   assert(await page.locator("#chat-attachments").isHidden(), "attachment chip was not removed");
 
+  await page.evaluate(() => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(["pasted"], "pasted.txt", { type: "text/plain" }));
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: transfer });
+    document.querySelector("#chat-text").dispatchEvent(event);
+  });
+  await page.waitForFunction(
+    () => document.querySelector("#chat-attachments")?.textContent.includes("pasted.txt"),
+  );
+  await page.evaluate(() => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(["dropped"], "dropped.txt", { type: "text/plain" }));
+    const event = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", { value: transfer });
+    document.querySelector(".chat-layout").dispatchEvent(event);
+  });
+  await page.waitForFunction(
+    () => document.querySelector("#chat-attachments")?.textContent.includes("dropped.txt"),
+  );
+  await page.locator("[data-remove-attachment]").first().click();
+  await page.locator("[data-remove-attachment]").first().click();
+  assert(await page.locator("#chat-attachments").isHidden(), "paste/drop attachments were not removed");
+
   await page.selectOption("#app-switch", "doc-lookup");
   await page.waitForFunction(
     () => document.querySelector("#chat-list")?.textContent.includes("Tauri v2"),
+    null,
+    { timeout: 5000 },
+  );
+
+  await page.click('.ws-tab[data-ws="settings"]');
+  await page.waitForSelector("#ws-settings:not([hidden])");
+  await page.waitForFunction(
+    () => document.querySelector("#app-mcp-list")?.textContent.includes("context7"),
     null,
     { timeout: 5000 },
   );
@@ -152,6 +222,18 @@ try {
   await page.click('.tab[data-tab="settings"]');
   await page.click("#mode-change");
   await page.waitForSelector("#mode-overlay:not([hidden])");
+  const modeLayout = await page.evaluate(() => {
+    const dialog = document.querySelector(".mode-dialog");
+    const radio = document.querySelector(".mode-radio");
+    return {
+      overflow: dialog.scrollWidth - dialog.clientWidth,
+      cards: document.querySelectorAll(".mode-card").length,
+      radioDirection: radio ? getComputedStyle(radio).flexDirection : "",
+    };
+  });
+  assert(modeLayout.overflow <= 1, `mode dialog overflows horizontally by ${modeLayout.overflow}px`);
+  assert(modeLayout.cards === 2, "mode dialog must show both mode cards");
+  assert(modeLayout.radioDirection === "row", "mode radio labels must be horizontal");
   await page.check('input[name="mode-role"][value="user"]');
   await page.click('[data-mode="local"]');
   await page.waitForFunction(
@@ -167,9 +249,13 @@ try {
     "local mode must not show the allowlist gate",
   );
 
+  assert(
+    externalRequests.length === 0,
+    `external requests from the UI: ${externalRequests.join(", ")}`,
+  );
   assert(pageErrors.length === 0, `page errors: ${pageErrors.join("; ")}`);
   console.log(
-    "ui smoke ok: catalog, allowlist, chat, artifacts, attachments, package import, modes",
+    "ui smoke ok: catalog, allowlist, chat, diagrams, app settings, artifacts, attachments, package import, modes",
   );
 } finally {
   await browser.close();

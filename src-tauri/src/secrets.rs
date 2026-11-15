@@ -58,6 +58,30 @@ impl SecretStore {
         Ok(())
     }
 
+    /// Namespaced secret for one application. The app id is validated by the
+    /// caller; dots in the resulting platform name are a deliberate namespace
+    /// separator and never collide with a package-declared secret name.
+    pub fn scoped_name(app_id: &str, name: &str) -> String {
+        format!("app.{app_id}.{name}")
+    }
+
+    pub fn load_scoped(&self, app_id: &str, name: &str) -> Result<Option<String>> {
+        self.load(&Self::scoped_name(app_id, name))
+    }
+
+    pub fn delete_scoped(&self, app_id: &str, name: &str) -> Result<()> {
+        self.delete(&Self::scoped_name(app_id, name))
+    }
+
+    /// App-scoped value first, then the global secret. Used by package tools so
+    /// one script can have different endpoints/credentials per application.
+    pub fn load_for_app(&self, app_id: &str, name: &str) -> Result<Option<String>> {
+        if let Some(value) = self.load_scoped(app_id, name)? {
+            return Ok(Some(value));
+        }
+        self.load(name)
+    }
+
     pub fn list(&self) -> Result<Vec<String>> {
         let mut out = Vec::new();
         let Ok(entries) = fs::read_dir(&self.dir) else {
@@ -151,4 +175,39 @@ fn protect(data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(not(windows))]
 fn unprotect(blob: &[u8]) -> Result<Vec<u8>> {
     Ok(blob.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_scoped_secret_overrides_global_and_falls_back() {
+        let home = std::env::temp_dir().join(format!(
+            "eco-secrets-scope-{}-{}",
+            std::process::id(),
+            crate::artifacts::now_secs()
+        ));
+        let store = SecretStore::new(&home);
+        store.store("svc_url", "https://global.example").unwrap();
+        store
+            .store(&SecretStore::scoped_name("doc-writer", "svc_url"), "https://app.example")
+            .unwrap();
+
+        assert_eq!(
+            store.load_for_app("doc-writer", "svc_url").unwrap().as_deref(),
+            Some("https://app.example")
+        );
+        assert_eq!(
+            store.load_for_app("other-app", "svc_url").unwrap().as_deref(),
+            Some("https://global.example")
+        );
+
+        store.delete_scoped("doc-writer", "svc_url").unwrap();
+        assert_eq!(
+            store.load_for_app("doc-writer", "svc_url").unwrap().as_deref(),
+            Some("https://global.example")
+        );
+        let _ = fs::remove_dir_all(home);
+    }
 }

@@ -3,6 +3,136 @@
    Fonts: Syne (brand/display) · Golos Text (UI & Russian body) · JetBrains Mono
    ═══════════════════════════════════════════════════════════════════════ */
 
+/* Local fonts only: the closed contour must not fetch Google Fonts. */
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/golos-text-cyrillic-400-normal.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/golos-text-cyrillic-500-normal.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/golos-text-cyrillic-600-normal.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/golos-text-cyrillic-700-normal.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/golos-text-latin-400-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/golos-text-latin-500-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/golos-text-latin-600-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/golos-text-latin-700-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/jetbrains-mono-cyrillic-400-normal.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/jetbrains-mono-cyrillic-500-normal.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/jetbrains-mono-cyrillic-600-normal.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/jetbrains-mono-latin-400-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/jetbrains-mono-latin-500-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/jetbrains-mono-latin-600-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Syne";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/syne-latin-600-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Syne";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/syne-latin-700-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 :root {
   --font-display: "Syne", "Golos Text", "Segoe UI Variable Display", sans-serif;
   --font-sans: "Golos Text", "Segoe UI Variable Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -1579,6 +1709,93 @@ button:focus-visible,
   line-height: 1.55;
 }
 
+.diagram-block {
+  margin: 12px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.diagram-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.diagram-label {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.diagram-spacer {
+  flex: 1;
+}
+
+.diagram-toolbar button {
+  padding: 2px 7px;
+  font-size: 10.5px;
+}
+
+.diagram-canvas {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  padding: 12px;
+  overflow: auto;
+  background:
+    radial-gradient(circle at 1px 1px, var(--line) 1px, transparent 0) 0 0 / 18px 18px,
+    var(--panel-solid);
+}
+
+.diagram-canvas svg {
+  max-width: 100%;
+  max-height: 560px;
+  width: auto;
+  height: auto;
+}
+
+.diagram-canvas canvas {
+  width: 100% !important;
+  height: 280px !important;
+}
+
+.diagram-loading,
+.diagram-error {
+  padding: 18px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+.diagram-error {
+  color: var(--bad);
+  white-space: pre-wrap;
+}
+
+.diagram-source {
+  max-height: 320px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
 .msg-foot {
   display: flex;
   align-items: center;
@@ -1779,9 +1996,14 @@ button:focus-visible,
   color: var(--bad);
 }
 
-.chat-composer-wrap.drop-active {
+.chat-composer-wrap.drop-active,
+.chat-layout.drop-active {
   outline: 2px dashed var(--accent);
   outline-offset: -6px;
+}
+
+.chat-layout.drop-active {
+  background: var(--accent-soft);
 }
 
 /* ── Documents Workspace ───────────────────────────────────────────────── */
@@ -2120,6 +2342,68 @@ button:focus-visible,
   flex-wrap: wrap;
 }
 
+.app-settings {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px;
+  overflow: auto;
+}
+
+.app-settings-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.app-settings-head p {
+  margin: 4px 0 0;
+  max-width: 80ch;
+}
+
+.app-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.app-settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.app-setting-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.app-setting-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.danger-check span {
+  color: var(--bad);
+}
+
+@media (max-width: 1100px) {
+  .app-settings-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .settings-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2451,16 +2735,21 @@ button:focus-visible,
 }
 .mode-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
   margin: 18px 0;
+  min-width: 0;
 }
 .mode-card {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
   gap: 8px;
+  min-width: 0;
   padding: 18px;
   text-align: left;
+  white-space: normal;
   color: var(--text);
   background: var(--surface);
   border: 1px solid var(--line-strong);
@@ -2481,6 +2770,8 @@ button:focus-visible,
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .mode-tag {
   color: var(--accent-text);
@@ -2497,10 +2788,18 @@ button:focus-visible,
 }
 .mode-radio {
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: 8px;
   color: var(--text-secondary);
   font-size: 13px;
+}
+
+.mode-radio input[type="radio"] {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
 }
 .mode-error {
   margin-top: 10px;

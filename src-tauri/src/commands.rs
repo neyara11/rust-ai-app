@@ -6,6 +6,7 @@ use crate::mcp::{self, McpSession};
 use crate::registry;
 use crate::secrets::SecretStore;
 use crate::state::AppState;
+use base64::Engine as _;
 use serde::Serialize;
 use tauri::Manager;
 use std::net::ToSocketAddrs;
@@ -187,6 +188,68 @@ pub async fn pick_package(kind: Option<String>) -> Result<Option<String>> {
     .map_err(|e| Error::Msg(format!("package dialog failed: {e}")))?
 }
 
+fn safe_diagram_name(raw: &str, ext: &str) -> String {
+    let file = raw.rsplit(['/', '\\']).next().unwrap_or("diagram");
+    let stem = file.rsplit_once('.').map(|(name, _)| name).unwrap_or(file);
+    let cleaned: String = stem
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        .take(80)
+        .collect();
+    if cleaned.is_empty() {
+        format!("diagram.{ext}")
+    } else {
+        format!("{cleaned}.{ext}")
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn save_diagram(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    filename: String,
+    format: String,
+    content: String,
+) -> Result<Option<String>> {
+    registry::verified_manifest(&state.home, &app_id)?;
+    let (ext, label, bytes) = match format.to_ascii_lowercase().as_str() {
+        "svg" => ("svg", "SVG", content.into_bytes()),
+        "png" => {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(content.trim())
+                .map_err(|e| Error::Msg(format!("png decode failed: {e}")))?;
+            ("png", "PNG", decoded)
+        }
+        _ => return msg("unsupported diagram format"),
+    };
+    if bytes.len() > 20 * 1024 * 1024 {
+        return msg("diagram is too large to save");
+    }
+    let default_name = safe_diagram_name(&filename, ext);
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(mut path) = rfd::FileDialog::new()
+            .set_title("Сохранить схему")
+            .set_file_name(&default_name)
+            .add_filter(label, &[ext])
+            .save_file()
+        else {
+            return Ok(None);
+        };
+        let has_expected_ext = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case(ext))
+            .unwrap_or(false);
+        if !has_expected_ext {
+            path.set_extension(ext);
+        }
+        std::fs::write(&path, bytes)?;
+        Ok(Some(path.display().to_string()))
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("diagram save task failed: {e}")))?
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn remove_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<()> {
     let home = state.home.clone();
@@ -307,7 +370,11 @@ fn parse_host_port(url: &str) -> Option<(String, u16)> {
 
 #[tauri::command(rename_all = "snake_case")]
 pub fn secrets_list(state: tauri::State<'_, AppState>) -> Result<Vec<String>> {
-    SecretStore::new(&state.home).list()
+    Ok(SecretStore::new(&state.home)
+        .list()?
+        .into_iter()
+        .filter(|name| !name.starts_with("app."))
+        .collect())
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -318,6 +385,90 @@ pub fn secret_store(state: tauri::State<'_, AppState>, name: String, value: Stri
 #[tauri::command(rename_all = "snake_case")]
 pub fn secret_delete(state: tauri::State<'_, AppState>, name: String) -> Result<()> {
     SecretStore::new(&state.home).delete(&name)
+}
+
+fn declared_tool_secrets(
+    app: &crate::manifest::Manifest,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut out: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for tool in &app.tools {
+        for (env, secret) in &tool.secrets {
+            let entry = out.entry(secret.clone()).or_default();
+            if !entry.contains(env) {
+                entry.push(env.clone());
+            }
+        }
+    }
+    for envs in out.values_mut() {
+        envs.sort();
+    }
+    out
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn app_secrets(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+) -> Result<Vec<AppSecretInfo>> {
+    let app = registry::verified_manifest(&state.home, &app_id)?;
+    let secrets = SecretStore::new(&state.home);
+    let mut out = Vec::new();
+    for (name, envs) in declared_tool_secrets(&app) {
+        let scope = if secrets.load_scoped(&app_id, &name)?.is_some() {
+            "app"
+        } else if secrets.load(&name)?.is_some() {
+            "global"
+        } else {
+            "none"
+        };
+        out.push(AppSecretInfo {
+            name,
+            envs,
+            scope: scope.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn app_secret_set(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    name: String,
+    value: String,
+) -> Result<()> {
+    if value.is_empty() {
+        return msg("secret value is empty");
+    }
+    if manifest::is_reserved_secret(&name) {
+        return msg(format!("secret name '{name}' is reserved by the platform"));
+    }
+    let app = registry::verified_manifest(&state.home, &app_id)?;
+    if !declared_tool_secrets(&app).contains_key(&name) {
+        return msg(format!(
+            "secret '{name}' is not declared by the signed manifest of {app_id}"
+        ));
+    }
+    SecretStore::new(&state.home).store(
+        &SecretStore::scoped_name(&app_id, &name),
+        &value,
+    )
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn app_secret_delete(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    name: String,
+) -> Result<()> {
+    let app = registry::verified_manifest(&state.home, &app_id)?;
+    if !declared_tool_secrets(&app).contains_key(&name) {
+        return msg(format!(
+            "secret '{name}' is not declared by the signed manifest of {app_id}"
+        ));
+    }
+    SecretStore::new(&state.home).delete_scoped(&app_id, &name)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -471,7 +622,15 @@ pub fn cleanup_artifacts(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_host_port;
+    use super::{parse_host_port, safe_diagram_name};
+
+    #[test]
+    fn diagram_names_cannot_escape_or_keep_a_foreign_extension() {
+        assert_eq!(safe_diagram_name("../../evil.svg", "svg"), "evil.svg");
+        assert_eq!(safe_diagram_name("C:\\tmp\\chart.png", "png"), "chart.png");
+        assert_eq!(safe_diagram_name("", "svg"), "diagram.svg");
+        assert_eq!(safe_diagram_name("схема.svg", "svg"), "diagram.svg");
+    }
 
     #[test]
     fn parses_endpoints() {
@@ -496,6 +655,18 @@ pub struct McpServerInfo {
     pub id: String,
     pub url: String,
     pub has_token: bool,
+    pub allow_invalid_certs: bool,
+    /// `global`, `app` or `none`.
+    pub scope: String,
+    pub has_app_override: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppSecretInfo {
+    pub name: String,
+    pub envs: Vec<String>,
+    /// `global`, `app` or `none`.
+    pub scope: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -533,6 +704,9 @@ pub fn mcp_server_get(state: tauri::State<'_, AppState>, id: String) -> Result<M
         id: def.id,
         url: mask_url(&def.url),
         has_token: def.token.is_some(),
+        allow_invalid_certs: def.allow_invalid_certs,
+        scope: "global".to_string(),
+        has_app_override: false,
     })
 }
 
@@ -542,12 +716,14 @@ pub fn mcp_server_save(
     id: String,
     url: String,
     token: Option<String>,
+    allow_invalid_certs: Option<bool>,
 ) -> Result<()> {
     let secrets = SecretStore::new(&state.home);
     let def = mcp::ServerDef {
         id,
         url: url.trim().to_string(),
         token: token.filter(|t| !t.trim().is_empty()),
+        allow_invalid_certs: allow_invalid_certs.unwrap_or(false),
     };
     if def.url.is_empty() {
         return msg("mcp server url is empty");
@@ -560,25 +736,151 @@ pub fn mcp_server_delete(state: tauri::State<'_, AppState>, id: String) -> Resul
     mcp::delete(&SecretStore::new(&state.home), &id)
 }
 
+fn declared_mcp_ids(app: &crate::manifest::Manifest) -> Vec<String> {
+    app.connections
+        .iter()
+        .filter(|connection| connection.kind == "http-mcp")
+        .map(|connection| connection.id.clone())
+        .collect()
+}
+
+fn mcp_app_info(
+    home: &std::path::Path,
+    app: &crate::manifest::Manifest,
+    id: &str,
+) -> Result<McpServerInfo> {
+    let secrets = SecretStore::new(home);
+    let scoped = mcp::get_scoped(&secrets, &app.app_id, id)?;
+    let global = mcp::get(&secrets, id).ok();
+    let (def, scope, has_app_override) = match (scoped, global) {
+        (Some(def), _) => (Some(def), "app", true),
+        (None, Some(def)) => (Some(def), "global", false),
+        (None, None) => (None, "none", false),
+    };
+    Ok(McpServerInfo {
+        id: id.to_string(),
+        url: def.as_ref().map(|d| mask_url(&d.url)).unwrap_or_default(),
+        has_token: def.as_ref().and_then(|d| d.token.as_ref()).is_some(),
+        allow_invalid_certs: def.as_ref().map(|d| d.allow_invalid_certs).unwrap_or(false),
+        scope: scope.to_string(),
+        has_app_override,
+    })
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn mcp_app_servers(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+) -> Result<Vec<McpServerInfo>> {
+    let app = registry::verified_manifest(&state.home, &app_id)?;
+    let mut out = Vec::new();
+    for id in declared_mcp_ids(&app) {
+        out.push(mcp_app_info(&state.home, &app, &id)?);
+    }
+    Ok(out)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn mcp_app_server_save(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    id: String,
+    url: String,
+    token: Option<String>,
+    allow_invalid_certs: Option<bool>,
+) -> Result<()> {
+    let app = registry::verified_manifest(&state.home, &app_id)?;
+    if !declared_mcp_ids(&app).iter().any(|declared| declared == &id) {
+        return msg(format!(
+            "mcp server {id} is not declared by the signed manifest of {app_id}"
+        ));
+    }
+    let secrets = SecretStore::new(&state.home);
+    let existing = mcp::get_scoped(&secrets, &app_id, &id)?;
+    let global = mcp::get(&secrets, &id).ok();
+    let base_url = url.trim().to_string();
+    let resolved_url = if !base_url.is_empty() {
+        base_url
+    } else {
+        existing
+            .as_ref()
+            .map(|def| def.url.clone())
+            .or_else(|| global.as_ref().map(|def| def.url.clone()))
+            .ok_or_else(|| {
+                Error::Msg("mcp server url is empty: there is no existing value to keep".into())
+            })?
+    };
+    let token = match token {
+        Some(value) if value.trim().is_empty() => None,
+        Some(value) => Some(value),
+        None => existing
+            .as_ref()
+            .and_then(|def| def.token.clone())
+            .or_else(|| global.as_ref().and_then(|def| def.token.clone())),
+    };
+    let allow_invalid = allow_invalid_certs.unwrap_or_else(|| {
+        existing
+            .as_ref()
+            .map(|def| def.allow_invalid_certs)
+            .or_else(|| global.as_ref().map(|def| def.allow_invalid_certs))
+            .unwrap_or(false)
+    });
+    let def = mcp::ServerDef {
+        id,
+        url: resolved_url,
+        token,
+        allow_invalid_certs: allow_invalid,
+    };
+    mcp::put_for_app(&secrets, &app_id, &def)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn mcp_app_server_delete(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    id: String,
+) -> Result<()> {
+    mcp::delete_for_app(&SecretStore::new(&state.home), &app_id, &id)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn mcp_probe(app: tauri::AppHandle, id: String) -> Result<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let def = mcp::get(&SecretStore::new(&state.home), &id)?;
-        let session = McpSession::connect(def)?;
-        let tools = session.list_tools()?;
-        let names: Vec<serde_json::Value> = tools
-            .iter()
-            .map(|t| t.get("name").cloned().unwrap_or(serde_json::Value::Null))
-            .collect();
-        Ok(serde_json::json!({
-            "protocol": session.protocol,
-            "server": session.server,
-            "tools": names
-        }))
+        probe_mcp(def)
     })
     .await
     .map_err(|e| Error::Msg(format!("mcp probe task failed: {e}")))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn mcp_app_probe(
+    app: tauri::AppHandle,
+    app_id: String,
+    id: String,
+) -> Result<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let def = mcp::get_for_app(&SecretStore::new(&state.home), &app_id, &id)?;
+        probe_mcp(def)
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("mcp app probe task failed: {e}")))?
+}
+
+fn probe_mcp(def: mcp::ServerDef) -> Result<serde_json::Value> {
+    let session = McpSession::connect(def)?;
+    let tools = session.list_tools()?;
+    let names: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|t| t.get("name").cloned().unwrap_or(serde_json::Value::Null))
+        .collect();
+    Ok(serde_json::json!({
+        "protocol": session.protocol,
+        "server": session.server,
+        "tools": names
+    }))
 }
 #[tauri::command(rename_all = "snake_case")]
 pub async fn mcp_call(
