@@ -1,17 +1,290 @@
-use crate::artifacts;
+﻿use crate::artifacts;
 use crate::config::{self, UserConfig};
 use crate::error::{msg, Error, Result};
 use crate::manifest;
 use crate::mcp::{self, McpSession};
+use crate::permissions::{self, PendingPermission, PermissionBusEvent, PermissionContext, PermissionVerdict};
 use crate::registry;
 use crate::secrets::SecretStore;
 use crate::state::AppState;
+use crate::workspace;
 use base64::Engine as _;
 use serde::Serialize;
+use tauri::Emitter;
 use tauri::Manager;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+/// An unanswered approval must not block a chat forever. Thirty minutes is
+/// long enough for an operator to step away, but still fail-closed.
+const PERMISSION_TIMEOUT_SECS: u64 = 30 * 60;
+static PERMISSION_SWEEPER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn ensure_permission_sweeper(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    if PERMISSION_SWEEPER.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(30));
+        let state = app.state::<AppState>();
+        let now = artifacts::now_secs();
+        let expired: Vec<PendingPermission> = {
+            let Ok(pending) = state.pending_permissions.lock() else {
+                continue;
+            };
+            pending
+                .values()
+                .filter(|item| now.saturating_sub(item.created) >= PERMISSION_TIMEOUT_SECS)
+                .cloned()
+                .collect()
+        };
+        if expired.is_empty() {
+            continue;
+        }
+        let mut handled = std::collections::HashSet::new();
+        for item in expired {
+            if !handled.insert((item.app_id.clone(), item.session_id.clone())) {
+                continue;
+            }
+            let session = {
+                let Ok(engines) = state.engines.lock() else {
+                    continue;
+                };
+                engines.get(&item.app_id).map(|engine| engine.snapshot())
+            };
+            let pending: Vec<PendingPermission> = state
+                .pending_permissions
+                .lock()
+                .map(|map| {
+                    map.values()
+                        .filter(|entry| {
+                            entry.app_id == item.app_id && entry.session_id == item.session_id
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            // The whole session is cleared below, so every request it holds must
+            // get an answer: leaving one unanswered blocks the engine's turn.
+            if let Some(session) = session {
+                if session.session_id == item.session_id {
+                    for entry in &pending {
+                        let _ = session.reply_permission(&entry.id, "reject");
+                    }
+                }
+            }
+            for entry in &pending {
+                let decision = if entry.id == item.id {
+                    "timeout"
+                } else {
+                    "timeout_cascade"
+                };
+                audit_permission(&app, entry, decision, "timeout", None);
+            }
+            clear_pending_for_session(&app, &item.app_id, &item.session_id);
+        }
+    });
+}
+
+fn audit_permission(
+    app: &tauri::AppHandle,
+    pending: &PendingPermission,
+    decision: &str,
+    policy: &str,
+    grant_id: Option<&str>,
+) {
+    let state = app.state::<AppState>();
+    audit(
+        &state.home,
+        &pending.app_id,
+        serde_json::json!({
+            "type": "permission",
+            "ts": artifacts::now_secs(),
+            "app_id": pending.app_id,
+            "session_id": pending.session_id,
+            "permission_id": pending.id,
+            "action": pending.action,
+            "tool": pending.tool,
+            "stream": pending.stream,
+            "patterns": pending.patterns,
+            "decision": decision,
+            "policy": policy,
+            "grant_id": grant_id,
+            "package_exec": pending.package_exec,
+            "bin": pending.bin,
+            "bin_sha256": pending.bin_sha256
+        }),
+    );
+}
+
+fn emit_permission_resolved(app: &tauri::AppHandle, pending: &PendingPermission) {
+    let _ = app.emit(
+        "chat://permission_resolved",
+        serde_json::json!({
+            "app_id": pending.app_id,
+            "session": pending.session_id,
+            "permission_id": pending.id
+        }),
+    );
+}
+
+fn clear_pending_for_session(app: &tauri::AppHandle, app_id: &str, session_id: &str) {
+    let state = app.state::<AppState>();
+    let removed: Vec<PendingPermission> = {
+        let Ok(mut pending) = state.pending_permissions.lock() else {
+            return;
+        };
+        let ids: Vec<String> = pending
+            .iter()
+            .filter(|(_, item)| item.app_id == app_id && item.session_id == session_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| pending.remove(&id))
+            .collect()
+    };
+    for item in removed {
+        emit_permission_resolved(app, &item);
+    }
+}
+
+fn clear_pending_for_app(app: &tauri::AppHandle, app_id: &str) {
+    let state = app.state::<AppState>();
+    let removed: Vec<PendingPermission> = {
+        let Ok(mut pending) = state.pending_permissions.lock() else {
+            return;
+        };
+        let ids: Vec<String> = pending
+            .iter()
+            .filter(|(_, item)| item.app_id == app_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| pending.remove(&id))
+            .collect()
+    };
+    for item in removed {
+        emit_permission_resolved(app, &item);
+    }
+}
+
+fn clear_session_grants(state: &AppState, app_id: &str, session_id: Option<&str>) {
+    if let Ok(mut grants) = state.session_grants.lock() {
+        grants.retain(|_, grant| {
+            if grant.app_id != app_id {
+                return true;
+            }
+            session_id.map(|id| grant.session_id != id).unwrap_or(false)
+        });
+    }
+}
+
+/// Applies the configured policy and remembered grants. Returns whether the
+/// engine should be answered automatically or the request should be shown.
+fn handle_permission_event(
+    app: &tauri::AppHandle,
+    ctx: &PermissionContext,
+    event: PermissionBusEvent,
+) -> PermissionVerdict {
+    let state = app.state::<AppState>();
+    match event {
+        PermissionBusEvent::Replied(id) => {
+            let removed = {
+                let Ok(mut pending) = state.pending_permissions.lock() else {
+                    return PermissionVerdict::Pending;
+                };
+                pending.remove(&id)
+            };
+            if let Some(item) = removed {
+                emit_permission_resolved(app, &item);
+            }
+            PermissionVerdict::Pending
+        }
+        PermissionBusEvent::Updated(request) => {
+            // A late tool part revealed the target: refresh the card only.
+            let pending = PendingPermission::enrich(request, ctx);
+            let stored = {
+                let Ok(mut map) = state.pending_permissions.lock() else {
+                    return PermissionVerdict::Pending;
+                };
+                match map.get_mut(&pending.id) {
+                    Some(entry) => {
+                        *entry = pending.clone();
+                        Some(entry.clone())
+                    }
+                    None => None,
+                }
+            };
+            if let Some(item) = stored {
+                let _ = app.emit("chat://permission", &item);
+            }
+            PermissionVerdict::Pending
+        }
+        PermissionBusEvent::Asked(request) => {
+            let pending = PendingPermission::enrich(request, ctx);
+            let info = ctx.info(&pending.action);
+            let mode = permissions::mode_for_tool(&ctx.policy, &info);
+            if mode == permissions::PermissionMode::Allow {
+                audit_permission(app, &pending, "auto_allow", "policy_allow", None);
+                return PermissionVerdict::Once;
+            }
+            if mode == permissions::PermissionMode::Deny {
+                audit_permission(app, &pending, "reject", "policy_deny", None);
+                return PermissionVerdict::Reject;
+            }
+
+            let key = permissions::session_grant_key(
+                &pending.app_id,
+                &pending.session_id,
+                &pending.action,
+            );
+            let session_ok = state
+                .session_grants
+                .lock()
+                .ok()
+                .and_then(|grants| {
+                    grants
+                        .get(&key)
+                        .map(|grant| permissions::session_grant_matches(grant, &pending))
+                })
+                .unwrap_or(false);
+            if session_ok {
+                audit_permission(app, &pending, "auto_grant", "session_grant", None);
+                return PermissionVerdict::Once;
+            }
+
+            let cfg = config::load(&state.home);
+            let now = artifacts::now_secs();
+            if let Some(grant) = cfg
+                .permissions
+                .grants
+                .iter()
+                .find(|grant| permissions::grant_matches(grant, &pending, ctx, now))
+            {
+                audit_permission(
+                    app,
+                    &pending,
+                    "auto_grant",
+                    "grant",
+                    Some(&grant.id),
+                );
+                return PermissionVerdict::Once;
+            }
+
+            if let Ok(mut map) = state.pending_permissions.lock() {
+                map.insert(pending.id.clone(), pending.clone());
+            }
+            ensure_permission_sweeper(app);
+            let _ = app.emit("chat://permission", &pending);
+            PermissionVerdict::Pending
+        }
+    }
+}
+
 
 #[derive(Debug, Serialize)]
 pub struct PlatformInfo {
@@ -161,14 +434,22 @@ pub async fn install_app(
     let home = state.home.clone();
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        registry::install_with(&home, &src, |app_id| {
+        let installed = registry::install_with(&home, &src, |app_id| {
             // Verification and downgrade checks passed: only now stop the
             // target app's engine, right before its directory is replaced.
             let state = handle.state::<AppState>();
             if let Ok(mut engines) = state.engines.lock() {
                 engines.remove(app_id);
             };
-        })
+            clear_pending_for_app(&handle, app_id);
+        })?;
+        // A new package version invalidates workspace- and binary-bound grants
+        // until the operator approves it again. Do it only after the directory
+        // really changed: a failed replace keeps the old version installed.
+        permissions::revoke_app_grants(&home, &installed.app_id);
+        let state = handle.state::<AppState>();
+        clear_session_grants(&state, &installed.app_id, None);
+        Ok(installed)
     })
     .await
     .map_err(|e| Error::Msg(format!("install task failed: {e}")))?
@@ -251,12 +532,22 @@ pub async fn save_diagram(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn remove_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<()> {
+pub fn remove_app(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+) -> Result<()> {
     let home = state.home.clone();
     if let Ok(mut engines) = state.engines.lock() {
         engines.remove(&app_id);
     }
-    registry::remove(&home, &app_id)
+    let result = registry::remove(&home, &app_id);
+    if result.is_ok() {
+        permissions::revoke_app_grants(&home, &app_id);
+        clear_session_grants(&state, &app_id, None);
+        clear_pending_for_app(&app, &app_id);
+    }
+    result
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -266,6 +557,7 @@ pub fn app_history(state: tauri::State<'_, AppState>, app_id: String) -> Vec<reg
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn rollback_app(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     app_id: String,
     version: Option<String>,
@@ -274,11 +566,18 @@ pub async fn rollback_app(
     if let Ok(mut engines) = state.engines.lock() {
         engines.remove(&app_id);
     }
-    tauri::async_runtime::spawn_blocking(move || {
-        registry::rollback(&home, &app_id, version.as_deref())
+    let home_for_task = home.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        registry::rollback(&home_for_task, &app_id, version.as_deref())
     })
     .await
-    .map_err(|e| Error::Msg(format!("rollback task failed: {e}")))?
+    .map_err(|e| Error::Msg(format!("rollback task failed: {e}")))?;
+    if let Ok(installed) = &result {
+        permissions::revoke_app_grants(&home, &installed.app_id);
+        clear_session_grants(&state, &installed.app_id, None);
+        clear_pending_for_app(&app, &installed.app_id);
+    }
+    result
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -287,12 +586,24 @@ pub fn get_config(state: tauri::State<'_, AppState>) -> UserConfig {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn save_config(state: tauri::State<'_, AppState>, config: UserConfig) -> Result<()> {
+pub fn save_config(state: tauri::State<'_, AppState>, mut config: UserConfig) -> Result<()> {
+    // Grants belong to the broker. A settings save carries whatever snapshot the
+    // UI loaded at start-up, so trusting it would resurrect a revoked approval
+    // (and drop one granted since). Keep the grants that are on disk.
+    config.permissions.grants = config::load(&state.home).permissions.grants;
     config::save(&state.home, &config)?;
     // Engine config is generated at start, so running engines must be restarted
     // to pick up a new endpoint, model or key.
     if let Ok(mut engines) = state.engines.lock() {
         engines.clear();
+    }
+    // Stopping all engines also invalidates in-flight approvals and
+    // session-scoped grants; persistent grants stay in the config.
+    if let Ok(mut pending) = state.pending_permissions.lock() {
+        pending.clear();
+    }
+    if let Ok(mut grants) = state.session_grants.lock() {
+        grants.clear();
     }
     Ok(())
 }
@@ -493,6 +804,10 @@ pub fn close_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<()
     if let Ok(mut engines) = state.engines.lock() {
         engines.remove(&app_id);
     }
+    if let Ok(mut pending) = state.pending_permissions.lock() {
+        pending.retain(|_, item| item.app_id != app_id);
+    }
+    clear_session_grants(&state, &app_id, None);
     Ok(())
 }
 
@@ -503,9 +818,14 @@ pub fn close_all_apps(state: tauri::State<'_, AppState>) -> Result<()> {
     if let Ok(mut engines) = state.engines.lock() {
         engines.clear();
     }
+    if let Ok(mut pending) = state.pending_permissions.lock() {
+        pending.clear();
+    }
+    if let Ok(mut grants) = state.session_grants.lock() {
+        grants.clear();
+    }
     Ok(())
 }
-
 
 /// Lets the user pick the working folder for an app. The agent's file tools
 /// are confined to this folder.
@@ -524,6 +844,10 @@ pub async fn choose_workspace(
             return Ok(None);
         };
         config::set_workspace(&state.home, &app_id, &path)?;
+        // Workspace-scoped grants and in-flight approvals no longer apply.
+        permissions::revoke_app_grants(&state.home, &app_id);
+        clear_session_grants(&state, &app_id, None);
+        clear_pending_for_app(&app, &app_id);
         // Only this app's engine is bound to the old folder; keep other apps'
         // running turns alive.
         if let Ok(mut engines) = state.engines.lock() {
@@ -533,6 +857,151 @@ pub async fn choose_workspace(
     })
     .await
     .map_err(|e| Error::Msg(format!("workspace dialog failed: {e}")))?
+}
+
+/* ---------- workspace artifacts from the chat ---------- */
+
+/// Resolves a chat-supplied relative path before any shell action.
+fn workspace_target(home: &std::path::Path, app_id: &str, raw: &str) -> Result<std::path::PathBuf> {
+    manifest::parse_id(app_id, "app")?;
+    let workspace = config::workspace(home, app_id);
+    workspace::resolve(&workspace, raw)
+}
+
+fn audit_workspace(
+    home: &std::path::Path,
+    app_id: &str,
+    tool: &str,
+    raw: &str,
+    failed: bool,
+    problem: Option<String>,
+) {
+    audit(
+        home,
+        app_id,
+        serde_json::json!({
+            "ts": artifacts::now_secs(),
+            "app_id": app_id,
+            "source": "user",
+            "action": "workspace",
+            "tool": tool,
+            "path": raw.chars().take(400).collect::<String>(),
+            "failed": failed,
+            "problem": problem,
+        }),
+    );
+}
+
+/// Opens one artifact in its default handler. Executable and script extensions
+/// are refused even when a handler exists.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn workspace_file_open(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    path: String,
+) -> Result<()> {
+    let home = state.home.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| {
+            let target = workspace_target(&home, &app_id, &path)?;
+            if !workspace::openable(&target) {
+                return msg("this file type is not opened from the chat");
+            }
+            workspace::open_path(&target)
+        })();
+        audit_workspace(
+            &home,
+            &app_id,
+            "workspace_file_open",
+            &path,
+            result.is_err(),
+            result.as_ref().err().map(|e| e.to_string()),
+        );
+        result
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("open task failed: {e}")))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn workspace_file_reveal(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    path: String,
+) -> Result<()> {
+    let home = state.home.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| {
+            let target = workspace_target(&home, &app_id, &path)?;
+            workspace::reveal_path(&target)
+        })();
+        audit_workspace(
+            &home,
+            &app_id,
+            "workspace_file_reveal",
+            &path,
+            result.is_err(),
+            result.as_ref().err().map(|e| e.to_string()),
+        );
+        result
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("reveal task failed: {e}")))?
+}
+
+/// Saves a copy outside the workspace. Returns the chosen destination.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn workspace_file_save_copy(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    path: String,
+) -> Result<Option<String>> {
+    let home = state.home.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| {
+            let target = workspace_target(&home, &app_id, &path)?;
+            workspace::save_copy(&target)
+        })();
+        audit_workspace(
+            &home,
+            &app_id,
+            "workspace_file_save_copy",
+            &path,
+            result.is_err(),
+            result.as_ref().err().map(|e| e.to_string()),
+        );
+        Ok(result?.map(|value| value.display().to_string()))
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("save task failed: {e}")))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn workspace_open_folder(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+) -> Result<()> {
+    let home = state.home.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        manifest::parse_id(&app_id, "app")?;
+        let workspace = config::workspace(&home, &app_id);
+        let result = if workspace.is_dir() {
+            workspace::open_path(&workspace)
+        } else {
+            msg("workspace folder does not exist")
+        };
+        audit_workspace(
+            &home,
+            &app_id,
+            "workspace_open_folder",
+            "",
+            result.is_err(),
+            result.as_ref().err().map(|e| e.to_string()),
+        );
+        result
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("folder task failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -622,7 +1091,7 @@ pub fn cleanup_artifacts(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_host_port, safe_diagram_name};
+    use super::{parse_host_port, read_tail, safe_diagram_name};
 
     #[test]
     fn diagram_names_cannot_escape_or_keep_a_foreign_extension() {
@@ -630,6 +1099,38 @@ mod tests {
         assert_eq!(safe_diagram_name("C:\\tmp\\chart.png", "png"), "chart.png");
         assert_eq!(safe_diagram_name("", "svg"), "diagram.svg");
         assert_eq!(safe_diagram_name("схема.svg", "svg"), "diagram.svg");
+    }
+
+    #[test]
+    fn audit_tail_reads_the_end_of_a_large_journal() {
+        let dir = std::env::temp_dir().join(format!(
+            "eco-audit-tail-{}-{}",
+            std::process::id(),
+            crate::artifacts::now_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.jsonl");
+        let mut text = String::new();
+        for line in 0..4000 {
+            text.push_str(&format!(
+                "{{\"ts\":{line},\"pad\":\"{}\"}}\n",
+                "x".repeat(60)
+            ));
+        }
+        std::fs::write(&path, &text).unwrap();
+        assert!(text.len() > 64 * 1024);
+
+        let tail = read_tail(&path, 3).unwrap();
+        assert_eq!(tail.len(), 3);
+        assert!(tail[2].contains("\"ts\":3999"));
+        assert!(tail[0].contains("\"ts\":3997"));
+
+        let all = read_tail(&path, 5000).unwrap();
+        assert_eq!(all.len(), 4000);
+        assert!(all[0].contains("\"ts\":0"));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -903,24 +1404,55 @@ pub async fn mcp_call(
     .await
     .map_err(|e| Error::Msg(format!("mcp call task failed: {e}")))?
 }
+/// Reads only the tail of an append-only journal: the audit log grows without
+/// rotation, so a full read per settings open would get slower every week.
+fn read_tail(path: &std::path::Path, limit: usize) -> Result<Vec<String>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    if size == 0 {
+        return Ok(Vec::new());
+    }
+    let mut take = (64 * 1024u64).min(size);
+    loop {
+        let start = size.saturating_sub(take);
+        file.seek(SeekFrom::Start(start))?;
+        let mut buf = Vec::with_capacity(take as usize);
+        file.read_to_end(&mut buf)?;
+        let text = String::from_utf8_lossy(&buf);
+        let mut found: Vec<String> = text.lines().map(str::to_string).collect();
+        // A non-zero start usually lands mid-line; drop that fragment.
+        if start > 0 && !found.is_empty() {
+            found.remove(0);
+        }
+        if start == 0 || found.len() >= limit {
+            if found.len() > limit {
+                let cut = found.len() - limit;
+                found.drain(0..cut);
+            }
+            return Ok(found);
+        }
+        take = (take * 2).min(size);
+    }
+}
+
 #[tauri::command(rename_all = "snake_case")]
-pub fn audit_tail(
+pub async fn audit_tail(
     state: tauri::State<'_, AppState>,
     app_id: String,
     limit: Option<usize>,
 ) -> Result<Vec<String>> {
     manifest::parse_id(&app_id, "app")?;
-    let path = state.home.join("audit").join(format!("{app_id}.jsonl"));
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let raw = std::fs::read_to_string(path)?;
-    let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
-    let limit = limit.unwrap_or(20).min(200);
-    if lines.len() > limit {
-        lines = lines.split_off(lines.len() - limit);
-    }
-    Ok(lines)
+    let home = state.home.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = home.join("audit").join(format!("{app_id}.jsonl"));
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        read_tail(&path, limit.unwrap_or(20).min(200))
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("audit tail failed: {e}")))?
 }
 
 /// Keeps the secret part of an MCP URL out of the UI and out of logs.
@@ -1043,6 +1575,11 @@ pub fn chat_send(
     }
     crate::engine::validate_attachments(&attachments, caps.vision)?;
 
+    // Resolve the tool contract once per turn. The map is used by both the
+    // approval broker and the engine's permission config, so it is verified
+    // before the sidecar runs.
+    let permission_ctx = PermissionContext::load(&state.home, &app_id)?;
+
     if let Some(variant) = variant.as_deref() {
         if !caps.allows_variant(variant) {
             return msg(if caps.reasoning {
@@ -1055,6 +1592,17 @@ pub fn chat_send(
 
 
 
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // With approvals enabled the event stream is part of the tool contract:
+    // without it a permission ask cannot be answered, so fail closed before
+    // sending the prompt.
+    let stream = session
+        .event_stream()
+        .map_err(|e| Error::Msg(format!("live event stream is unavailable: {e}")))?;
+    let stop_stream = Arc::new(AtomicBool::new(false));
+
     let busy_key = format!("{}:{}", app_id, session.session_id);
     {
         let mut busy = state
@@ -1066,10 +1614,6 @@ pub fn chat_send(
         }
     }
 
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use tauri::Emitter;
-
     let _ = app.emit(
         "chat://busy",
         serde_json::json!({
@@ -1079,19 +1623,21 @@ pub fn chat_send(
         }),
     );
 
-    let stop_stream = Arc::new(AtomicBool::new(false));
-
     // Subscribe to the engine bus before sending the prompt so reasoning and
     // the first text deltas are not lost. The final authoritative history is
     // still fetched when the prompt call returns.
-    if let Ok(stream) = session.event_stream() {
-        let stream_stop = stop_stream.clone();
-        let stream_app = app.clone();
-        let stream_app_id = app_id.clone();
-        let stream_session = session.clone();
-        let stream_id = session.session_id.clone();
-        std::thread::spawn(move || {
-            let result = stream_session.consume_events(stream, &stream_stop, |items| {
+    let stream_stop = stop_stream.clone();
+    let stream_app = app.clone();
+    let permission_app = app.clone();
+    let permission_ctx = permission_ctx.clone();
+    let stream_app_id = app_id.clone();
+    let stream_session = session.clone();
+    let stream_id = session.session_id.clone();
+    std::thread::spawn(move || {
+        let result = stream_session.consume_events(
+            stream,
+            &stream_stop,
+            |items| {
                 let _ = stream_app.emit(
                     "chat://stream",
                     serde_json::json!({
@@ -1100,14 +1646,14 @@ pub fn chat_send(
                         "items": items
                     }),
                 );
-            });
-            if let Err(e) = result {
-                eprintln!("chat event stream failed: {e}");
-            }
-        });
-    } else {
-        eprintln!("chat event stream unavailable: live deltas disabled");
-    }
+            },
+            move |event| handle_permission_event(&permission_app, &permission_ctx, event),
+        );
+        if let Err(e) = result {
+            eprintln!("chat event stream failed: {e}");
+        }
+    });
+
 
     std::thread::spawn(move || {
         let title_source = if text.trim().is_empty() {
@@ -1146,6 +1692,7 @@ pub fn chat_send(
                 );
             }
         }
+        clear_pending_for_session(&app, &app_id, &session.session_id);
         if let Ok(mut busy) = app.state::<AppState>().busy.lock() {
             busy.remove(&busy_key);
         }
@@ -1161,6 +1708,165 @@ pub fn chat_send(
 
     Ok(())
 }
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn chat_permission(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    session_id: String,
+    permission_id: String,
+    decision: String,
+) -> Result<()> {
+    let pending = {
+        let map = state
+            .pending_permissions
+            .lock()
+            .map_err(|_| Error::Msg("permission lock poisoned".to_string()))?;
+        map.get(&permission_id)
+            .cloned()
+            .ok_or_else(|| Error::Msg("permission request is no longer pending".to_string()))?
+    };
+    if pending.app_id != app_id || pending.session_id != session_id {
+        return msg("permission request belongs to another app or session");
+    }
+
+    let session = {
+        let engines = engines_lock(&state)?;
+        let engine = engines
+            .get(&app_id)
+            .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
+        if engine.session_id != session_id {
+            return msg("the active chat session changed");
+        }
+        engine.snapshot()
+    };
+
+    match decision.as_str() {
+        "once" => {
+            session.reply_permission(&permission_id, "once")?;
+            audit_permission(&app, &pending, "allow_once", "operator", None);
+        }
+        "session" => {
+            if !pending.can_session {
+                return msg("session grants are not available for this tool");
+            }
+            if let Ok(mut grants) = state.session_grants.lock() {
+                let key = permissions::session_grant_key(
+                    &pending.app_id,
+                    &pending.session_id,
+                    &pending.action,
+                );
+                grants.insert(
+                    key,
+                    permissions::SessionGrant {
+                        app_id: pending.app_id.clone(),
+                        session_id: pending.session_id.clone(),
+                        action: pending.action.clone(),
+                        created: artifacts::now_secs(),
+                    },
+                );
+            }
+            session.reply_permission(&permission_id, "once")?;
+            audit_permission(&app, &pending, "allow_session", "operator", None);
+        }
+        "always" => {
+            if !pending.can_always {
+                return msg("persistent grants are not available for this tool");
+            }
+            let ctx = PermissionContext::load(&state.home, &app_id)?;
+            let grant = permissions::new_grant(&pending, &ctx)
+                .ok_or_else(|| Error::Msg("cannot build a permission grant".to_string()))?;
+            let grant_id = grant.id.clone();
+            let mut cfg = config::load(&state.home);
+            permissions::upsert_grant(&mut cfg, grant);
+            config::save(&state.home, &cfg)?;
+            session.reply_permission(&permission_id, "once")?;
+            audit_permission(
+                &app,
+                &pending,
+                "allow_always",
+                "operator",
+                Some(&grant_id),
+            );
+        }
+        "reject" => {
+            session.reply_permission(&permission_id, "reject")?;
+            audit_permission(&app, &pending, "reject", "operator", None);
+            let cascaded: Vec<PendingPermission> = state
+                .pending_permissions
+                .lock()
+                .map(|map| {
+                    map.values()
+                        .filter(|item| {
+                            item.session_id == session_id && item.id != permission_id
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            for item in cascaded {
+                // The turn is being torn down; answer every id or the engine
+                // keeps waiting for a decision that will never arrive.
+                let _ = session.reply_permission(&item.id, "reject");
+                audit_permission(&app, &item, "reject_cascade", "operator_reject", None);
+            }
+            clear_pending_for_session(&app, &app_id, &session_id);
+            return Ok(());
+        }
+        _ => return msg("unknown permission decision"),
+    }
+
+    if let Ok(mut map) = state.pending_permissions.lock() {
+        map.remove(&permission_id);
+    }
+    emit_permission_resolved(&app, &pending);
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn permission_grants(
+    state: tauri::State<'_, AppState>,
+    app_id: Option<String>,
+) -> Vec<permissions::PermissionGrant> {
+    let cfg = config::load(&state.home);
+    cfg.permissions
+        .grants
+        .into_iter()
+        .filter(|grant| app_id.as_deref().map(|id| grant.app_id == id).unwrap_or(true))
+        .collect()
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn permission_revoke_grant(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<()> {
+    let mut cfg = config::load(&state.home);
+    let app_id = cfg
+        .permissions
+        .grants
+        .iter()
+        .find(|grant| grant.id == id)
+        .map(|grant| grant.app_id.clone());
+    let Some(app_id) = app_id else {
+        return msg("permission grant not found");
+    };
+    cfg.permissions.grants.retain(|grant| grant.id != id);
+    config::save(&state.home, &cfg)?;
+    audit(
+        &state.home,
+        &app_id,
+        serde_json::json!({
+            "type": "permission",
+            "ts": artifacts::now_secs(),
+            "decision": "revoke_grant",
+            "grant_id": id
+        }),
+    );
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 pub struct ChatStatus {
     pub busy: bool,
@@ -1191,12 +1897,20 @@ pub fn chat_status(
     Ok(ChatStatus { busy })
 }
 #[tauri::command(rename_all = "snake_case")]
-pub fn chat_abort(state: tauri::State<'_, AppState>, app_id: String) -> Result<()> {
-    let engines = engines_lock(&state)?;
-    let engine = engines
-        .get(&app_id)
-        .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
-    engine.snapshot().abort()
+pub fn chat_abort(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+) -> Result<()> {
+    {
+        let engines = engines_lock(&state)?;
+        let engine = engines
+            .get(&app_id)
+            .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
+        engine.snapshot().abort()?;
+    }
+    clear_pending_for_app(&app, &app_id);
+    Ok(())
 }
 #[tauri::command(rename_all = "snake_case")]
 pub async fn chat_list(
@@ -1281,6 +1995,8 @@ pub async fn chat_delete(
             (engine.snapshot(), engine.session_id == session_id)
         };
         session.delete_session(&session_id)?;
+        clear_session_grants(&state, &app_id, Some(&session_id));
+        clear_pending_for_session(&app, &app_id, &session_id);
         let next = if was_current {
             let sessions = session.sessions()?;
             Some(match sessions.first() {
@@ -1334,6 +2050,8 @@ pub async fn chat_reset(app: tauri::AppHandle, app_id: String) -> Result<()> {
             engine.snapshot()
         };
         let id = session.new_session("chat")?;
+        clear_session_grants(&state, &app_id, None);
+        clear_pending_for_app(&app, &app_id);
         let mut engines = engines_lock(&state)?;
         let engine = engines
             .get_mut(&app_id)
@@ -1351,9 +2069,11 @@ pub async fn chat_stop(app: tauri::AppHandle, app_id: String) -> Result<()> {
         let state = app.state::<AppState>();
         let mut engines = engines_lock(&state)?;
         engines.remove(&app_id);
+        drop(engines);
+        clear_session_grants(&state, &app_id, None);
+        clear_pending_for_app(&app, &app_id);
         Ok(())
     })
     .await
     .map_err(|e| Error::Msg(format!("chat stop task failed: {e}")))?
 }
-

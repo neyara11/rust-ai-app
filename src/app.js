@@ -76,7 +76,7 @@ const browserMock = (() => {
           {
             role: "assistant",
             kind: "text",
-            text: "### Готово\n\nСоздал в рабочей папке:\n\n- `report.md` — план проверки\n- `report.docx` — Word-версия через `docx_export`\n\nФайлы можно править и пересобирать.\n\n```mermaid\nflowchart LR\n  A[report.md] --> B[docx_export]\n  B --> C[report.docx]\n```\n\n```chart\n{\"type\":\"bar\",\"labels\":[\"read\",\"write\"],\"datasets\":[{\"label\":\"files\",\"data\":[2,1]}]}\n```\n\n```mermaid\nxychart-beta\n    title \"Sales\"\n    x-axis [янв, фев, мар]\n    y-axis \"k\" 0 --> 250\n    bar [120, 170, 100]\n```",
+            text: "### Готово\n\nСоздал в рабочей папке:\n\n- `report.md` — план проверки\n- `report.docx` — Word-версия через `docx_export`\n\n| Файл | Что внутри | Размер |\n| --- | --- | --- |\n| `report.md` | план проверки | 2.1 КБ |\n| `report.docx` | Word-версия | 14.8 КБ |\n\n```sql\nSELECT pid, mode FROM pg_locks WHERE NOT granted;\n```\n\nФайлы можно править и пересобирать.\n\n```mermaid\nflowchart LR\n  A[report.md] --> B[docx_export]\n  B --> C[report.docx]\n```\n\n```chart\n{\"type\":\"bar\",\"labels\":[\"read\",\"write\"],\"datasets\":[{\"label\":\"files\",\"data\":[2,1]}]}\n```\n\n```mermaid\nxychart-beta\n    title \"Sales\"\n    x-axis [янв, фев, мар]\n    y-axis \"k\" 0 --> 250\n    bar [120, 170, 100]\n```",
             tokens_in: 980,
             tokens_out: 210,
             reasoning_tokens: 120,
@@ -100,6 +100,22 @@ const browserMock = (() => {
   let secrets = ["llm_api_key"];
   let mcpServers = ["context7"];
   let packManifest = false;
+  let permissionGrants = [
+    {
+      id: "pg_demo",
+      app_id: "doc-writer",
+      action: "platform_write_file",
+      tool: "write_file",
+      stream: "write",
+      app_version: "0.1.0",
+      workspace: "D:\\work\\doc-writer",
+      mode: "corporate",
+      bin: null,
+      bin_sha256: null,
+      created: 1700000000,
+      expires: null,
+    },
+  ];
   let config = {
     llm_endpoint: "https://llm-gateway.internal/v1",
     llm_model: "~deepseek/deepseek-v4-flash-latest",
@@ -241,6 +257,19 @@ const browserMock = (() => {
         };
       case "choose_workspace":
         return `D:\\work\\${args.app_id}`;
+      case "workspace_file_open":
+      case "workspace_file_reveal":
+      case "workspace_open_folder":
+        return null;
+      case "workspace_file_save_copy":
+        return `D:\\Downloads\\${String(args.path || "artifact").split("/").pop()}`;
+      case "permission_grants":
+        return permissionGrants.filter(
+          (grant) => !args.app_id || grant.app_id === args.app_id,
+        );
+      case "permission_revoke_grant":
+        permissionGrants = permissionGrants.filter((grant) => grant.id !== args.id);
+        return null;
       case "close_app":
       case "close_all_apps":
       case "chat_stop":
@@ -411,6 +440,7 @@ const ctx = {
   appMeta: null,
   config: null,
   attachments: [],
+  pendingPermissions: [],
 };
 
 const THEME_KEY = "theme";
@@ -681,6 +711,10 @@ async function closeApp() {
       await invoke("close_app", { app_id: ctx.appId });
     }
     await invoke("close_all_apps");
+    ctx.pendingPermissions = (ctx.pendingPermissions || []).filter(
+      (item) => item.app_id !== ctx.appId,
+    );
+    renderPermissionPrompt();
     ctx.appId = null;
     ctx.appMeta = null;
     $("apps-panel").hidden = false;
@@ -702,6 +736,34 @@ async function pickWorkspace() {
   await closeApp();
   await openApp(appId);
   toast(`Рабочая папка: ${path}`);
+}
+
+async function openWorkspaceFile(name, action) {
+  if (!name || !ctx.appId) return;
+  try {
+    if (action === "reveal") {
+      await invoke("workspace_file_reveal", { app_id: ctx.appId, path: name });
+      toast(`Показано в папке: ${name}`);
+    } else if (action === "save") {
+      const dest = await invoke("workspace_file_save_copy", { app_id: ctx.appId, path: name });
+      toast(dest ? `Копия сохранена: ${dest}` : "Сохранение отменено");
+    } else {
+      await invoke("workspace_file_open", { app_id: ctx.appId, path: name });
+      toast(`Открываю ${name}`);
+    }
+  } catch (e) {
+    toast(String(e), true);
+  }
+}
+
+async function openWorkspaceFolder() {
+  if (!ctx.appId) return;
+  try {
+    await invoke("workspace_open_folder", { app_id: ctx.appId });
+    toast("Открываю рабочую папку");
+  } catch (e) {
+    toast(String(e), true);
+  }
 }
 
 async function removeApp(appId) {
@@ -736,14 +798,130 @@ function escapeHtml(value) {
   }[ch]));
 }
 
+function unescapeHtml(value) {
+  return String(value).replace(/&(amp|lt|gt|quot|#39);/g, (_, key) => ({
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: '"',
+    "#39": "'",
+  }[key]));
+}
+
+// Workspace artifacts the agent mentions become actionable chips. Only
+// document, image and text extensions are offered; the backend re-checks the
+// path and refuses to shell-open scripts and executables.
+const WS_FILE_EXT =
+  /\.(md|markdown|txt|log|csv|tsv|json|jsonl|yaml|yml|xml|css|pdf|docx|xlsx|pptx|odt|ods|png|jpe?g|gif|webp|bmp|drawio)$/i;
+
+// Input is already HTML-escaped by renderMarkdown, so the value is reused as is.
+function workspaceFileRef(value) {
+  const raw = String(value).trim();
+  if (!raw || raw.length > 200 || /[\s<>]/.test(raw)) return "";
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.includes("..")) return "";
+  if (!WS_FILE_EXT.test(raw)) return "";
+  return raw.replace(/^\.\//, "");
+}
+
+const WS_ICON_REVEAL =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>';
+const WS_ICON_SAVE =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v10" /><path d="M8 11l4 4 4-4" /><path d="M4 20h16" /></svg>';
+
+function fileChipHtml(name) {
+  return `<span class="ws-file"><button type="button" class="ws-file-name" data-ws-file="${name}" title="Открыть файл">${name}</button><button type="button" class="ws-file-act" data-ws-file="${name}" data-ws-action="reveal" title="Показать в папке" aria-label="Показать ${name} в папке">${WS_ICON_REVEAL}</button><button type="button" class="ws-file-act" data-ws-file="${name}" data-ws-action="save" title="Сохранить копию…" aria-label="Сохранить копию ${name}">${WS_ICON_SAVE}</button></span>`;
+}
+
+function linkifyBareFiles(text) {
+  return text.replace(
+    /(?<![\w.\-/])((?:[\w.-]+\/)*[\w.-]+\.[A-Za-z0-9]{1,6})(?![\w-])/g,
+    (match, token) => {
+      const name = workspaceFileRef(token);
+      return name ? fileChipHtml(name) : match;
+    },
+  );
+}
+
 function inlineMd(text) {
   return text
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .split(/(`[^`]+`)/)
+    .map((part) => {
+      if (part.length > 2 && part.startsWith("`") && part.endsWith("`")) {
+        const inner = part.slice(1, -1);
+        const name = workspaceFileRef(inner);
+        return name ? fileChipHtml(name) : `<code>${inner}</code>`;
+      }
+      return linkifyBareFiles(part);
+    })
+    .join("")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/\*([^*]+)\*/g, "<em>$1</em>");
 }
 
 const DIAGRAM_KINDS = new Set(["mermaid", "chart"]);
+
+/* ---------- syntax highlighting (offline, vendored highlight.js) ---------- */
+
+const HLJS_MAX_CHARS = 60000;
+const HLJS_AUTO_LANGS = [
+  "javascript",
+  "typescript",
+  "python",
+  "rust",
+  "bash",
+  "powershell",
+  "json",
+  "yaml",
+  "sql",
+  "xml",
+  "css",
+  "ini",
+];
+const HLJS_LANG_ALIAS = {
+  "c++": "cpp",
+  cplusplus: "cpp",
+  "c#": "csharp",
+  cs: "csharp",
+  "objective-c": "objectivec",
+  golang: "go",
+  rs: "rust",
+  kt: "kotlin",
+  py: "python",
+  md: "markdown",
+  yml: "yaml",
+  jsonc: "json",
+  json5: "json",
+  toml: "ini",
+  env: "ini",
+  dotenv: "ini",
+  conf: "ini",
+  console: "shell",
+  terminal: "shell",
+  "shell-session": "shell",
+  cmd: "powershell",
+  bat: "powershell",
+  batch: "powershell",
+};
+
+// Fence text is HTML-escaped by renderMarkdown, while highlight.js expects raw
+// source and escapes its own output.
+function highlightCode(raw, lang) {
+  const hljs = window.hljs;
+  if (!hljs || raw.length > HLJS_MAX_CHARS) return "";
+  const normalized = lang ? HLJS_LANG_ALIAS[lang] || lang : "";
+  try {
+    if (normalized && hljs.getLanguage(normalized)) {
+      return hljs.highlight(raw, { language: normalized, ignoreIllegals: true }).value;
+    }
+    // Guessing on a two-word snippet paints noise, so only auto-detect
+    // unlabelled blocks that are long enough to have a shape — and short enough
+    // to stay cheap while a message is still streaming.
+    if (normalized || raw.trim().length < 40 || raw.length > 4000) return "";
+    return hljs.highlightAuto(raw, HLJS_AUTO_LANGS).value;
+  } catch (_) {
+    return "";
+  }
+}
 
 function diagramBlockHtml(kind, code) {
   const label = kind === "mermaid" ? "Mermaid" : "Chart.js";
@@ -760,7 +938,55 @@ function diagramBlockHtml(kind, code) {
   </div>`;
 }
 
-function renderMarkdown(source) {
+function splitTableRow(line) {
+  const raw = line.trim();
+  const cells = [];
+  let cell = "";
+  let inCode = false;
+  for (const ch of raw) {
+    if (ch === "`") inCode = !inCode;
+    if (ch === "|" && !inCode) {
+      cells.push(cell);
+      cell = "";
+    } else {
+      cell += ch;
+    }
+  }
+  cells.push(cell);
+  if (raw.startsWith("|")) cells.shift();
+  if (raw.endsWith("|")) cells.pop();
+  return cells.map((value) => value.trim());
+}
+
+function tableAlignment(cell) {
+  const value = cell.trim();
+  if (!/^:?-{3,}:?$/.test(value)) return null;
+  const left = value.startsWith(":");
+  const right = value.endsWith(":");
+  if (left && right) return "center";
+  if (right) return "right";
+  if (left) return "left";
+  return "";
+}
+
+function tableHtml(headers, aligns, rows) {
+  const cell = (tag, value, align) =>
+    `<${tag}${align ? ` style="text-align:${align}"` : ""}>${inlineMd(value || "")}</${tag}>`;
+  const head = headers.map((value, index) => cell("th", value, aligns[index])).join("");
+  const body = rows
+    .map(
+      (row) =>
+        `<tr>${headers
+          .map((_, index) => cell("td", row[index] || "", aligns[index]))
+          .join("")}</tr>`,
+    )
+    .join("");
+  return `<div class="md-table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function renderMarkdown(source, options) {
+  const opts = options || {};
+  const highlight = opts.highlight !== false;
   const lines = escapeHtml(source).split("\n");
   let html = "";
   let inCode = false;
@@ -778,15 +1004,26 @@ function renderMarkdown(source) {
     if (DIAGRAM_KINDS.has(codeLang) && body.trim()) {
       html += diagramBlockHtml(codeLang, body);
     } else if (body) {
-      const lang = codeLang ? ` class="language-${escapeHtml(codeLang)}"` : "";
-      html += `<pre><code${lang}>${body}</code></pre>`;
+      const label = codeLang || "code";
+      const highlighted = highlight ? highlightCode(unescapeHtml(body), codeLang) : "";
+      const classes = [codeLang ? `language-${codeLang}` : "", highlighted ? "hljs" : ""]
+        .filter(Boolean)
+        .join(" ");
+      const attr = classes ? ` class="${escapeHtml(classes)}"` : "";
+      html += `<div class="md-code">
+        <div class="md-code-head">
+          <span>${escapeHtml(label)}</span>
+          <button class="ghost small" type="button" data-copy-code>Копировать</button>
+        </div>
+        <pre><code${attr}>${highlighted || body}</code></pre>
+      </div>`;
     }
     code = [];
     codeLang = "";
   };
 
-  for (const raw of lines) {
-    const line = raw.replace(/\s+$/, "");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].replace(/\s+$/, "");
     if (line.trimStart().startsWith("```")) {
       if (inCode) {
         flushCode();
@@ -806,6 +1043,33 @@ function renderMarkdown(source) {
       closeList();
       continue;
     }
+
+    if (line.includes("|") && i + 1 < lines.length) {
+      const delimiter = lines[i + 1].replace(/\s+$/, "");
+      if (delimiter.includes("|")) {
+        const headers = splitTableRow(line);
+        const aligns = splitTableRow(delimiter).map(tableAlignment);
+        if (
+          headers.length &&
+          aligns.length === headers.length &&
+          aligns.every((align) => align !== null)
+        ) {
+          closeList();
+          const rows = [];
+          let next = i + 2;
+          while (next < lines.length) {
+            const row = lines[next].replace(/\s+$/, "");
+            if (!row.trim() || !row.includes("|")) break;
+            rows.push(splitTableRow(row));
+            next += 1;
+          }
+          html += tableHtml(headers, aligns, rows);
+          i = next - 1;
+          continue;
+        }
+      }
+    }
+
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       closeList();
@@ -1165,7 +1429,7 @@ function chatItemKey(item) {
   ].join("\u0001");
 }
 
-function buildChatNode(item) {
+function buildChatNode(item, streaming) {
   if (item.role === "tool") {
     const div = document.createElement("div");
     div.className = "msg tool";
@@ -1191,7 +1455,7 @@ function buildChatNode(item) {
     summary.textContent = "Ход размышлений модели";
     const body = document.createElement("div");
     body.className = "msg-body";
-    body.innerHTML = renderMarkdown(item.text);
+    body.innerHTML = renderMarkdown(item.text, { highlight: !streaming });
     details.appendChild(summary);
     details.appendChild(body);
     return details;
@@ -1204,7 +1468,7 @@ function buildChatNode(item) {
   if (item.role === "user") {
     body.textContent = item.text;
   } else {
-    body.innerHTML = renderMarkdown(item.text);
+    body.innerHTML = renderMarkdown(item.text, { highlight: !streaming });
   }
   div.appendChild(body);
 
@@ -1279,7 +1543,10 @@ function renderChat(items) {
     // deltas are not missed. Older items are stable and keyed cheaply.
     if (i < items.length - 1 && entry && entry.fingerprint === fingerprint && entry.node === current) continue;
 
-    const node = buildChatNode(items[i]);
+    // Live snapshots arrive every 80 ms: skip highlighting the growing message
+    // and let the final `chat://update` render it once.
+    const streaming = !!ctx.busy && !!ctx.acceptStream && i === items.length - 1;
+    const node = buildChatNode(items[i], streaming);
     if (entry && entry.node && entry.node.tagName === "DETAILS" && entry.node.open) {
       node.open = true;
     }
@@ -1466,6 +1733,7 @@ async function ensureChat() {
     await invoke("chat_select", { app_id: ctx.appId, session_id: ctx.chatId });
   }
   await loadHistory();
+  renderPermissionPrompt();
   return ctx.chat;
 }
 
@@ -1480,6 +1748,7 @@ async function newChat() {
     setBusy(false);
     renderChat([]);
     await refreshChats();
+    renderPermissionPrompt();
   });
 }
 
@@ -1491,6 +1760,7 @@ async function selectChat(sessionId) {
     setBusy(false);
     await loadHistory();
     renderChatList();
+    renderPermissionPrompt();
   });
 }
 
@@ -1501,6 +1771,10 @@ async function deleteChat(sessionId) {
     ctx.chatId = info.session;
     await refreshChats();
     await loadHistory();
+    ctx.pendingPermissions = (ctx.pendingPermissions || []).filter(
+      (item) => item.session_id !== sessionId,
+    );
+    renderPermissionPrompt();
   });
 }
 
@@ -1673,6 +1947,107 @@ async function stopChat() {
   });
 }
 
+// Metadata keys that may carry file bodies; the permission card never renders
+// them, even if an engine puts them into the request metadata.
+const PERMISSION_CONTENT_KEYS = new Set([
+  "content",
+  "newString",
+  "oldString",
+  "diff",
+  "patch",
+  "text",
+  "body",
+]);
+
+function permissionForThisChat() {
+  return (ctx.pendingPermissions || []).filter(
+    (item) =>
+      item.app_id === ctx.appId &&
+      (!item.session_id || item.session_id === ctx.chatId),
+  );
+}
+
+function renderPermissionPrompt() {
+  const box = $("chat-permission");
+  if (!box) return;
+  const pending = permissionForThisChat();
+  if (!pending.length) {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+  const item = pending[0];
+  const stream = item.stream === "exec" ? "exec" : item.stream === "write" ? "запись" : "инструмент";
+  const patterns = (item.patterns || []).filter(Boolean);
+  const scope =
+    patterns.length && !(patterns.length === 1 && patterns[0] === "*")
+      ? patterns.join(", ")
+      : "рабочая папка";
+  const signed = item.package_exec
+    ? "исполняемый инструмент пакета"
+    : item.stream === "exec"
+      ? "exec из рабочей папки"
+      : item.bin
+        ? "инструмент пакета"
+        : "инструмент платформы";
+  const target =
+    item.metadata && typeof item.metadata === "object" && typeof item.metadata.target === "string"
+      ? item.metadata.target.trim()
+      : "";
+  const rest = {};
+  if (item.metadata && typeof item.metadata === "object") {
+    for (const [key, value] of Object.entries(item.metadata)) {
+      if (key === "target" || PERMISSION_CONTENT_KEYS.has(key)) continue;
+      rest[key] = value;
+    }
+  }
+  const meta = Object.keys(rest).length ? JSON.stringify(rest) : "";
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="chat-permission-head">
+      <strong>${esc(item.tool || item.action)}</strong>
+      <span class="badge warn">${esc(stream)}</span>
+      ${pending.length > 1 ? `<span class="badge">ещё ${pending.length - 1}</span>` : ""}
+    </div>
+    ${target ? `<div class="chat-permission-target"><code>${esc(target)}</code></div>` : ""}
+    <div class="muted small">${esc(signed)} · ${esc(scope)}</div>
+    ${meta ? `<div class="mono small muted" style="margin-top:4px;white-space:pre-wrap;overflow-wrap:anywhere">${esc(meta.slice(0, 400))}</div>` : ""}
+    <div class="row-actions chat-permission-actions">
+      <button class="ghost small" type="button" data-permission="reject">Отклонить</button>
+      <button class="ghost small" type="button" data-permission="session" ${item.can_session ? "" : "disabled"}>В этом чате</button>
+      <button class="ghost small" type="button" data-permission="always" ${item.can_always ? "" : "disabled"}>Всегда для пакета</button>
+      <button class="small" type="button" data-permission="once">Разрешить</button>
+    </div>`;
+}
+
+async function resolvePermission(decision) {
+  const pending = permissionForThisChat();
+  const item = pending[0];
+  if (!item) return;
+  await guard(async () => {
+    await invoke("chat_permission", {
+      app_id: item.app_id,
+      session_id: item.session_id,
+      permission_id: item.id,
+      decision,
+    });
+    ctx.pendingPermissions = (ctx.pendingPermissions || []).filter(
+      (entry) => entry.id !== item.id,
+    );
+    renderPermissionPrompt();
+  });
+}
+
+function bindPermissionUi() {
+  const box = $("chat-permission");
+  if (!box) return;
+  box.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-permission]");
+    if (!button || button.disabled) return;
+    resolvePermission(button.dataset.permission);
+  });
+}
+
 function bindChatEvents() {
   const listen = window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
   if (!listen) return;
@@ -1691,6 +2066,10 @@ function bindChatEvents() {
     ctx.acceptStream = false;
     ctx.streamingItems = [];
     ctx.chatItems = payload.items || [];
+    ctx.pendingPermissions = (ctx.pendingPermissions || []).filter(
+      (item) => item.session_id !== ctx.chatId,
+    );
+    renderPermissionPrompt();
     renderChat(ctx.chatItems);
   });
   listen("chat://busy", (event) => {
@@ -1701,8 +2080,33 @@ function bindChatEvents() {
     if (!payload.busy) {
       ctx.acceptStream = false;
       ctx.streamingItems = [];
+      ctx.pendingPermissions = (ctx.pendingPermissions || []).filter(
+        (item) => item.session_id !== ctx.chatId,
+      );
+      renderPermissionPrompt();
       refreshChats();
     }
+  });
+  listen("chat://permission", (event) => {
+    const payload = event.payload || {};
+    if (!payload.id) return;
+    const list = ctx.pendingPermissions || [];
+    const index = list.findIndex((item) => item.id === payload.id);
+    // A repeated id is the broker refreshing the same card (the tool part
+    // arrived after the ask and brought the target), not a duplicate.
+    ctx.pendingPermissions =
+      index >= 0
+        ? list.map((item, at) => (at === index ? payload : item))
+        : [...list, payload];
+    renderPermissionPrompt();
+  });
+  listen("chat://permission_resolved", (event) => {
+    const payload = event.payload || {};
+    if (payload.app_id && payload.app_id !== ctx.appId) return;
+    ctx.pendingPermissions = (ctx.pendingPermissions || []).filter(
+      (item) => item.id !== payload.permission_id,
+    );
+    renderPermissionPrompt();
   });
   listen("chat://error", (event) => {
     const payload = event.payload || {};
@@ -1710,6 +2114,10 @@ function bindChatEvents() {
     if (payload.session && payload.session !== ctx.chatId) return;
     ctx.acceptStream = false;
     ctx.streamingItems = [];
+    ctx.pendingPermissions = (ctx.pendingPermissions || []).filter(
+      (item) => item.session_id !== ctx.chatId,
+    );
+    renderPermissionPrompt();
     chatError(payload.message || "ошибка движка");
     setBusy(false);
   });
@@ -1831,6 +2239,16 @@ async function refreshAppSettings() {
   ctx.appSecrets = secrets || [];
   renderAppMcp();
   renderAppSecrets();
+  const appPolicy =
+    ctx.config &&
+    ctx.config.permissions &&
+    ctx.config.permissions.apps &&
+    ctx.config.permissions.apps[appId];
+  $("app-perm-write").value = (appPolicy && appPolicy.write) || "inherit";
+  $("app-perm-exec").value = (appPolicy && appPolicy.exec) || "inherit";
+  await refreshPermissionGrants();
+  const auditLines = await invoke("audit_tail", { app_id: appId, limit: 40 }).catch(() => []);
+  renderPermissionAudit(auditLines);
 }
 
 function renderAppMcp() {
@@ -2459,6 +2877,125 @@ function renderReasoningOptions() {
   select.value = "";
 }
 
+function renderPermissionGrants(boxId, grants, emptyText) {
+  const box = $(boxId);
+  if (!box) return;
+  if (!(grants || []).length) {
+    box.innerHTML = `<span class="muted small">${esc(emptyText)}</span>`;
+    return;
+  }
+  box.innerHTML = grants
+    .map(
+      (grant) => `
+      <div class="app-setting-card">
+        <div class="app-setting-head">
+          <strong class="mono">${esc(grant.tool)}</strong>
+          <span class="badge">${esc(grant.stream === "exec" ? "exec" : "запись")}</span>
+        </div>
+        <p class="muted small">${esc(grant.app_id)} · ${grant.bin_sha256 ? "инструмент пакета (хеш проверен)" : "рабочая папка"} · v${esc(grant.app_version)} · ${esc(grant.workspace)}</p>
+        <div class="row-actions">
+          <button class="ghost small danger-hover" type="button" data-grant-revoke="${esc(grant.id)}">Отозвать</button>
+        </div>
+      </div>`,
+    )
+    .join("");
+}
+
+async function refreshPermissionGrants() {
+  const appId = ctx.appId;
+  let all = [];
+  let scoped = [];
+  try {
+    [all, scoped] = await Promise.all([
+      invoke("permission_grants", { app_id: null }),
+      appId ? invoke("permission_grants", { app_id: appId }) : Promise.resolve([]),
+    ]);
+  } catch (_) {
+    all = [];
+    scoped = [];
+  }
+  renderPermissionGrants("perm-grants", all, "Постоянных разрешений нет.");
+  if (appId) {
+    renderPermissionGrants("app-perm-grants", scoped, "Для этого пакета постоянных разрешений нет.");
+  }
+}
+
+function renderPermissionAudit(lines) {
+  const box = $("app-perm-audit");
+  if (!box) return;
+  const decisions = {
+    allow_once: "разрешено",
+    allow_session: "разрешено на чат",
+    allow_always: "разрешено всегда",
+    auto_grant: "авто по гранту",
+    auto_allow: "авто по политике",
+    reject: "отклонено",
+    reject_cascade: "отклонено (каскад)",
+    timeout: "таймаут",
+    revoke_grant: "грант отозван",
+    revoke_app: "гранты пакета отозваны",
+  };
+  const items = [];
+  for (const line of lines || []) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch (_) {
+      continue;
+    }
+    if (entry.type !== "permission") continue;
+    items.push(entry);
+  }
+  if (!items.length) {
+    box.innerHTML = '<span class="muted small">Решений пока нет.</span>';
+    return;
+  }
+  box.innerHTML = items
+    .slice(-8)
+    .reverse()
+    .map((entry) => {
+      const when = entry.ts ? new Date(entry.ts * 1000).toLocaleTimeString("ru-RU") : "";
+      const label = decisions[entry.decision] || entry.decision || "решение";
+      return `<div class="app-setting-card">
+        <div class="app-setting-head">
+          <strong class="mono">${esc(entry.tool || entry.grant_id || "контур")}</strong>
+          <span class="badge">${esc(label)}</span>
+        </div>
+        <p class="muted small">${esc(when)}${entry.policy ? ` · ${esc(entry.policy)}` : ""}</p>
+      </div>`;
+    })
+    .join("");
+}
+
+async function saveAppPermissions(inherit) {
+  if (!ctx.appId) return;
+  const write = inherit ? "inherit" : $("app-perm-write").value;
+  const exec = inherit ? "inherit" : $("app-perm-exec").value;
+  const permissions = { ...((ctx.config && ctx.config.permissions) || {}) };
+  permissions.apps = { ...(permissions.apps || {}) };
+  // Only explicit choices are stored; a missing field keeps following the
+  // global profile, which is what "Как в профиле" promises.
+  const override = {};
+  if (write && write !== "inherit") override.write = write;
+  if (exec && exec !== "inherit") override.exec = exec;
+  if (Object.keys(override).length) {
+    permissions.apps[ctx.appId] = override;
+  } else {
+    delete permissions.apps[ctx.appId];
+  }
+  ctx.config.permissions = permissions;
+  await invoke("save_config", { config: ctx.config });
+  ctx.chat = null;
+  ctx.chatId = null;
+  ctx.chatItems = [];
+  ctx.pendingPermissions = [];
+  renderChat([]);
+  renderPermissionPrompt();
+  await ensureChat().catch(() => {});
+  await refreshPermissionGrants();
+  toast("Правила подтверждений сохранены");
+}
+
 async function loadConfig() {
   ctx.config = await invoke("get_config");
   $("llm-endpoint").value = ctx.config.llm_endpoint || "";
@@ -2477,6 +3014,10 @@ async function loadConfig() {
   $("q-session").value = ctx.config.session_quota_mb;
   $("q-global").value = ctx.config.global_quota_mb;
   $("q-ttl").value = ctx.config.ttl_hours;
+  const defaults = (ctx.config.permissions && ctx.config.permissions.defaults) || {};
+  $("perm-write").value = defaults.write || "ask";
+  $("perm-exec").value = defaults.exec || "ask";
+  await refreshPermissionGrants();
   renderReasoningOptions();
 }
 
@@ -2501,6 +3042,13 @@ async function saveConfig() {
       session_quota_mb: Number($("q-session").value) || 500,
       global_quota_mb: Number($("q-global").value) || 5120,
       ttl_hours: Number($("q-ttl").value) || 168,
+      permissions: {
+        ...((ctx.config && ctx.config.permissions) || {}),
+        defaults: {
+          write: $("perm-write").value,
+          exec: $("perm-exec").value,
+        },
+      },
     };
     await invoke("save_config", { config: ctx.config });
     ctx.chat = null;
@@ -2509,6 +3057,9 @@ async function saveConfig() {
     renderChat([]);
     renderChatMeta();
     renderReasoningOptions();
+    ctx.pendingPermissions = [];
+    renderPermissionPrompt();
+    await refreshPermissionGrants();
     toast("Настройки сохранены, движок перезапустится при следующем сообщении");
   });
 }
@@ -2641,6 +3192,7 @@ function bind() {
     if (e.target.value && e.target.value !== ctx.appId) openApp(e.target.value);
   });
   $("ws-folder-pick").addEventListener("click", pickWorkspace);
+  $("ws-folder-open").addEventListener("click", openWorkspaceFolder);
 
   $("settings-save").addEventListener("click", saveConfig);
   $("pack-pick").addEventListener("click", pickPackFolder);
@@ -2742,6 +3294,20 @@ function bind() {
     }
     if (e.target.closest("[data-diagram-action]")) {
       handleDiagramAction(e);
+      return;
+    }
+    const codeCopy = e.target.closest("[data-copy-code]");
+    if (codeCopy) {
+      const codeNode = codeCopy.closest(".md-code")?.querySelector("pre code");
+      navigator.clipboard.writeText(codeNode ? codeNode.textContent : "").then(
+        () => toast("Код скопирован"),
+        () => toast("Не удалось скопировать", true),
+      );
+      return;
+    }
+    const wsFile = e.target.closest("[data-ws-file]");
+    if (wsFile) {
+      openWorkspaceFile(wsFile.dataset.wsFile || "", wsFile.dataset.wsAction || "open");
       return;
     }
     const copy = e.target.closest("[data-copy]");
@@ -2861,6 +3427,17 @@ function bind() {
   });
 
   $("app-settings-refresh").addEventListener("click", () => guard(refreshAppSettings));
+  $("app-perm-save").addEventListener("click", () => guard(() => saveAppPermissions(false)));
+  $("app-perm-inherit").addEventListener("click", () => guard(() => saveAppPermissions(true)));
+  document.addEventListener("click", (e) => {
+    const revoke = e.target.closest("[data-grant-revoke]");
+    if (!revoke) return;
+    guard(async () => {
+      await invoke("permission_revoke_grant", { id: revoke.dataset.grantRevoke });
+      await refreshPermissionGrants();
+      toast("Разрешение отозвано");
+    });
+  });
   $("app-mcp-list").addEventListener("click", (e) => {
     const save = e.target.closest("[data-app-mcp-save]");
     if (save) return saveAppMcp(save.dataset.appMcpSave);
@@ -3004,6 +3581,7 @@ async function init() {
   initTheme();
   bind();
   bindChatEvents();
+  bindPermissionUi();
   await guard(async () => {
     const info = await invoke("platform_info");
     renderPlatformInfo(info);

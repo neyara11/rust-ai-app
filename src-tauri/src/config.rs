@@ -178,6 +178,10 @@ pub struct UserConfig {
     pub global_quota_mb: u64,
     #[serde(default = "default_ttl_hours")]
     pub ttl_hours: u64,
+    /// Approval defaults and remembered grants. Absent in older profiles and
+    /// defaulted to ask-on-write/exec.
+    #[serde(default)]
+    pub permissions: crate::permissions::PermissionsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +285,7 @@ impl Default for UserConfig {
             session_quota_mb: default_session_mb(),
             global_quota_mb: default_global_mb(),
             ttl_hours: default_ttl_hours(),
+            permissions: crate::permissions::PermissionsConfig::default(),
         }
     }
 }
@@ -416,6 +421,9 @@ mod tests {
         assert!(cfg.llm_capabilities.reasoning);
         assert_eq!(cfg.llm_capabilities.efforts(), vec!["low", "medium", "high"]);
         assert_eq!(cfg.llm_capabilities.context_tokens, None);
+        assert_eq!(cfg.permissions.defaults.write.as_str(), "ask");
+        assert_eq!(cfg.permissions.defaults.exec.as_str(), "ask");
+        assert!(cfg.permissions.grants.is_empty());
     }
 
     #[test]

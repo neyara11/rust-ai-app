@@ -75,6 +75,50 @@ try {
   );
   await page.waitForSelector('.diagram-block[data-diagram="mermaid"] svg', { timeout: 15000 });
   await page.waitForSelector('.diagram-block[data-diagram="chart"] canvas', { timeout: 15000 });
+  assert(
+    (await page.locator("#chat-log .md-table-wrap table").count()) === 1,
+    "markdown table was not rendered",
+  );
+  assert(
+    (await page.locator("#chat-log .md-code [data-copy-code]").count()) >= 1,
+    "code block toolbar was not rendered",
+  );
+  assert(
+    (await page.locator('#chat-log .md-code code[class*="language-sql"]').count()) === 1,
+    "code block lost its language class",
+  );
+  assert(
+    (await page.locator("#chat-log .md-code code.hljs .hljs-keyword").count()) >= 1,
+    "code block was not syntax highlighted",
+  );
+  const fileChips = page.locator("#chat-log .ws-file");
+  assert((await fileChips.count()) >= 2, "workspace file chips were not rendered");
+  assert(
+    (await page.locator('#chat-log .ws-file-name[data-ws-file="report.md"]').count()) >= 1,
+    "report.md chip is missing",
+  );
+  assert(
+    (await page.locator('#chat-log .ws-file-name[data-ws-file="docx_export"]').count()) === 0,
+    "tool names must not become file chips",
+  );
+  await page.locator('#chat-log .ws-file-name[data-ws-file="report.md"]').first().click();
+  await page.waitForFunction(
+    () => document.querySelector("#toast")?.textContent.includes("Открываю report.md"),
+    null,
+    { timeout: 5000 },
+  );
+  await page.locator('#chat-log [data-ws-file="report.md"][data-ws-action="save"]').first().click();
+  await page.waitForFunction(
+    () => document.querySelector("#toast")?.textContent.includes("Копия сохранена"),
+    null,
+    { timeout: 5000 },
+  );
+  await page.click("#ws-folder-open");
+  await page.waitForFunction(
+    () => document.querySelector("#toast")?.textContent.includes("Открываю рабочую папку"),
+    null,
+    { timeout: 5000 },
+  );
   await page.waitForFunction(
     () => {
       const diagrams = [...document.querySelectorAll('.diagram-block[data-diagram="mermaid"]')];
@@ -154,6 +198,95 @@ try {
   await page.locator("[data-remove-attachment]").first().click();
   assert(await page.locator("#chat-attachments").isHidden(), "paste/drop attachments were not removed");
 
+  await page.evaluate(() => {
+    ctx.pendingPermissions = [
+      {
+        id: "perm-smoke-1",
+        app_id: ctx.appId,
+        session_id: ctx.chatId,
+        action: "platform_write_file",
+        tool: "write_file",
+        stream: "write",
+        patterns: ["*"],
+        always: [],
+        metadata: { target: "about-elephants.md" },
+        message_id: "msg_1",
+        call_id: "call_1",
+        created: 0,
+        can_session: true,
+        can_always: true,
+        package_exec: false,
+        bin: null,
+        bin_sha256: null,
+      },
+    ];
+    renderPermissionPrompt();
+  });
+  await page.waitForFunction(
+    () => document.querySelector("#chat-permission")?.textContent.includes("about-elephants.md"),
+    null,
+    { timeout: 5000 },
+  );
+  assert(
+    (await page.locator("#chat-permission .chat-permission-target code").textContent()) ===
+      "about-elephants.md",
+    "permission card did not show the target file name",
+  );
+  const permissionLabel = await page.locator("#chat-permission").textContent();
+  assert(
+    permissionLabel.includes("инструмент платформы"),
+    `unexpected permission source label: ${permissionLabel}`,
+  );
+  assert(
+    !permissionLabel.includes("инструмент пакета"),
+    `contradictory package label on a platform tool: ${permissionLabel}`,
+  );
+
+  await page.evaluate(() => {
+    ctx.pendingPermissions = [
+      {
+        id: "perm-smoke-2",
+        app_id: ctx.appId,
+        session_id: ctx.chatId,
+        action: "platform_write_file",
+        tool: "write_file",
+        stream: "write",
+        patterns: ["*"],
+        always: [],
+        metadata: {},
+        message_id: "msg_1",
+        call_id: "call_2",
+        created: 0,
+        can_session: true,
+        can_always: true,
+        package_exec: false,
+        bin: null,
+        bin_sha256: null,
+      },
+    ];
+    renderPermissionPrompt();
+  });
+  await page.waitForFunction(
+    () => {
+      const box = document.querySelector("#chat-permission");
+      return box && !box.hidden && box.textContent.includes("рабочая папка");
+    },
+    null,
+    { timeout: 5000 },
+  );
+  assert(
+    (await page.locator("#chat-permission .chat-permission-target").count()) === 0,
+    "permission card must not render a target block without metadata.target",
+  );
+  await page.evaluate(() => {
+    ctx.pendingPermissions = [];
+    renderPermissionPrompt();
+  });
+  assert(
+    await page.locator("#chat-permission").isHidden(),
+    "permission card was not cleared after resolving the mock request",
+  );
+
   await page.selectOption("#app-switch", "doc-lookup");
   await page.waitForFunction(
     () => document.querySelector("#chat-list")?.textContent.includes("Tauri v2"),
@@ -168,9 +301,45 @@ try {
     null,
     { timeout: 5000 },
   );
+  assert(
+    (await page.locator("#app-perm-write").inputValue()) === "inherit",
+    "per-app write policy was not initialized",
+  );
+  assert(
+    (await page.locator("#app-perm-exec").inputValue()) === "inherit",
+    "per-app exec policy was not initialized",
+  );
+
+  await page.selectOption("#app-perm-write", "inherit");
+  await page.selectOption("#app-perm-exec", "deny");
+  await page.click("#app-perm-save");
+  await page.waitForFunction(
+    () => document.querySelector("#toast")?.textContent.includes("Правила подтверждений сохранены"),
+    null,
+    { timeout: 5000 },
+  );
+  const savedPolicy = await page.evaluate(
+    async () => (await invoke("get_config")).permissions.apps["doc-lookup"],
+  );
+  assert(
+    savedPolicy && savedPolicy.exec === "deny",
+    `expected the exec override to be saved, got ${JSON.stringify(savedPolicy)}`,
+  );
+  assert(
+    savedPolicy && !("write" in savedPolicy),
+    `an inherited field must not be materialised: ${JSON.stringify(savedPolicy)}`,
+  );
 
   await page.click('.tab[data-tab="settings"]');
   await page.waitForSelector("#tab-settings.active");
+  assert(
+    (await page.locator("#perm-write").inputValue()) === "ask",
+    "global write policy was not initialized",
+  );
+  assert(
+    (await page.locator("#perm-exec").inputValue()) === "ask",
+    "global exec policy was not initialized",
+  );
   const artifactUsage = await page.locator("#artifact-usage").textContent();
   assert(artifactUsage.includes("2 сессий"), `unexpected artifact usage: ${artifactUsage}`);
   const dumpRows = await page.locator("#artifact-dumps .artifact-row").count();
@@ -255,7 +424,7 @@ try {
   );
   assert(pageErrors.length === 0, `page errors: ${pageErrors.join("; ")}`);
   console.log(
-    "ui smoke ok: catalog, allowlist, chat, diagrams, app settings, artifacts, attachments, package import, modes",
+    "ui smoke ok: catalog, allowlist, chat, highlight, workspace files, diagrams, app settings, artifacts, attachments, permission target, package import, modes",
   );
 } finally {
   await browser.close();

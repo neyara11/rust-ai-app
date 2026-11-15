@@ -176,6 +176,7 @@
           <div class="ws-workspace">
             <span class="muted small">Рабочая папка</span>
             <span class="mono small ws-folder" id="ws-folder">—</span>
+            <button class="ghost small" id="ws-folder-open" type="button" title="Открыть рабочую папку в проводнике">Открыть</button>
             <button class="ghost small" id="ws-folder-pick" type="button">Выбрать</button>
           </div>
 
@@ -257,6 +258,7 @@
               <div id="chat-log" class="chat-log"></div>
 
               <div class="chat-composer-wrap">
+                <div id="chat-permission" class="chat-permission" hidden></div>
                 <div id="chat-attachments" class="chat-attachments" hidden></div>
                 <div class="chat-input">
                   <label class="chat-attach-btn" title="Прикрепить изображение или текстовый файл">
@@ -376,6 +378,43 @@
                   </div>
                 </div>
                 <div id="app-secrets-list" class="app-settings-list"></div>
+              </div>
+
+              <div class="panel" style="grid-column:1/-1">
+                <div class="panel-icon-head">
+                  <div class="panel-badge-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M9 11l3 3L22 4" />
+                      <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h2>Подтверждения</h2>
+                    <p class="panel-desc">Переопределение политики для пакета. «Всегда» доступно для записи и exec-инструментов из пакета, покрытых хешем; workspace-exec остаётся под запросом.</p>
+                  </div>
+                </div>
+                <div class="grid">
+                  <label>Запись<select id="app-perm-write">
+                    <option value="inherit">Как в профиле</option>
+                    <option value="ask">Спрашивать</option>
+                    <option value="allow">Разрешать</option>
+                    <option value="deny">Запрещать</option>
+                  </select></label>
+                  <label>Exec<select id="app-perm-exec">
+                    <option value="inherit">Как в профиле</option>
+                    <option value="ask">Спрашивать</option>
+                    <option value="allow">Разрешать инструменты пакета</option>
+                    <option value="deny">Запрещать</option>
+                  </select></label>
+                </div>
+                <div class="row-actions" style="margin-top:10px">
+                  <button class="small" id="app-perm-save" type="button">Сохранить правила</button>
+                  <button class="ghost small" id="app-perm-inherit" type="button">Наследовать</button>
+                </div>
+                <div class="sidebar-label" style="margin-top:14px">Постоянные разрешения</div>
+                <div id="app-perm-grants" class="app-settings-list"></div>
+                <div class="sidebar-label" style="margin-top:14px">Последние решения</div>
+                <div id="app-perm-audit" class="app-settings-list"></div>
               </div>
             </div>
           </div>
@@ -714,6 +753,36 @@
           </div>
           <div id="secrets" class="secrets"></div>
         </div>
+
+        <div class="panel" style="grid-column:1/-1">
+          <div class="panel-icon-head">
+            <div class="panel-badge-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 11l3 3L22 4" />
+                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+              </svg>
+            </div>
+            <div>
+              <h2>Подтверждения инструментов</h2>
+              <p class="panel-desc">Поведение по умолчанию для записи и exec. «Разрешать инструменты пакета» снимает запрос только для exec-бинарей, покрытых хешем пакета; workspace-exec всё равно спросит.</p>
+            </div>
+          </div>
+
+          <div class="grid">
+            <label>Запись<select id="perm-write">
+              <option value="ask">Спрашивать</option>
+              <option value="allow">Разрешать</option>
+              <option value="deny">Запрещать</option>
+            </select></label>
+            <label>Exec<select id="perm-exec">
+              <option value="ask">Спрашивать</option>
+              <option value="allow">Разрешать инструменты пакета</option>
+              <option value="deny">Запрещать</option>
+            </select></label>
+          </div>
+          <div class="sidebar-label" style="margin-top:14px">Постоянные разрешения</div>
+          <div id="perm-grants" class="app-settings-list"></div>
+        </div>
       </div>
     </section>
   </main>
@@ -721,6 +790,8 @@
   <div id="toast" class="toast" hidden></div>
   <script src="vendor/mermaid.min.js"></script>
   <script src="vendor/chart.umd.min.js"></script>
+  <script src="vendor/highlight.min.js"></script>
+  <script src="vendor/highlight-powershell.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

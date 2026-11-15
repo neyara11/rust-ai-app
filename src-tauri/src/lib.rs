@@ -8,11 +8,13 @@ pub mod identity;
 pub mod manifest;
 pub mod mcp;
 pub mod pack;
+pub mod permissions;
 pub mod proxy;
 pub mod registry;
 pub mod seal;
 pub mod secrets;
 pub mod state;
+pub mod workspace;
 
 use secrets::SecretStore;
 use state::AppState;
@@ -58,6 +60,10 @@ pub fn run() {
             commands::close_app,
             commands::close_all_apps,
             commands::choose_workspace,
+            commands::workspace_file_open,
+            commands::workspace_file_reveal,
+            commands::workspace_file_save_copy,
+            commands::workspace_open_folder,
             commands::artifacts_usage,
             commands::artifact_dumps,
             commands::artifact_grep,
@@ -102,6 +108,9 @@ pub fn run() {
             commands::chat_history,
             commands::chat_reset,
             commands::chat_stop,
+            commands::chat_permission,
+            commands::permission_grants,
+            commands::permission_revoke_grant,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run ECO AIOps platform");
@@ -860,6 +869,8 @@ pub fn cli_allowlist_check(app: Option<&String>, version: Option<&String>) -> i3
 
 
 /// `--chat <app-id> <message> [low|medium|high]`: headless smoke test.
+/// Tool calls are allowed by default because nobody can answer an approval;
+/// `ECO_PLATFORM_TOOL_POLICY=ask` switches to the profile policy instead.
 pub fn cli_chat(
     app_id: Option<&String>,
     message: Option<&String>,
@@ -877,7 +888,12 @@ pub fn cli_chat(
             return 2;
         }
     }
-    let engine = match engine::Engine::start(app_id, &home, &config::workspace(&home, app_id)) {
+    let engine = match engine::Engine::start_with(
+        app_id,
+        &home,
+        &config::workspace(&home, app_id),
+        crate::permissions::headless_policy_override(),
+    ) {
         Ok(e) => e,
         Err(e) => {
             println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
@@ -983,14 +999,20 @@ pub fn cli_import_auth(
 }
 
 /// `--chat-async <app-id> <message>`: verifies live streaming through `/event`
-/// and the final history handoff.
+/// and the final history handoff. Like `--chat`, tool calls are allowed unless
+/// `ECO_PLATFORM_TOOL_POLICY=ask`.
 pub fn cli_chat_async(app_id: Option<&String>, message: Option<&String>) -> i32 {
     let (Some(app_id), Some(message)) = (app_id, message) else {
         eprintln!("usage: eco-platform --chat-async <app-id> <message>");
         return 2;
     };
     let home = registry::home();
-    let engine = match engine::Engine::start(app_id, &home, &config::workspace(&home, app_id)) {
+    let engine = match engine::Engine::start_with(
+        app_id,
+        &home,
+        &config::workspace(&home, app_id),
+        crate::permissions::headless_policy_override(),
+    ) {
         Ok(e) => e,
         Err(e) => {
             println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
@@ -1006,7 +1028,10 @@ pub fn cli_chat_async(app_id: Option<&String>, message: Option<&String>) -> i32 
             let reader = session.clone();
             Some(std::thread::spawn(move || {
                 let mut last_text = 0usize;
-                let result = reader.consume_events(stream, &stop, |items| {
+                let result = reader.consume_events(
+                    stream,
+                    &stop,
+                    |items| {
                     let text = items
                         .iter()
                         .filter(|item| item.kind == "text")
@@ -1028,7 +1053,10 @@ pub fn cli_chat_async(app_id: Option<&String>, message: Option<&String>) -> i32 
                             text.chars().take(100).collect::<String>()
                         );
                     }
-                });
+                    },
+                    // Headless runs have no operator: fail closed.
+                    |_event| crate::permissions::PermissionVerdict::Reject,
+                );
                 if let Err(e) = result {
                     println!("[stream] error: {e}");
                 }
@@ -1036,7 +1064,7 @@ pub fn cli_chat_async(app_id: Option<&String>, message: Option<&String>) -> i32 
         }
         Err(e) => {
             println!("[stream] unavailable: {e}");
-            None
+            return 1;
         }
     };
 

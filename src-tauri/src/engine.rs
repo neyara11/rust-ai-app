@@ -225,6 +225,11 @@ struct StreamPart {
     text: String,
     tool: String,
     status: String,
+    /// Engine call id (`part.callID`), used to join a permission request with
+    /// the tool part that carries its arguments.
+    call_id: String,
+    /// Short, human-readable target of the call (a path, or `in -> out`).
+    target: Option<String>,
 }
 
 /// Live parts of the assistant message currently being generated. Built from
@@ -239,6 +244,14 @@ struct StreamState {
     done: Vec<ChatItem>,
     changed: bool,
 }
+
+/// Bounded queue of asked-but-unanswered requests that still lack a target; a
+/// tool part arriving later fills it in and refreshes the card.
+const MAX_WAITING_ASKS: usize = 16;
+/// Per-value and whole-target caps keep the card readable and metadata free of
+/// file bodies.
+const TARGET_VALUE_MAX_CHARS: usize = 160;
+const TARGET_MAX_CHARS: usize = 240;
 
 const TOOL_MARKUP_NOTE: &str = "Модель попыталась вызвать недоступный инструмент; служебная разметка скрыта. Проверьте, что пакету разрешены нужные tools/file_scopes.";
 
@@ -255,6 +268,72 @@ fn clean_text(text: String) -> String {
     }
 }
 
+fn squash_ws(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A path-like metadata string: one line, no JSON braces, sane length. This is
+/// what keeps file bodies out of the permission card.
+fn looks_like_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= TARGET_VALUE_MAX_CHARS
+        && !value.contains('\n')
+        && !value.contains('\r')
+        && !value.contains('{')
+        && !value.contains('}')
+}
+
+fn short_target_value(value: Option<&Value>) -> Option<String> {
+    let raw = value?.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let capped: String = squash_ws(raw)
+        .chars()
+        .take(TARGET_VALUE_MAX_CHARS)
+        .collect();
+    if capped.is_empty() {
+        None
+    } else {
+        Some(capped)
+    }
+}
+
+/// Picks a path-like value: single-path tools first, then the two-path
+/// `docx_export` shape. Only known path keys are read, never `content`.
+fn pick_target(input: &Value) -> Option<String> {
+    let Some(object) = input.as_object() else {
+        let text = input.as_str()?;
+        return looks_like_path(text).then(|| squash_ws(text));
+    };
+    for key in ["path", "filePath", "file", "target"] {
+        if let Some(found) = short_target_value(object.get(key)) {
+            return Some(found);
+        }
+    }
+    let from = short_target_value(object.get("input"));
+    let to = short_target_value(object.get("output"));
+    match (from, to) {
+        (Some(from), Some(to)) => Some(format!("{from} \u{2192} {to}")),
+        (Some(from), None) => Some(from),
+        (None, Some(to)) => Some(to),
+        (None, None) => None,
+    }
+}
+
+/// Derives the short target of a tool part from `state.input`, falling back to
+/// `state.metadata` and `state.title`.
+fn tool_target(part: &Value) -> Option<String> {
+    let state = part.get("state").unwrap_or(&Value::Null);
+    let target = pick_target(state.get("input").unwrap_or(&Value::Null))
+        .or_else(|| pick_target(state.get("metadata").unwrap_or(&Value::Null)))
+        .or_else(|| short_target_value(state.get("title")))?;
+    if target.is_empty() {
+        return None;
+    }
+    Some(target.chars().take(TARGET_MAX_CHARS).collect())
+}
+
 impl StreamState {
     fn part(&mut self, id: &str) -> &mut StreamPart {
         if let Some(index) = self.parts.iter().position(|part| part.id == id) {
@@ -265,6 +344,15 @@ impl StreamState {
             ..Default::default()
         });
         self.parts.last_mut().unwrap()
+    }
+
+    fn part_by_call(&self, call_id: &str) -> Option<&StreamPart> {
+        if call_id.is_empty() {
+            return None;
+        }
+        self.parts
+            .iter()
+            .find(|part| part.call_id == call_id && part.target.is_some())
     }
 
     fn items(&self) -> Vec<ChatItem> {
@@ -318,6 +406,60 @@ impl StreamState {
         }
         self.parts.clear();
     }
+}
+
+/// An asked request whose tool part has not arrived yet.
+struct WaitingAsk {
+    call_id: String,
+    request: crate::permissions::PermissionRequest,
+}
+
+/// Copies the target of the matching tool part into the request metadata when
+/// the part is already in the live state. Returns true when it was added.
+fn enrich_from_state(
+    request: &mut crate::permissions::PermissionRequest,
+    state: &StreamState,
+) -> bool {
+    if crate::permissions::target_of(&request.metadata).is_some() {
+        return false;
+    }
+    let Some(call_id) = request.call_id.as_deref() else {
+        return false;
+    };
+    let Some(target) = state
+        .part_by_call(call_id)
+        .and_then(|part| part.target.clone())
+    else {
+        return false;
+    };
+    crate::permissions::merge_target(&mut request.metadata, &target);
+    true
+}
+
+/// Resolves waiting asks against the current live state, returning requests
+/// that just learned their target. Resolved entries leave the queue.
+fn resolve_waiting_targets(
+    waiting: &mut Vec<WaitingAsk>,
+    state: &StreamState,
+) -> Vec<crate::permissions::PermissionRequest> {
+    let mut ready = Vec::new();
+    let mut index = 0;
+    while index < waiting.len() {
+        let found = state
+            .part_by_call(&waiting[index].call_id)
+            .and_then(|part| part.target.clone());
+        match found {
+            Some(target) => {
+                let mut ask = waiting.remove(index);
+                if crate::permissions::target_of(&ask.request.metadata).is_none() {
+                    crate::permissions::merge_target(&mut ask.request.metadata, &target);
+                    ready.push(ask.request);
+                }
+            }
+            None => index += 1,
+        }
+    }
+    ready
 }
 
 /// Applies one bus event to the live state. Returns true when the turn is
@@ -376,6 +518,12 @@ fn apply_stream_event(state: &mut StreamState, event: &Value) -> bool {
                         .and_then(Value::as_str)
                         .unwrap_or("called")
                         .to_string();
+                    if let Some(call_id) = part.get("callID").and_then(Value::as_str) {
+                        entry.call_id = call_id.to_string();
+                    }
+                    if let Some(target) = tool_target(part) {
+                        entry.target = Some(target);
+                    }
                 }
                 _ => {}
             }
@@ -737,6 +885,7 @@ fn build_config(
     package_dir: &std::path::Path,
     token: &identity::IssuedToken,
     user: &str,
+    policy_override: Option<crate::permissions::PermissionPolicy>,
 ) -> Result<(Value, String, String, Vec<(String, String)>)> {
     let headers = json!({
         "X-Agent-Id": format!("{}/{}", app.app_id, app.version),
@@ -750,13 +899,18 @@ fn build_config(
     let (provider, provider_id, model_id, envs) = provider_config(cfg, secrets, &headers)?;
 
     let names = proxy::gateway_tool_names(app, package_dir);
+    let policy = policy_override
+        .unwrap_or_else(|| crate::permissions::policy_for(cfg, &app.app_id));
+    let tool_map = crate::permissions::tool_map(app);
     let mut permissions = serde_json::Map::new();
     permissions.insert("*".to_string(), json!("deny"));
     for name in &names {
-        permissions.insert(
-            format!("{}_{}", proxy::SERVER_NAME, name),
-            json!("allow"),
-        );
+        let action = format!("{}_{}", proxy::SERVER_NAME, name);
+        let mode = tool_map
+            .get(&action)
+            .map(|info| crate::permissions::mode_for_tool(&policy, info))
+            .unwrap_or(crate::permissions::PermissionMode::Ask);
+        permissions.insert(action, json!(mode.as_str()));
     }
 
     let mut servers = serde_json::Map::new();
@@ -1034,6 +1188,17 @@ pub fn kill_leftover(home: &Path, app_id: &str) -> Result<()> {
 
 impl Engine {
     pub fn start(app_id: &str, home: &Path, workdir: &Path) -> Result<Self> {
+        Self::start_with(app_id, home, workdir, None)
+    }
+
+    /// Same as [`Engine::start`], but a headless caller can supply the effect
+    /// policy instead of reading one from the profile.
+    pub fn start_with(
+        app_id: &str,
+        home: &Path,
+        workdir: &Path,
+        policy_override: Option<crate::permissions::PermissionPolicy>,
+    ) -> Result<Self> {
         let package_dir = crate::registry::apps_dir(home).join(app_id);
         let app = crate::registry::verified_manifest(home, app_id)?;
         let cfg = config::load(home);
@@ -1071,7 +1236,16 @@ impl Engine {
         };
 
         let (engine_config, provider_id, model_id, mut engine_envs) =
-            build_config(&app, &cfg, &secrets, &gateway, &package_dir, &token, &user)?;
+            build_config(
+                &app,
+                &cfg,
+                &secrets,
+                &gateway,
+                &package_dir,
+                &token,
+                &user,
+                policy_override,
+            )?;
         engine_envs.push(("ECO_AGENT_TOKEN".to_string(), token.token.clone()));
         engine_envs.push(("ECO_AGENT_USER".to_string(), user.clone()));
 
@@ -1456,20 +1630,23 @@ impl ChatSession {
     /// Consumes `/event` until the session turns idle. Only the assistant
     /// message of this session is tracked; other sessions and bus metadata are
     /// ignored. Emits a live snapshot at most every 80 ms.
-    pub fn consume_events<F>(
+    pub fn consume_events<F, P>(
         &self,
         response: ureq::Response,
         stop: &AtomicBool,
         mut emit: F,
+        mut on_permission: P,
     ) -> Result<()>
     where
         F: FnMut(Vec<ChatItem>),
+        P: FnMut(crate::permissions::PermissionBusEvent) -> crate::permissions::PermissionVerdict,
     {
         let mut reader = BufReader::new(response.into_reader());
         let mut state = StreamState::default();
         let mut data = String::new();
         let mut line = String::new();
         let mut last_emit = Instant::now() - Duration::from_secs(1);
+        let mut waiting: Vec<WaitingAsk> = Vec::new();
 
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -1512,6 +1689,56 @@ impl ChatSession {
                 continue;
             }
 
+            if kind == "permission.asked" {
+                if let Some(mut request) =
+                    crate::permissions::parse_request(&self.app_id, &self.session_id, props)
+                {
+                    enrich_from_state(&mut request, &state);
+                    let id = request.id.clone();
+                    let call_id = request.call_id.clone();
+                    let wants_target = crate::permissions::target_of(&request.metadata).is_none();
+                    let waiting_request = request.clone();
+                    let verdict =
+                        on_permission(crate::permissions::PermissionBusEvent::Asked(request));
+                    match verdict {
+                        crate::permissions::PermissionVerdict::Once => {
+                            if let Err(e) = self.reply_permission(&id, "once") {
+                                eprintln!("permission auto-reply failed: {e}");
+                            }
+                        }
+                        crate::permissions::PermissionVerdict::Reject => {
+                            if let Err(e) = self.reply_permission(&id, "reject") {
+                                eprintln!("permission reject failed: {e}");
+                            }
+                        }
+                        crate::permissions::PermissionVerdict::Pending => {}
+                    }
+                    // The card is shown but the target is unknown: remember the
+                    // ask so a later tool part can refresh it.
+                    if verdict == crate::permissions::PermissionVerdict::Pending && wants_target {
+                        if let Some(call_id) = call_id {
+                            if waiting.len() >= MAX_WAITING_ASKS {
+                                waiting.remove(0);
+                            }
+                            waiting.push(WaitingAsk {
+                                call_id,
+                                request: waiting_request,
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
+            if kind == "permission.replied" {
+                if let Some(id) = props.get("requestID").and_then(Value::as_str) {
+                    waiting.retain(|ask| ask.request.id != id);
+                    on_permission(crate::permissions::PermissionBusEvent::Replied(
+                        id.to_string(),
+                    ));
+                }
+                continue;
+            }
+
             let finished = match kind {
                 "session.idle" => true,
                 "session.status" => {
@@ -1520,6 +1747,12 @@ impl ChatSession {
                 "session.error" => true,
                 _ => apply_stream_event(&mut state, event),
             };
+
+            if kind == "message.part.updated" && !waiting.is_empty() {
+                for request in resolve_waiting_targets(&mut waiting, &state) {
+                    on_permission(crate::permissions::PermissionBusEvent::Updated(request));
+                }
+            }
 
             if state.changed
                 && (finished || last_emit.elapsed() >= Duration::from_millis(80))
@@ -1548,6 +1781,23 @@ impl ChatSession {
         )?;
         Ok(())
     }
+
+    /// Answers a pending permission request. `response` is `once`, `always` or
+    /// `reject`; the platform broker only uses `once` and `reject` so grants
+    /// stay revocable.
+    pub fn reply_permission(&self, permission_id: &str, response: &str) -> Result<()> {
+        let agent = agent();
+        http(
+            &agent,
+            &self.base,
+            &self.auth,
+            "POST",
+            &format!("/session/{}/permissions/{}", self.session_id, permission_id),
+            Some(&json!({ "response": response })),
+        )?;
+        Ok(())
+    }
+
 
     /// Sets the chat title from the first user message, if the chat is empty.
     pub fn title_from_first_message(&self, text: &str) {
@@ -2018,6 +2268,144 @@ mod tests {
         assert_eq!(items[1].text, "agg -> running");
         assert_eq!(items[2].kind, "text");
         assert_eq!(items[2].text, "answer");
+    }
+
+    fn start_assistant_message(state: &mut StreamState) {
+        apply_stream_event(
+            state,
+            &json!({
+                "type": "message.updated",
+                "properties": { "sessionID": "s", "info": { "id": "m", "role": "assistant" } }
+            }),
+        );
+    }
+
+    fn tool_part(call_id: &str, input: Value) -> Value {
+        json!({
+            "id": "p1", "messageID": "m", "type": "tool", "tool": "write_file",
+            "callID": call_id,
+            "state": { "status": "running", "input": input }
+        })
+    }
+
+    fn feed_tool_part(state: &mut StreamState, part: Value) {
+        apply_stream_event(
+            state,
+            &json!({
+                "type": "message.part.updated",
+                "properties": { "sessionID": "s", "part": part }
+            }),
+        );
+    }
+
+    fn asked(request_id: &str, call_id: &str) -> crate::permissions::PermissionRequest {
+        crate::permissions::parse_request(
+            "doc-writer",
+            "s",
+            &json!({
+                "id": request_id,
+                "sessionID": "s",
+                "permission": "platform_write_file",
+                "patterns": ["*"],
+                "always": ["*"],
+                "tool": { "messageID": "m", "callID": call_id }
+            }),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn permission_target_comes_from_the_tool_part() {
+        let mut state = StreamState::default();
+        start_assistant_message(&mut state);
+        feed_tool_part(
+            &mut state,
+            tool_part(
+                "call_1",
+                json!({ "path": "about-elephants.md", "content": "SECRET BODY" }),
+            ),
+        );
+
+        let mut request = asked("per_1", "call_1");
+        assert_eq!(crate::permissions::target_of(&request.metadata), None);
+        assert!(enrich_from_state(&mut request, &state));
+        assert_eq!(
+            crate::permissions::target_of(&request.metadata),
+            Some("about-elephants.md")
+        );
+        assert_eq!(request.metadata["target"], json!("about-elephants.md"));
+        assert!(!request.metadata.to_string().contains("SECRET BODY"));
+    }
+
+    #[test]
+    fn two_path_tool_renders_input_to_output() {
+        let part = tool_part(
+            "call_2",
+            json!({ "input": "report.md", "output": "report.docx" }),
+        );
+        assert_eq!(
+            tool_target(&part).as_deref(),
+            Some("report.md \u{2192} report.docx")
+        );
+    }
+
+    #[test]
+    fn target_falls_back_to_metadata_and_title() {
+        let metadata_part = json!({
+            "type": "tool",
+            "state": { "metadata": { "filePath": "notes\\draft.md" } }
+        });
+        assert_eq!(tool_target(&metadata_part).as_deref(), Some("notes\\draft.md"));
+        let title_part = json!({ "type": "tool", "state": { "title": "record  main.rs" } });
+        assert_eq!(tool_target(&title_part).as_deref(), Some("record main.rs"));
+    }
+
+    #[test]
+    fn tool_target_ignores_content_fields() {
+        let part = tool_part(
+            "call_4",
+            json!({ "content": "big body", "newString": "x", "oldString": "y" }),
+        );
+        assert_eq!(tool_target(&part), None);
+    }
+
+    #[test]
+    fn late_tool_part_refreshes_the_pending_request() {
+        let mut state = StreamState::default();
+        start_assistant_message(&mut state);
+        let mut waiting = vec![WaitingAsk {
+            call_id: "call_3".to_string(),
+            request: asked("per_2", "call_3"),
+        }];
+        assert!(resolve_waiting_targets(&mut waiting, &state).is_empty());
+        assert_eq!(waiting.len(), 1);
+
+        feed_tool_part(&mut state, tool_part("call_3", json!({ "filePath": "doc.docx" })));
+        let updated = resolve_waiting_targets(&mut waiting, &state);
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].id, "per_2");
+        assert_eq!(
+            crate::permissions::target_of(&updated[0].metadata),
+            Some("doc.docx")
+        );
+        assert!(waiting.is_empty());
+    }
+
+    #[test]
+    fn waiting_list_is_bounded() {
+        let mut waiting: Vec<WaitingAsk> = Vec::new();
+        for index in 0..(MAX_WAITING_ASKS + 2) {
+            if waiting.len() >= MAX_WAITING_ASKS {
+                waiting.remove(0);
+            }
+            let call_id = format!("call_{index}");
+            waiting.push(WaitingAsk {
+                call_id: call_id.clone(),
+                request: asked(&format!("per_{index}"), &call_id),
+            });
+        }
+        assert_eq!(waiting.len(), MAX_WAITING_ASKS);
+        assert_eq!(waiting[0].request.id, "per_2");
     }
 
     #[test]

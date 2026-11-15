@@ -1054,8 +1054,7 @@ fn package_spec(tool: &ToolDef) -> Value {
 
 /// Resolves a model-supplied path against the workspace. Absolute paths,
 /// parent components and symlink escapes are rejected.
-fn resolve_path(workspace: &Path, raw: &str, for_write: bool) -> Result<PathBuf> {
-    let raw = raw.trim();
+fn resolve_path(workspace: &Path, raw: &str, for_write: bool) -> Result<PathBuf> {    let raw = raw.trim();
     if raw.is_empty() {
         return msg("path is empty");
     }
@@ -1110,6 +1109,12 @@ fn inside(root: &Path, path: &Path) -> bool {
     {
         false
     }
+}
+
+/// Shared with `workspace`: opening or exporting an artifact obeys the same
+/// containment rules as the agent's own file tools.
+pub(crate) fn resolve_workspace_path(workspace: &Path, raw: &str) -> Result<PathBuf> {
+    resolve_path(workspace, raw, false)
 }
 
 /// Resolves an executable inside the signed package.
