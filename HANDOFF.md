@@ -394,6 +394,7 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 path traversal, sweep артефактов, разбор MCP (JSON/SSE),
 лимит ответа, разбор endpoint, allow-list, file tools и path escape шлюза,
 allowlist (версии/revoked/TTL/две подписи) и ротация anchor.
+- `tools/ui-smoke` статически сверяет все id из `$("...")` в `src/app.js` с DOM, плюс проверки плотности шапки, высоты лога, отсутствия горизонтального переполнения и видимости контролов настроек.
 
 ## 5. Что проверено вживую
 

@@ -1,10 +1,19 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, normalize, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 const ROOT = fileURLToPath(new URL("../../src/", import.meta.url));
+const APP_JS = fileURLToPath(new URL("../../src/app.js", import.meta.url));
+const SHOT_DIR = process.env.UI_SMOKE_SHOTS || "C:\\Users\\pechn\\AppData\\Local\\Temp\\kilo";
+const appSource = await readFile(APP_JS, "utf8");
+const REQUIRED_IDS = [
+  ...new Set(
+    [...appSource.matchAll(/\$\("([^"]+)"\)/g)].map((match) => match[1]),
+  ),
+];
+await mkdir(SHOT_DIR, { recursive: true });
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -52,6 +61,15 @@ page.on("request", (request) => {
 
 try {
   await page.goto(`http://127.0.0.1:${port}/index.html`);
+
+  const missingIds = await page.evaluate(
+    (ids) => ids.filter((id) => !document.getElementById(id)),
+    REQUIRED_IDS,
+  );
+  assert(
+    missingIds.length === 0,
+    `id contract broken: app.js queries ${missingIds.length} missing id(s): ${missingIds.join(", ")}`,
+  );
   await page.waitForSelector("#apps-panel .card");
 
   const appCount = await page.locator("#apps-panel .card").count();
@@ -157,8 +175,96 @@ try {
   await reasoningNode.locator("summary").click();
   assert(await reasoningNode.evaluate((el) => el.open), "reasoning block did not expand");
 
+  const chatSurface = await page.evaluate(() => {
+    const log = document.querySelector("#chat-log");
+    log.scrollTop = log.scrollHeight;
+    const style = getComputedStyle(log);
+    return {
+      overflowY: style.overflowY,
+      scrollTop: log.scrollTop,
+      clientHeight: log.clientHeight,
+      scrollHeight: log.scrollHeight,
+    };
+  });
+  assert(
+    chatSurface.overflowY === "auto" || chatSurface.overflowY === "scroll",
+    `#chat-log must be the scroll host, got overflow-y=${chatSurface.overflowY}`,
+  );
+  assert(
+    chatSurface.scrollTop + chatSurface.clientHeight >= chatSurface.scrollHeight - 48,
+    `#chat-log did not settle at the history tail: ${JSON.stringify(chatSurface)}`,
+  );
+
+  const assistantBox = await page.locator("#chat-log .msg.assistant").first().evaluate((el) => {
+    const s = getComputedStyle(el);
+    return {
+      padding: parseFloat(s.paddingTop) + parseFloat(s.paddingLeft),
+      background: s.backgroundColor,
+      backgroundImage: s.backgroundImage,
+    };
+  });
+  assert(assistantBox.padding > 0, "assistant message has no padding");
+  assert(
+    assistantBox.background !== "rgba(0, 0, 0, 0)" || assistantBox.backgroundImage !== "none",
+    "assistant message background is transparent",
+  );
+
+  const codeBox = await page.locator("#chat-log .md-code").first().evaluate((el) => {
+    const s = getComputedStyle(el);
+    const pre = el.querySelector("pre");
+    const ps = pre ? getComputedStyle(pre) : null;
+    return {
+      padding: parseFloat(s.paddingTop) + parseFloat(s.paddingLeft),
+      prePadding: ps ? parseFloat(ps.paddingTop) + parseFloat(ps.paddingLeft) : 0,
+      background: s.backgroundColor,
+      backgroundImage: s.backgroundImage,
+    };
+  });
+  assert(codeBox.padding > 0 || codeBox.prePadding > 0, "code block has no padding");
+  assert(
+    codeBox.background !== "rgba(0, 0, 0, 0)" || codeBox.backgroundImage !== "none",
+    "code block background is transparent",
+  );
+
+  const codeColors = await page.evaluate(() => {
+    const code = document.querySelector("#chat-log .md-code code.hljs");
+    const keyword = document.querySelector("#chat-log .md-code code.hljs .hljs-keyword");
+    return {
+      code: code ? getComputedStyle(code).color : null,
+      keyword: keyword ? getComputedStyle(keyword).color : null,
+    };
+  });
+  assert(codeColors.code && codeColors.keyword, "highlighted code tokens were not found");
+  assert(
+    codeColors.keyword !== codeColors.code,
+    `hljs keyword ${codeColors.keyword} must differ from code ${codeColors.code}`,
+  );
+
   const reasoningOptions = await page.locator("#chat-reasoning option").count();
   assert(reasoningOptions === 4, `expected 4 reasoning options, got ${reasoningOptions}`);
+
+  await page.evaluate(() => {
+    if (document.querySelectorAll(".chat-item").length < 2) document.querySelector("#chat-new").click();
+  });
+  await page.waitForFunction(() => document.querySelectorAll(".chat-item").length >= 2);
+  const chatItemStyles = await page.evaluate(() => {
+    const active = document.querySelector(".chat-item.active");
+    const inactive = [...document.querySelectorAll(".chat-item")].find(
+      (el) => !el.classList.contains("active"),
+    );
+    if (!active || !inactive) return null;
+    const a = getComputedStyle(active);
+    const i = getComputedStyle(inactive);
+    return {
+      active: [a.backgroundColor, a.color, a.borderColor],
+      inactive: [i.backgroundColor, i.color, i.borderColor],
+    };
+  });
+  assert(chatItemStyles, "need active and inactive chat items to compare");
+  assert(
+    chatItemStyles.active.some((value, index) => value !== chatItemStyles.inactive[index]),
+    `active chat item is not visually distinct: ${JSON.stringify(chatItemStyles)}`,
+  );
   assert(await page.locator("#chat-reasoning-wrap").isVisible(), "reasoning selector is hidden");
 
   await page.setInputFiles("#chat-file-input", {
@@ -240,6 +346,17 @@ try {
   assert(
     !permissionLabel.includes("инструмент пакета"),
     `contradictory package label on a platform tool: ${permissionLabel}`,
+  );
+
+  const permissionBox = await page.locator("#chat-permission").boundingBox();
+  assert(permissionBox, "#chat-permission is not rendered");
+  const viewport = page.viewportSize();
+  assert(
+    permissionBox.x >= -0.5 &&
+      permissionBox.y >= -0.5 &&
+      permissionBox.x + permissionBox.width <= viewport.width + 0.5 &&
+      permissionBox.y + permissionBox.height <= viewport.height + 0.5,
+    `permission card escapes the viewport: ${JSON.stringify(permissionBox)} for ${JSON.stringify(viewport)}`,
   );
 
   await page.evaluate(() => {
@@ -418,13 +535,386 @@ try {
     "local mode must not show the allowlist gate",
   );
 
+  async function layoutSnapshot(width, height, theme) {
+    await page.setViewportSize({ width, height });
+    await page.evaluate((nextTheme) => {
+      try {
+        localStorage.setItem("theme", nextTheme);
+      } catch (_) {}
+    }, theme);
+    await page.reload();
+    await page.waitForSelector("#apps-panel .card");
+
+    const catalog = await page.evaluate(() => {
+      const hasScrollAncestor = (el) => {
+        for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
+          const overflowX = getComputedStyle(node).overflowX;
+          if (overflowX === "auto" || overflowX === "scroll" || overflowX === "hidden") return true;
+        }
+        return false;
+      };
+      const offenders = [...document.querySelectorAll("body *")]
+        .filter((el) => {
+          const style = getComputedStyle(el);
+          if (style.display === "none" || style.visibility === "hidden" || style.position === "fixed") return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width > window.innerWidth + 1 && !hasScrollAncestor(el);
+        })
+        .slice(0, 4)
+        .map((el) => `${el.tagName.toLowerCase()}.${String(el.className).split(/\s+/).join(".")}`);
+      const clipped = (el) => {
+        const s = getComputedStyle(el);
+        return s.textOverflow === "ellipsis" || (s.webkitLineClamp && s.webkitLineClamp !== "none");
+      };
+      // Ellipsized/clamped text intentionally reports scrollWidth > clientWidth.
+      const overflowItems = (root) => {
+        if (!root) return [];
+        return [...root.querySelectorAll("*")]
+          .filter((el) => {
+            const s = getComputedStyle(el);
+            if (s.display === "none" || s.visibility === "hidden") return false;
+            const r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return false;
+            return el.scrollWidth > el.clientWidth + 1 && !clipped(el);
+          })
+          .slice(0, 4)
+          .map((el) => `${el.tagName.toLowerCase()}#${el.id}.${String(el.className).split(/\s+/).join(".")}`);
+      };
+      const grid = document.querySelector("#apps");
+      const firstCard = document.querySelector("#apps .card");
+      const firstCardHead = firstCard ? firstCard.querySelector(".app-card-top") : null;
+      const topbar = document.querySelector(".topbar");
+      return {
+        theme: document.documentElement.dataset.theme,
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        bodyScrollWidth: document.body.scrollWidth,
+        docScrollWidth: document.documentElement.scrollWidth,
+        columns: getComputedStyle(grid).gridTemplateColumns.split(" ").filter(Boolean).length,
+        cards: document.querySelectorAll("#apps .card").length,
+        firstCardTop: firstCard ? Math.round(firstCard.getBoundingClientRect().top) : -1,
+        firstCardHeadBottom: firstCardHead ? Math.round(firstCardHead.getBoundingClientRect().bottom) : -1,
+        topbarOverflow: overflowItems(topbar),
+        offenders,
+      };
+    });
+    assert(catalog.theme === theme, `theme was not applied for ${width}x${height}: ${catalog.theme}`);
+    assert(
+      catalog.docScrollWidth <= catalog.innerWidth + 1 &&
+        catalog.bodyScrollWidth <= catalog.innerWidth + 1,
+      `catalog horizontal overflow at ${width}x${height}: ${JSON.stringify(catalog)}`,
+    );
+    assert(
+      catalog.offenders.length === 0,
+      `catalog elements wider than viewport at ${width}x${height}: ${catalog.offenders.join(", ")}`,
+    );
+    if (width <= 900) {
+      assert(
+        catalog.columns === 2,
+        `catalog must show 2 columns at ${width}px, got ${catalog.columns}`,
+      );
+    }
+    assert(
+      catalog.topbarOverflow.length === 0,
+      `topbar has clipped horizontal content at ${width}x${height}: ${catalog.topbarOverflow.join(", ")}`,
+    );
+    if (width === 900 && height === 600) {
+      assert(
+        catalog.firstCardTop > 0 && catalog.firstCardTop < catalog.innerHeight,
+        `first app card starts below the fold at 900x600: top=${catalog.firstCardTop}`,
+      );
+      assert(
+        catalog.firstCardHeadBottom > 0 && catalog.firstCardHeadBottom <= catalog.innerHeight + 1,
+        `first app card title/badges are clipped at 900x600: bottom=${catalog.firstCardHeadBottom}`,
+      );
+    }
+    await page.screenshot({ path: join(SHOT_DIR, `catalog-${theme}-${width}x${height}.png`) });
+
+    await page.locator('[data-open="doc-writer"]').click();
+    await page.waitForSelector("#workspace:not([hidden])");
+    await page.waitForFunction(
+      () => document.querySelector("#chat-log")?.textContent.includes("report.docx"),
+      null,
+      { timeout: 10000 },
+    );
+
+    const chat = await page.evaluate(() => {
+      const read = (selector) => {
+        const el = document.querySelector(selector);
+        if (!el) return null;
+        const style = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return {
+          hidden: Boolean(el.hidden),
+          display: style.display,
+          visible:
+            !el.hidden &&
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            rect.width > 0 &&
+            rect.height > 0,
+          left: rect.left,
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom,
+          width: rect.width,
+          height: rect.height,
+        };
+      };
+      const hasScrollAncestor = (el) => {
+        for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
+          const overflowX = getComputedStyle(node).overflowX;
+          if (overflowX === "auto" || overflowX === "scroll" || overflowX === "hidden") return true;
+        }
+        return false;
+      };
+      const offenders = [...document.querySelectorAll("body *")]
+        .filter((el) => {
+          const style = getComputedStyle(el);
+          if (style.display === "none" || style.visibility === "hidden" || style.position === "fixed") return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width > window.innerWidth + 1 && !hasScrollAncestor(el);
+        })
+        .slice(0, 4)
+        .map((el) => `${el.tagName.toLowerCase()}.${String(el.className).split(/\s+/).join(".")}`);
+      const clipped = (el) => {
+        const s = getComputedStyle(el);
+        return s.textOverflow === "ellipsis" || (s.webkitLineClamp && s.webkitLineClamp !== "none");
+      };
+      // Ellipsized/clamped text intentionally reports scrollWidth > clientWidth.
+      const overflowItems = (root) => {
+        if (!root) return [];
+        return [...root.querySelectorAll("*")]
+          .filter((el) => {
+            const s = getComputedStyle(el);
+            if (s.display === "none" || s.visibility === "hidden") return false;
+            const r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return false;
+            return el.scrollWidth > el.clientWidth + 1 && !clipped(el);
+          })
+          .slice(0, 4)
+          .map((el) => `${el.tagName.toLowerCase()}#${el.id}.${String(el.className).split(/\s+/).join(".")}`);
+      };
+      const log = document.querySelector("#chat-log");
+      log.scrollTop = log.scrollHeight;
+      const logStyle = getComputedStyle(log);
+      return {
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        docScrollWidth: document.documentElement.scrollWidth,
+        bodyScrollWidth: document.body.scrollWidth,
+        workspace: read("#workspace"),
+        topbar: read(".ws-topbar"),
+        head: read(".chat-head"),
+        log: read("#chat-log"),
+        composer: read(".chat-composer-wrap"),
+        topbarOverflow: overflowItems(document.querySelector(".ws-topbar")),
+        headOverflow: overflowItems(document.querySelector(".chat-head")),
+        logOverflowY: logStyle.overflowY,
+        logScrollTop: log.scrollTop,
+        logScrollHeight: log.scrollHeight,
+        logClientHeight: log.clientHeight,
+        offenders,
+      };
+    });
+    for (const [name, box] of [
+      ["#workspace", chat.workspace],
+      ["#chat-log", chat.log],
+      [".chat-composer-wrap", chat.composer],
+    ]) {
+      assert(
+        box && box.visible,
+        `${name} is not visible at ${width}x${height}: ${JSON.stringify(box)}`,
+      );
+      assert(
+        box.left >= -1 &&
+          box.top >= -1 &&
+          box.right <= chat.innerWidth + 1 &&
+          box.bottom <= chat.innerHeight + 1,
+        `${name} escapes the viewport at ${width}x${height}: ${JSON.stringify(box)}`,
+      );
+    }
+    assert(
+      chat.logOverflowY === "auto" || chat.logOverflowY === "scroll",
+      `#chat-log is not the scroll host at ${width}x${height}: ${chat.logOverflowY}`,
+    );
+    assert(
+      chat.logScrollTop + chat.logClientHeight >= chat.logScrollHeight - 48,
+      `#chat-log history is not at the tail at ${width}x${height}: ${JSON.stringify(chat)}`,
+    );
+    assert(
+      chat.docScrollWidth <= chat.innerWidth + 1 &&
+        chat.bodyScrollWidth <= chat.innerWidth + 1,
+      `chat horizontal overflow at ${width}x${height}: ${JSON.stringify(chat)}`,
+    );
+    assert(
+      chat.offenders.length === 0,
+      `chat elements wider than viewport at ${width}x${height}: ${chat.offenders.join(", ")}`,
+    );
+    assert(
+      chat.topbar && chat.topbar.height <= 112,
+      `workspace topbar is ${chat.topbar && chat.topbar.height}px tall at ${width}x${height} (max 112)`,
+    );
+    assert(
+      chat.topbarOverflow.length === 0,
+      `workspace topbar content overflows at ${width}x${height}: ${chat.topbarOverflow.join(", ")}`,
+    );
+    assert(
+      chat.headOverflow.length === 0,
+      `chat head content overflows at ${width}x${height}: ${chat.headOverflow.join(", ")}`,
+    );
+    if (width === 900 && height === 600) {
+      assert(
+        chat.log.height >= 240,
+        `#chat-log is only ${chat.log.height}px tall at 900x600 (min 240)`,
+      );
+    }
+    await page.screenshot({ path: join(SHOT_DIR, `chat-${theme}-${width}x${height}.png`) });
+    return { catalog, chat };
+  }
+
+  const hasChassis = await page.evaluate(() => Boolean(document.querySelector(".app > .side")));
+  if (!hasChassis) {
+    console.log("layout chassis not present: skipping Wave 1+2 layout checks");
+  }
+  const layoutReports = [];
+  if (hasChassis) {
+  for (const [width, height, theme] of [
+    [1180, 900, "dark"],
+    [1180, 900, "light"],
+    [900, 600, "dark"],
+    [900, 600, "light"],
+  ]) {
+    layoutReports.push(await layoutSnapshot(width, height, theme));
+  }
+  for (const report of layoutReports) {
+    console.log(
+      `layout ${report.catalog.innerWidth}x${report.chat.innerHeight}: theme=${report.catalog.theme} cols=${report.catalog.columns} workspace=${Math.round(report.chat.workspace.width)}x${Math.round(report.chat.workspace.height)} topbar=${Math.round(report.chat.topbar.height)} log=${Math.round(report.chat.log.width)}x${Math.round(report.chat.log.height)} scroll=${report.chat.logClientHeight}/${report.chat.logScrollHeight} firstCardTop=${report.catalog.firstCardTop} composerBottom=${Math.round(report.chat.composer.bottom)}`,
+    );
+  }
+
+  // Settings and dev tabs must lay out without horizontal clipping at 900x600.
+  await page.setViewportSize({ width: 900, height: 600 });
+  if (await page.locator("#workspace").isVisible()) {
+    await page.click("#ws-back");
+    await page.waitForSelector("#apps-panel:not([hidden])");
+  }
+  await page.click('.tab[data-tab="settings"]');
+  await page.waitForSelector("#tab-settings.active");
+  await page.waitForFunction(
+    () => (document.querySelector("#llm-endpoint")?.value || "").length > 0,
+  );
+
+  const tabOverflow = async (selector, controlIds = []) =>
+    page.evaluate(
+      ({ selector, controlIds }) => {
+        const tab = document.querySelector(selector);
+        if (!tab) return null;
+        const b = tab.getBoundingClientRect();
+        const clipped = (el) => {
+          const s = getComputedStyle(el);
+          return s.textOverflow === "ellipsis" || (s.webkitLineClamp && s.webkitLineClamp !== "none");
+        };
+        const offenders = [...tab.querySelectorAll("*")]
+          .filter((el) => {
+            const s = getComputedStyle(el);
+            if (s.display === "none" || s.visibility === "hidden") return false;
+            const r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return false;
+            return r.right > window.innerWidth + 1 || r.left < -1;
+          })
+          .slice(0, 6)
+          .map((el) => `${el.tagName.toLowerCase()}#${el.id}.${String(el.className).split(/\s+/).join(".")}`);
+        const scrollOffenders = [...tab.querySelectorAll("*")]
+          .filter((el) => {
+            const s = getComputedStyle(el);
+            if (s.display === "none" || s.visibility === "hidden") return false;
+            const r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return false;
+            return el.scrollWidth > el.clientWidth + 1 && !clipped(el);
+          })
+          .slice(0, 6)
+          .map((el) => `${el.tagName.toLowerCase()}#${el.id}.${String(el.className).split(/\s+/).join(".")}`);
+        const controls = controlIds.map((id) => {
+          const el = document.querySelector(id);
+          if (!el) return { id, visible: false };
+          const r = el.getBoundingClientRect();
+          const s = getComputedStyle(el);
+          return {
+            id,
+            visible: r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden",
+          };
+        });
+        return {
+          box: { left: Math.round(b.left), right: Math.round(b.right), width: Math.round(b.width) },
+          scrollWidth: tab.scrollWidth,
+          clientWidth: tab.clientWidth,
+          offenders,
+          scrollOffenders,
+          controls,
+        };
+      },
+      { selector, controlIds },
+    );
+
+  const settingsReports = [];
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((nextTheme) => {
+      document.documentElement.dataset.theme = nextTheme;
+      try {
+        localStorage.setItem("theme", nextTheme);
+      } catch (_) {}
+    }, theme);
+    await page.waitForTimeout(260);
+    const report = await tabOverflow("#tab-settings", [
+      "#perm-write",
+      "#llm-endpoint",
+      "#artifact-query",
+      "#mcp-servers",
+    ]);
+    assert(report, "#tab-settings was not found");
+    assert(
+      report.scrollWidth <= report.clientWidth + 1 && report.offenders.length === 0 && report.scrollOffenders.length === 0,
+      `settings tab overflows at 900x600 (${theme}): ${JSON.stringify(report)}`,
+    );
+    for (const control of report.controls) {
+      assert(control.visible, `${control.id} is not visible in the settings tab at 900x600`);
+    }
+    await page.screenshot({ path: join(SHOT_DIR, `settings-${theme}-900x600.png`) });
+    settingsReports.push({ theme, ...report });
+  }
+
+  await page.click('.tab[data-tab="dev"]');
+  await page.waitForSelector("#tab-dev.active");
+  const devReports = [];
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((nextTheme) => {
+      document.documentElement.dataset.theme = nextTheme;
+      try {
+        localStorage.setItem("theme", nextTheme);
+      } catch (_) {}
+    }, theme);
+    await page.waitForTimeout(260);
+    const report = await tabOverflow("#tab-dev");
+    assert(report, "#tab-dev was not found");
+    assert(
+      report.scrollWidth <= report.clientWidth + 1 && report.offenders.length === 0 && report.scrollOffenders.length === 0,
+      `dev tab overflows at 900x600 (${theme}): ${JSON.stringify(report)}`,
+    );
+    await page.screenshot({ path: join(SHOT_DIR, `dev-${theme}-900x600.png`) });
+    devReports.push({ theme, ...report });
+  }
+  console.log(
+    `settings/dev 900x600: settings=${settingsReports.map((r) => `${r.theme}:${r.clientWidth}/${r.scrollWidth}`).join(",")} dev=${devReports.map((r) => `${r.theme}:${r.clientWidth}/${r.scrollWidth}`).join(",")} controls=${settingsReports[0].controls.filter((c) => c.visible).length}/${settingsReports[0].controls.length}`,
+  );
+  }
   assert(
     externalRequests.length === 0,
     `external requests from the UI: ${externalRequests.join(", ")}`,
   );
   assert(pageErrors.length === 0, `page errors: ${pageErrors.join("; ")}`);
   console.log(
-    "ui smoke ok: catalog, allowlist, chat, highlight, workspace files, diagrams, app settings, artifacts, attachments, permission target, package import, modes",
+    "ui smoke ok: catalog, allowlist, chat, highlight, workspace files, diagrams, app settings, artifacts, attachments, permission target, package import, modes, topbar density, chat-log height, settings/dev overflow",
   );
 } finally {
   await browser.close();

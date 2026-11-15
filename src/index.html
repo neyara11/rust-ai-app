@@ -12,142 +12,129 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <div class="logo" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 2L3 7v10l9 5 9-5V7l-9-5z" />
-          <path d="M12 22V12" />
-          <path d="M21 7l-9 5-9-5" />
-          <circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none" />
-        </svg>
-      </div>
-      <div class="brand-copy">
-        <div class="brand-title-row">
-          <span class="brand-title">ECO AIOps</span>
-          <span class="brand-tag">DESKTOP SHELL</span>
+  <div class="app">
+    <aside class="side">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L3 7v10l9 5 9-5V7l-9-5z" />
+            <path d="M12 22V12" />
+            <path d="M21 7l-9 5-9-5" />
+            <circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none" />
+          </svg>
+        </div>
+        <div class="brand-copy">
+          <div class="brand-title-row">
+            <span class="brand-title">ECO AIOps</span>
+            <span class="brand-tag">DESKTOP</span>
+          </div>
+          <span class="brand-sub">офлайн-контур</span>
         </div>
       </div>
-    </div>
 
-    <nav class="tabs" aria-label="Основные разделы">
-      <button class="tab active" data-tab="apps" type="button">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="3" y="3" width="7" height="7" rx="1.8" />
-          <rect x="14" y="3" width="7" height="7" rx="1.8" />
-          <rect x="3" y="14" width="7" height="7" rx="1.8" />
-          <rect x="14" y="14" width="7" height="7" rx="1.8" />
-        </svg>
-        <span>Каталог и рабочая среда</span>
-      </button>
-      <button class="tab" data-tab="dev" type="button" aria-label="Мастер пакета" title="Мастер пакета">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M21 8l-9-5-9 5 9 5 9-5z" />
-          <path d="M3 8v8l9 5 9-5V8" />
-          <path d="M12 13v8" />
-        </svg>
-        <span>Мастер пакета</span>
-      </button>
-      <button class="tab icon-only" data-tab="settings" type="button" aria-label="Контур и секреты" title="Контур и секреты">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="3" />
-          <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.9 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 8.9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z" />
-        </svg>
-      </button>
-    </nav>
-
-    <div class="header-meta">
-      <span id="mode-badge" class="badge mono" title="Режим установки и роль">режим…</span>
-      <button id="theme-toggle" class="icon-btn" type="button" aria-label="Переключить тему" title="Переключить тему">
-        <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="4" />
-          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
-        </svg>
-        <svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M20.5 14.3A8.5 8.5 0 0 1 9.7 3.5 8.5 8.5 0 1 0 20.5 14.3z" />
-        </svg>
-      </button>
-    </div>
-  </header>
-
-  <div id="mode-overlay" class="mode-overlay" hidden>
-    <div class="mode-dialog" role="dialog" aria-modal="true" aria-labelledby="mode-title">
-      <div class="eyebrow">ПЕРВЫЙ ЗАПУСК</div>
-      <h1 id="mode-title">Как вы будете использовать платформу?</h1>
-      <p class="panel-desc">Режим определяет, какие пакеты можно ставить и как проверяется их неизменность. Его можно сменить позже в настройках.</p>
-
-      <div class="mode-grid">
-        <button class="mode-card" type="button" data-mode="local">
-          <span class="mode-title">Локальный</span>
-          <span class="mode-desc">Любые пакеты — подписанные и без подписи. Установленное приложение нельзя изменить: целостность держит подпись или локальный слепок. Trust anchor и allowlist не нужны.</span>
-          <span class="mode-tag">для личного и командного использования</span>
+      <nav class="tabs" aria-label="Основные разделы">
+        <button class="tab active" data-tab="apps" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="3" width="7" height="7" rx="1.8" />
+            <rect x="14" y="3" width="7" height="7" rx="1.8" />
+            <rect x="3" y="14" width="7" height="7" rx="1.8" />
+            <rect x="14" y="14" width="7" height="7" rx="1.8" />
+          </svg>
+          <span>Каталог приложений</span>
         </button>
-        <button class="mode-card" type="button" data-mode="corporate">
-          <span class="mode-title">Корпоративный</span>
-          <span class="mode-desc">Только пакеты с подписью доверенного ключа и разрешением allowlist. Контур, ключи и обновления задаёт администратор.</span>
-          <span class="mode-tag">для тиражирования по политике ИБ</span>
+        <button class="tab" data-tab="dev" type="button" aria-label="Мастер пакета" title="Мастер пакета">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 8l-9-5-9 5 9 5 9-5z" />
+            <path d="M3 8v8l9 5 9-5V8" />
+            <path d="M12 13v8" />
+          </svg>
+          <span>Мастер пакета</span>
         </button>
+        <button class="tab" data-tab="settings" type="button" aria-label="Контур и секреты" title="Контур и секреты">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.9 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 8.9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z" />
+          </svg>
+          <span>Контур и секреты</span>
+        </button>
+      </nav>
+
+      <div class="side-foot">
+        <button id="theme-toggle" class="ib" type="button" aria-label="Переключить тему" title="Переключить тему">
+          <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="4" />
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+          </svg>
+          <svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20.5 14.3A8.5 8.5 0 0 1 9.7 3.5 8.5 8.5 0 1 0 20.5 14.3z" />
+          </svg>
+        </button>
+        <span id="mode-badge" class="badge mono" title="Режим установки и роль">режим…</span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div class="tb-left">
+          <span class="tb-title">ECO AIOps Platform</span>
+          <span class="badge mono">офлайн-контур</span>
+        </div>
+        <div class="tb-right">
+          <span class="mono small muted">локальные данные · без внешних запросов</span>
+        </div>
       </div>
 
-      <div class="mode-role">
-        <span class="sidebar-label">Роль</span>
-        <label class="mode-radio"><input type="radio" name="mode-role" value="user" checked /> Пользователь — ставит и запускает приложения</label>
-        <label class="mode-radio"><input type="radio" name="mode-role" value="developer" /> Разработчик — собирает и подписывает пакеты</label>
-      </div>
-
-      <p id="mode-error" class="mode-error" hidden></p>
-    </div>
-  </div>
-
-  <main>
     <section id="tab-apps" class="tab-body active">
       <!-- App Catalog View -->
       <div class="catalog-view" id="apps-panel">
-        <div class="catalog-hero">
-          <div class="catalog-hero-copy">
-            <div class="eyebrow">РЕЕСТР МИНИ-ПРИЛОЖЕНИЙ · ЦЕЛОСТНОСТЬ ПРОВЕРЕНА</div>
-            <h1>Изолированные агентские пакеты</h1>
-            <p class="panel-desc">Каждое мини-приложение работает в собственном контуре с фиксированным системным промптом, белым списком инструментов и доступом к файлам только в выбранной рабочей папке.</p>
-          </div>
-          <div class="install-box">
-            <div class="install-label">Установка пакета (.zip или каталог)</div>
-            <div class="install-row">
-              <div class="input-with-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <polyline points="7 10 12 15 17 10" />
-                  <line x1="12" y1="15" x2="12" y2="3" />
-                </svg>
-                <input id="install-path" placeholder="Путь к .zip или папке пакета" />
+        <div class="scroller">
+          <div class="cat-page">
+            <div class="catalog-hero">
+              <div class="catalog-hero-copy">
+                <div class="eyebrow">РЕЕСТР МИНИ-ПРИЛОЖЕНИЙ · ЦЕЛОСТНОСТЬ ПРОВЕРЕНА</div>
+                <h1>Изолированные агентские пакеты</h1>
+                <p class="panel-desc">Каждое мини-приложение работает в собственном контуре с фиксированным системным промптом, белым списком инструментов и доступом к файлам только в выбранной рабочей папке.</p>
               </div>
-              <button id="install-btn" type="button">Установить пакет</button>
+              <div class="install-box">
+                <div class="install-label"><b>Установка пакета</b> · .zip или каталог</div>
+                <div class="install-row">
+                  <div class="input-with-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    <input id="install-path" placeholder="Путь к .zip или папке пакета" />
+                  </div>
+                  <button id="install-btn" class="pri" type="button">Установить пакет</button>
+                </div>
+                <div class="row-actions inst-acts">
+                  <button class="ghost small" id="install-pick-file" type="button">Выбрать .zip…</button>
+                  <button class="ghost small" id="install-pick-folder" type="button">Выбрать папку…</button>
+                </div>
+                <div class="install-quick">
+                  <span class="muted small">Быстрая установка dev-пакетов:</span>
+                  <button class="chip-btn" type="button" data-quick-install="dev-apps/doc-writer">doc-writer</button>
+                  <button class="chip-btn" type="button" data-quick-install="dev-apps/doc-lookup">doc-lookup</button>
+                </div>
+              </div>
             </div>
-            <div class="row-actions" style="margin-top:8px">
-              <button class="ghost small" id="install-pick-file" type="button">Выбрать .zip…</button>
-              <button class="ghost small" id="install-pick-folder" type="button">Выбрать папку…</button>
+
+            <div class="catalog-toolbar">
+              <div class="catalog-stats">
+                <span class="section-heading">Установленные пакеты</span>
+                <span class="count-pill" id="apps-count">0</span>
+              </div>
+              <div class="catalog-legend">
+                <span class="legend-item"><i class="dot ok"></i>Подпись или локальный seal проверены</span>
+                <span class="legend-item"><i class="dot bad"></i>Заблокировано (fail-closed)</span>
+              </div>
             </div>
-            <div class="install-quick">
-              <span class="muted small">Быстрая установка dev-пакетов:</span>
-              <button class="chip-btn" type="button" data-quick-install="dev-apps/doc-writer">doc-writer</button>
-              <button class="chip-btn" type="button" data-quick-install="dev-apps/doc-lookup">doc-lookup</button>
-            </div>
+
+            <div id="apps" class="cards"></div>
           </div>
         </div>
-
-        <div class="catalog-toolbar">
-          <div class="catalog-stats">
-            <span class="section-heading">Установленные пакеты</span>
-            <span class="count-pill" id="apps-count">0</span>
-          </div>
-          <div class="catalog-legend">
-            <span class="legend-item"><i class="dot ok"></i>Подпись или локальный seal проверены</span>
-            <span class="legend-item"><i class="dot bad"></i>Заблокировано (fail-closed)</span>
-          </div>
-        </div>
-
-        <div id="apps" class="cards"></div>
       </div>
-
       <!-- Full-Height App Workspace View -->
       <div class="workspace-shell" id="workspace" hidden>
         <div class="ws-topbar">
@@ -175,19 +162,19 @@
 
           <div class="ws-workspace">
             <span class="muted small">Рабочая папка</span>
-            <span class="mono small ws-folder" id="ws-folder">—</span>
+            <span class="mono small ws-folder" id="ws-folder" title="Полный путь рабочей папки">—</span>
             <button class="ghost small" id="ws-folder-open" type="button" title="Открыть рабочую папку в проводнике">Открыть</button>
             <button class="ghost small" id="ws-folder-pick" type="button">Выбрать</button>
           </div>
 
           <div class="ws-tabs" role="tablist" aria-label="Режимы приложения">
-            <button class="ws-tab active" data-ws="chat" type="button" role="tab">
+            <button class="ws-tab active" data-ws="chat" type="button" role="tab" aria-label="Диалог с агентом" title="Диалог с агентом">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
               </svg>
               <span>Диалог с агентом</span>
             </button>
-            <button class="ws-tab" data-ws="tools" type="button" role="tab">
+            <button class="ws-tab" data-ws="tools" type="button" role="tab" aria-label="MCP-инструменты" title="MCP-инструменты">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="16 18 22 12 16 6" />
                 <polyline points="8 6 2 12 8 18" />
@@ -195,7 +182,7 @@
               <span>MCP-инструменты</span>
               <span class="tab-counter" id="ws-tools-count">0</span>
             </button>
-            <button class="ws-tab" data-ws="settings" type="button" role="tab">
+            <button class="ws-tab" data-ws="settings" type="button" role="tab" aria-label="Настройки приложения" title="Настройки приложения">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="3" />
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
@@ -240,7 +227,7 @@
                 <div class="chat-status-group">
                   <span class="engine-dot" id="engine-dot"></span>
                   <span class="mono small" id="chat-model">движок не запущен</span>
-                  <span class="badge bad" id="chat-warning" hidden>endpoint — локальная заглушка</span>
+                  <span class="badge bad" id="chat-warning" title="endpoint — локальная заглушка" hidden><span class="chat-warning-text">endpoint — локальная заглушка</span></span>
                 </div>
                 <div class="row-actions">
                   <label class="inline-select-label" id="chat-reasoning-wrap">
@@ -255,12 +242,12 @@
                 </div>
               </div>
 
-              <div id="chat-log" class="chat-log"></div>
+              <div id="chat-log" class="chat-log thread"></div>
 
-              <div class="chat-composer-wrap">
+              <div class="chat-composer-wrap composer-wrap">
                 <div id="chat-permission" class="chat-permission" hidden></div>
                 <div id="chat-attachments" class="chat-attachments" hidden></div>
-                <div class="chat-input">
+                <div class="chat-input composer">
                   <label class="chat-attach-btn" title="Прикрепить изображение или текстовый файл">
                     <input id="chat-file-input" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.csv,.log,.yaml,.yml,.xml,.html,.css,.js,.ts,.rs,.py,.toml,.ini" hidden />
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -268,7 +255,7 @@
                     </svg>
                   </label>
                   <textarea id="chat-text" placeholder="Попросите агента создать или поправить файл в рабочей папке либо сконвертировать markdown в Word… (Enter — отправить, Shift+Enter — новая строка)" rows="2"></textarea>
-                  <div class="chat-input-actions">
+                  <div class="chat-input-actions c-row">
                     <span class="kbd-hint mono">Enter ↵</span>
                     <button id="chat-stop" class="stop" type="button" hidden>Остановить</button>
                     <button id="chat-send" type="button">
@@ -785,7 +772,37 @@
         </div>
       </div>
     </section>
-  </main>
+    </main>
+  </div>
+
+  <div id="mode-overlay" class="mode-overlay" hidden>
+    <div class="mode-dialog" role="dialog" aria-modal="true" aria-labelledby="mode-title">
+      <div class="eyebrow">ПЕРВЫЙ ЗАПУСК</div>
+      <h1 id="mode-title">Как вы будете использовать платформу?</h1>
+      <p class="panel-desc">Режим определяет, какие пакеты можно ставить и как проверяется их неизменность. Его можно сменить позже в настройках.</p>
+
+      <div class="mode-grid">
+        <button class="mode-card" type="button" data-mode="local">
+          <span class="mode-title">Локальный</span>
+          <span class="mode-desc">Любые пакеты — подписанные и без подписи. Установленное приложение нельзя изменить: целостность держит подпись или локальный слепок. Trust anchor и allowlist не нужны.</span>
+          <span class="mode-tag">для личного и командного использования</span>
+        </button>
+        <button class="mode-card" type="button" data-mode="corporate">
+          <span class="mode-title">Корпоративный</span>
+          <span class="mode-desc">Только пакеты с подписью доверенного ключа и разрешением allowlist. Контур, ключи и обновления задаёт администратор.</span>
+          <span class="mode-tag">для тиражирования по политике ИБ</span>
+        </button>
+      </div>
+
+      <div class="mode-role">
+        <span class="sidebar-label">Роль</span>
+        <label class="mode-radio"><input type="radio" name="mode-role" value="user" checked /> Пользователь — ставит и запускает приложения</label>
+        <label class="mode-radio"><input type="radio" name="mode-role" value="developer" /> Разработчик — собирает и подписывает пакеты</label>
+      </div>
+
+      <p id="mode-error" class="mode-error" hidden></p>
+    </div>
+  </div>
 
   <div id="toast" class="toast" hidden></div>
   <script src="vendor/mermaid.min.js"></script>
