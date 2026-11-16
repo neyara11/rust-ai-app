@@ -119,6 +119,20 @@ try {
     (await page.locator('#chat-log .ws-file-name[data-ws-file="docx_export"]').count()) === 0,
     "tool names must not become file chips",
   );
+  assert(
+    (await page.evaluate(() => workspaceFileRef(".docx"))) === "",
+    "a bare extension in backticks became a file chip",
+  );
+  const formatHtml = await page.evaluate(() => renderMarkdown("Открой `.docx` и посмотри"));
+  assert(
+    formatHtml.includes("<code>.docx</code>") && !formatHtml.includes("ws-file"),
+    `bare extension must stay inline code: ${formatHtml}`,
+  );
+  const cyrillicChip = await page.evaluate(() => renderMarkdown("Готов `отчёт.md`."));
+  assert(
+    cyrillicChip.includes('data-ws-file="отчёт.md"'),
+    `a cyrillic file name must still become a chip: ${cyrillicChip}`,
+  );
   await page.locator('#chat-log .ws-file-name[data-ws-file="report.md"]').first().click();
   await page.waitForFunction(
     () => document.querySelector("#toast")?.textContent.includes("Открываю report.md"),

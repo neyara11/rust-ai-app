@@ -39,7 +39,13 @@ pub fn openable(path: &Path) -> bool {
 
 /// Resolves a chat-supplied path to an existing file inside the workspace.
 pub fn resolve(workspace: &Path, raw: &str) -> Result<PathBuf> {
-    let path = proxy::resolve_workspace_path(workspace, raw)?;
+    let path = proxy::resolve_workspace_path(workspace, raw).map_err(|error| match error {
+        // The OS message for a missing file is localised and cryptic in a toast.
+        crate::error::Error::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+            crate::error::Error::Msg(format!("файл не найден в рабочей папке: {raw}"))
+        }
+        other => other,
+    })?;
     if !path.is_file() {
         return msg("path is not a file");
     }
@@ -92,7 +98,10 @@ fn shell_open(target: &std::ffi::OsStr) -> Result<()> {
     };
     // ShellExecuteW returns a value above 32 on success.
     if result as isize <= 32 {
-        return msg("the shell could not open this target");
+        return msg(format!(
+            "the shell could not open {}",
+            target.to_string_lossy()
+        ));
     }
     Ok(())
 }
@@ -180,6 +189,20 @@ mod tests {
         assert!(url_allowed("ms-msdt:/id PCWDiagnostic").is_err());
         assert!(url_allowed("https://example.com/a b").is_err());
         assert!(url_allowed("").is_err());
+    }
+
+    #[test]
+    fn cyrillic_workspace_paths_resolve() {
+        let root = temp_dir("кириллица");
+        fs::write(root.join("отчёт.md"), "x").unwrap();
+
+        let resolved = resolve(&root, "отчёт.md").unwrap();
+        assert!(resolved.ends_with("отчёт.md"));
+
+        let missing = resolve(&root, ".docx").unwrap_err().to_string();
+        assert!(missing.contains("не найден"), "unexpected error: {missing}");
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

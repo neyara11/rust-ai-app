@@ -915,6 +915,11 @@ function workspaceFileRef(value) {
   const raw = String(value).trim();
   if (!raw || raw.length > 200 || /[\s<>]/.test(raw)) return "";
   if (/^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.includes("..")) return "";
+  // A bare extension in backticks (`.docx`, `.md`) is prose about a format, not
+  // a file name: it must stay inline code instead of becoming a broken chip.
+  if (/^\.[A-Za-z0-9]+$/.test(raw)) return "";
+  const base = raw.slice(0, raw.lastIndexOf("."));
+  if (!base || !/[A-Za-z0-9_\u0400-\u04FF]/.test(base.replace(/\/+$/, ""))) return "";
   if (!WS_FILE_EXT.test(raw)) return "";
   return raw.replace(/^\.\//, "");
 }
