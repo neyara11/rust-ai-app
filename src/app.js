@@ -375,7 +375,17 @@ const browserMock = (() => {
           session: activeSession[args.app_id] || "ses-101",
         };
       case "chat_list":
-        return (mockChats[args.app_id] || []).map((c) => ({ id: c.id, title: c.title }));
+        return (mockChats[args.app_id] || []).map((c, index) => ({
+          id: c.id,
+          title: c.title,
+          updated: Date.now() - index * 86400000,
+        }));
+      case "chat_rename": {
+        const sessions = mockChats[args.app_id] || [];
+        const chat = sessions.find((c) => c.id === args.session_id);
+        if (chat) chat.title = args.title;
+        return null;
+      }
       case "chat_history": {
         const sessions = mockChats[args.app_id] || [];
         const current = sessions.find((s) => s.id === activeSession[args.app_id]) || sessions[0];
@@ -512,17 +522,48 @@ function esc(v) {
   }[c]));
 }
 
-let toastTimer = null;
 function toast(message, isError) {
-  const el = $("toast");
-  if (!el) return;
-  el.textContent = message;
+  const stack = $("toast");
+  if (!stack) return;
+  const el = document.createElement("div");
   el.className = "toast" + (isError ? " error" : "");
-  el.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    el.hidden = true;
-  }, isError ? 8000 : 3200);
+  el.textContent = message;
+  el.title = "Нажмите, чтобы скрыть";
+  el.addEventListener("click", () => el.remove());
+  stack.appendChild(el);
+  while (stack.children.length > 4) stack.firstElementChild.remove();
+  setTimeout(() => {
+    el.classList.add("leaving");
+    setTimeout(() => el.remove(), 240);
+  }, isError ? 8000 : 3400);
+}
+
+/* ---------- confirmation dialog ---------- */
+
+let confirmResolve = null;
+
+/** Replaces window.confirm: resolves true on confirm, false on cancel/Escape. */
+function askConfirm(options) {
+  const opts = typeof options === "string" ? { message: options } : options || {};
+  return new Promise((resolve) => {
+    confirmResolve = resolve;
+    $("confirm-title").textContent = opts.title || "Подтвердить действие?";
+    $("confirm-message").textContent = opts.message || "";
+    const ok = $("confirm-ok");
+    ok.textContent = opts.confirmLabel || "Подтвердить";
+    ok.classList.toggle("danger", Boolean(opts.danger));
+    $("confirm-overlay").hidden = false;
+    ok.focus();
+  });
+}
+
+function settleConfirm(value) {
+  const overlay = $("confirm-overlay");
+  if (!overlay || overlay.hidden) return;
+  overlay.hidden = true;
+  const resolve = confirmResolve;
+  confirmResolve = null;
+  if (resolve) resolve(value);
 }
 
 async function guard(fn) {
@@ -778,7 +819,14 @@ async function openWorkspaceFolder() {
 }
 
 async function removeApp(appId) {
-  if (!confirm(`Удалить приложение ${appId}?`)) return;
+  const app = (ctx.apps || []).find((item) => item.app_id === appId);
+  const ok = await askConfirm({
+    title: "Удалить приложение?",
+    message: `${(app && app.name) || appId} будет удалён из каталога вместе с пакетом. Рабочая папка останется на диске.`,
+    confirmLabel: "Удалить",
+    danger: true,
+  });
+  if (!ok) return;
   await guard(async () => {
     if (ctx.appId === appId) await closeApp();
     await invoke("remove_app", { app_id: appId });
@@ -788,7 +836,13 @@ async function removeApp(appId) {
 }
 
 async function rollbackApp(appId, version) {
-  if (!confirm(`Откатить ${appId} к версии ${version}?`)) return;
+  const ok = await askConfirm({
+    title: "Откатить версию?",
+    message: `${appId} вернётся к версии ${version}. Текущая версия будет заменена, разрешения пакета нужно будет выдать заново.`,
+    confirmLabel: "Откатить",
+    danger: true,
+  });
+  if (!ok) return;
   await guard(async () => {
     if (ctx.appId === appId) await closeApp();
     const app = await invoke("rollback_app", { app_id: appId, version });
@@ -1681,6 +1735,61 @@ async function syncBusy() {
   }
 }
 
+/** Buckets a session timestamp into a history group label. */
+function chatGroup(updated) {
+  if (!updated) return "Ранее";
+  const stamp = Number(updated) < 1e12 ? Number(updated) * 1000 : Number(updated);
+  const date = new Date(stamp);
+  if (Number.isNaN(date.getTime())) return "Ранее";
+  const midnight = (value) =>
+    new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const diff = Math.round((midnight(new Date()) - midnight(date)) / 86400000);
+  if (diff <= 0) return "Сегодня";
+  if (diff === 1) return "Вчера";
+  if (diff < 7) return "На этой неделе";
+  return "Ранее";
+}
+
+function startChatRename(button, chat) {
+  const input = document.createElement("input");
+  input.className = "chat-rename";
+  input.value = chat.title;
+  input.setAttribute("aria-label", "Название чата");
+  button.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const value = input.value.trim();
+    if (save && value && value !== chat.title) {
+      try {
+        await invoke("chat_rename", {
+          app_id: ctx.appId,
+          session_id: chat.id,
+          title: value,
+        });
+        chat.title = value;
+        toast("Чат переименован");
+      } catch (e) {
+        toast(String(e), true);
+      }
+    }
+    renderChatList();
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
 function renderChatList() {
   const box = $("chat-list");
   box.innerHTML = "";
@@ -1688,15 +1797,28 @@ function renderChatList() {
   const chats = (ctx.chats || []).filter(
     (chat) => !query || String(chat.title || "").toLowerCase().includes(query),
   );
+  let group = "";
   for (const chat of chats) {
+    const label = chatGroup(chat.updated);
+    if (label !== group) {
+      group = label;
+      const head = document.createElement("div");
+      head.className = "hist-group";
+      head.textContent = label;
+      box.appendChild(head);
+    }
     const row = document.createElement("div");
     row.className = "chat-row";
 
     const btn = document.createElement("button");
     btn.className = "chat-item" + (chat.id === ctx.chatId ? " active" : "");
     btn.textContent = chat.title;
-    btn.title = chat.title;
+    btn.title = `${chat.title}\nДвойной щелчок — переименовать`;
     btn.dataset.chat = chat.id;
+    btn.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      startChatRename(btn, chat);
+    });
 
     const del = document.createElement("button");
     del.className = "chat-del";
@@ -1721,6 +1843,11 @@ function setViewTitle(text) {
   if (title) title.textContent = text;
 }
 
+function setSheetOpen(open) {
+  const scrim = document.getElementById("sheet-scrim");
+  if (scrim) scrim.hidden = !open;
+}
+
 function activateTab(name) {
   document
     .querySelectorAll(".tab")
@@ -1728,6 +1855,7 @@ function activateTab(name) {
   document
     .querySelectorAll(".tab-body")
     .forEach((body) => body.classList.toggle("active", body.id === `tab-${name}`));
+  setSheetOpen(name === "settings");
 }
 
 /** Shows the catalog without stopping the running app session. */
@@ -1752,6 +1880,43 @@ function showWorkspace() {
   const back = $("ws-back");
   if (back) back.hidden = false;
   setViewTitle((ctx.appMeta && ctx.appMeta.name) || ctx.appId);
+}
+
+/* ---------- sidebar: collapse, history rail, shortcuts ---------- */
+
+const SIDEBAR_KEY = "sidebar-collapsed";
+
+function sidebarCollapsed() {
+  const app = document.querySelector(".app");
+  return Boolean(app && app.classList.contains("collapsed"));
+}
+
+function setSidebarCollapsed(collapsed) {
+  const app = document.querySelector(".app");
+  if (!app) return;
+  app.classList.toggle("collapsed", collapsed);
+  if (!collapsed) app.classList.remove("peek");
+  try {
+    localStorage.setItem(SIDEBAR_KEY, collapsed ? "1" : "0");
+  } catch (_) {}
+  const btn = $("btn-collapse");
+  if (btn) {
+    const text = collapsed ? "Развернуть панель (Ctrl+B)" : "Свернуть панель (Ctrl+B)";
+    btn.title = text;
+    btn.setAttribute("aria-label", text);
+  }
+}
+
+/** In the collapsed rail the history opens as an overlay over the chat. */
+function openHistoryFromRail() {
+  const app = document.querySelector(".app");
+  const search = $("chat-search");
+  if (!sidebarCollapsed()) {
+    if (search) search.focus();
+    return;
+  }
+  app.classList.add("peek");
+  if (search) search.focus();
 }
 
 async function refreshChats() {
@@ -1830,7 +1995,14 @@ async function selectChat(sessionId) {
 }
 
 async function deleteChat(sessionId) {
-  if (!confirm("Удалить этот чат?")) return;
+  const chat = (ctx.chats || []).find((item) => item.id === sessionId);
+  const ok = await askConfirm({
+    title: "Удалить чат?",
+    message: `Диалог «${(chat && chat.title) || sessionId}» будет удалён. Действие необратимо.`,
+    confirmLabel: "Удалить",
+    danger: true,
+  });
+  if (!ok) return;
   await guard(async () => {
     const info = await invoke("chat_delete", { app_id: ctx.appId, session_id: sessionId });
     ctx.chatId = info.session;
@@ -2581,6 +2753,13 @@ async function exportArtifacts() {
 async function cleanupArtifacts() {
   const appId = $("artifact-app").value;
   if (!appId) return toast("Нет установленных приложений", true);
+  const ok = await askConfirm({
+    title: "Очистить дампы?",
+    message: `Будут удалены завершённые сессии артефактов приложения ${appId}. Активные сессии останутся.`,
+    confirmLabel: "Очистить",
+    danger: true,
+  });
+  if (!ok) return;
   await guard(async () => {
     const report = await invoke("cleanup_artifacts", { app_id: appId });
     toast(`Удалено сессий: ${report.removed} · ${fmtBytes(report.bytes_freed)}`);
@@ -3210,10 +3389,7 @@ async function deleteSecret(name) {
 function bind() {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
-      document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
-      document
-        .querySelectorAll(".tab-body")
-        .forEach((b) => b.classList.toggle("active", b.id === `tab-${tab.dataset.tab}`));
+      activateTab(tab.dataset.tab);
       if (tab.dataset.tab === "settings" && Date.now() - artifactsLastRefresh > 30000) {
         guard(refreshArtifacts);
       }
@@ -3267,6 +3443,73 @@ function bind() {
       renderChatList();
     });
   }
+
+  const collapseBtn = $("btn-collapse");
+  if (collapseBtn) {
+    collapseBtn.addEventListener("click", () => setSidebarCollapsed(!sidebarCollapsed()));
+  }
+  const railHist = $("btn-rail-hist");
+  if (railHist) railHist.addEventListener("click", openHistoryFromRail);
+
+  $("confirm-ok").addEventListener("click", () => settleConfirm(true));
+  $("confirm-cancel").addEventListener("click", () => settleConfirm(false));
+  $("confirm-overlay").addEventListener("mousedown", (event) => {
+    if (event.target === $("confirm-overlay")) settleConfirm(false);
+  });
+
+  const scrim = $("sheet-scrim");
+  if (scrim) {
+    scrim.addEventListener("mousedown", () => {
+      activateTab("apps");
+      showCatalog();
+    });
+  }
+  const settingsClose = $("settings-close");
+  if (settingsClose) {
+    settingsClose.addEventListener("click", () => {
+      activateTab("apps");
+      showCatalog();
+    });
+  }
+
+  document.addEventListener("mousedown", (event) => {
+    const app = document.querySelector(".app");
+    if (!app || !app.classList.contains("peek")) return;
+    if (event.target.closest(".side")) return;
+    app.classList.remove("peek");
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      if (!$("confirm-overlay").hidden) {
+        settleConfirm(false);
+        return;
+      }
+      const app = document.querySelector(".app");
+      if (app && app.classList.contains("peek")) {
+        app.classList.remove("peek");
+        return;
+      }
+      const scrim = $("sheet-scrim");
+      if (scrim && !scrim.hidden) {
+        activateTab("apps");
+        showCatalog();
+      }
+      return;
+    }
+    if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+    const key = String(event.key || "").toLowerCase();
+    if (key === "b") {
+      event.preventDefault();
+      setSidebarCollapsed(!sidebarCollapsed());
+    } else if (key === "k") {
+      event.preventDefault();
+      openHistoryFromRail();
+    } else if (key === "n") {
+      event.preventDefault();
+      newChat();
+    }
+  });
 
   $("app-switch").addEventListener("change", (e) => {
     if (e.target.value && e.target.value !== ctx.appId) openApp(e.target.value);
@@ -3662,6 +3905,9 @@ async function init() {
   bind();
   bindChatEvents();
   bindPermissionUi();
+  try {
+    setSidebarCollapsed(localStorage.getItem(SIDEBAR_KEY) === "1");
+  } catch (_) {}
   await guard(async () => {
     const info = await invoke("platform_info");
     renderPlatformInfo(info);

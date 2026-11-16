@@ -4547,3 +4547,322 @@ html[data-theme="light"] .mode-overlay {
 .ws-topbar {
   display: none;
 }
+
+/* ===== sidebar rail, history groups, rename, toasts, confirm ===== */
+
+.rail-hist {
+  display: none;
+  place-items: center;
+  width: 100%;
+  padding: 8px 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.rail-hist:hover:not(:disabled) {
+  transform: none;
+  filter: none;
+  box-shadow: none;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.rail-hist svg {
+  width: 16px;
+  height: 16px;
+}
+
+.app.collapsed {
+  grid-template-columns: 62px minmax(0, 1fr);
+}
+
+.app.collapsed .side {
+  padding: 10px 8px;
+}
+
+.app.collapsed .agent-card {
+  grid-template-columns: 36px;
+  justify-content: center;
+  padding: 8px;
+}
+
+.app.collapsed .agent-copy,
+.app.collapsed .agent-card .version-pill,
+.app.collapsed .agent-card #ws-trust-badge {
+  display: none;
+}
+
+.app.collapsed .new-chat {
+  justify-content: center;
+  padding: 9px 0;
+}
+
+.app.collapsed .new-chat span,
+.app.collapsed .history-search,
+.app.collapsed .chat-list,
+.app.collapsed .side-nav .tab span {
+  display: none;
+}
+
+.app.collapsed .side-nav .tab {
+  justify-content: center;
+  padding: 9px 0;
+}
+
+.app.collapsed .foot-row {
+  flex-direction: column;
+  gap: 4px;
+}
+
+.app.collapsed #mode-badge {
+  display: none;
+}
+
+.app.collapsed .rail-hist {
+  display: grid;
+}
+
+/* Peek: the rail temporarily opens the history over the chat. */
+.app.collapsed.peek .side {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 90;
+  width: var(--sw);
+  box-shadow: 0 0 0 1px var(--line), 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+.app.collapsed.peek .agent-card {
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  justify-content: initial;
+  padding: 8px 10px;
+}
+
+.app.collapsed.peek .agent-copy,
+.app.collapsed.peek .history-search,
+.app.collapsed.peek .chat-list {
+  display: flex;
+}
+
+.app.collapsed.peek .new-chat span,
+.app.collapsed.peek .side-nav .tab span {
+  display: inline;
+}
+
+.app.collapsed.peek .new-chat {
+  justify-content: flex-start;
+  padding: 9px 11px;
+}
+
+.app.collapsed.peek .side-nav .tab {
+  justify-content: flex-start;
+  padding: 8px 9px;
+}
+
+.app.collapsed.peek .foot-row {
+  flex-direction: row;
+}
+
+.app.collapsed.peek .rail-hist {
+  display: none;
+}
+
+.hist-group {
+  margin: 10px 6px 4px;
+  color: var(--muted-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.hist-group:first-child {
+  margin-top: 2px;
+}
+
+.chat-rename {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--accent-line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.toasts {
+  position: fixed;
+  top: 64px;
+  right: 18px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(380px, calc(100vw - 36px));
+  pointer-events: none;
+}
+
+.toasts .toast {
+  position: static;
+  max-width: 100%;
+  margin: 0;
+  padding: 10px 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--toast-shadow, 0 18px 40px -18px rgba(0, 0, 0, 0.55));
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.45;
+  pointer-events: auto;
+  cursor: pointer;
+  animation: toast-in 0.18s var(--ease);
+}
+
+.toasts .toast.error {
+  border-color: var(--bad-line);
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+
+.toasts .toast.leaving {
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.confirm-dialog {
+  width: min(460px, 100%);
+}
+
+.confirm-dialog h1 {
+  font-size: 19px;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.confirm-dialog .pri.danger {
+  border-color: var(--bad);
+  background: var(--bad);
+  color: #fff;
+}
+/* ===== settings sheet, footer badge, peek polish ===== */
+
+.side {
+  position: relative;
+  z-index: 76;
+}
+
+.sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 74;
+  background: rgba(4, 8, 14, 0.5);
+  backdrop-filter: blur(2px);
+}
+
+html[data-theme="light"] .sheet-scrim {
+  background: rgba(15, 23, 42, 0.28);
+}
+
+.sheet-scrim[hidden] {
+  display: none;
+}
+
+#tab-settings.tab-body.active {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 78;
+  width: min(760px, calc(100vw - 40px));
+  padding: 22px 24px 36px;
+  background: var(--bg-elevated);
+  border-left: 1px solid var(--line-strong);
+  box-shadow: -28px 0 80px -40px rgba(0, 0, 0, 0.55);
+  overflow-y: auto;
+  animation: sheet-in 0.18s var(--ease);
+}
+
+@keyframes sheet-in {
+  from {
+    opacity: 0.5;
+    transform: translateX(18px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.foot-row {
+  flex-wrap: wrap;
+}
+
+.foot-row #mode-badge {
+  flex: 1 1 100%;
+  justify-content: center;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app.collapsed.peek #mode-badge {
+  display: inline-flex;
+}
+/* The settings sheet is inside .main; a z-index there would trap it below the scrim. */
+.main {
+  z-index: auto;
+}
+/* sheet close button + narrower settings sheet */
+#tab-settings.tab-body.active {
+  width: min(720px, calc(100vw - 120px));
+}
+
+.sheet-close {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  box-shadow: none;
+  flex: none;
+}
+
+.sheet-close:hover:not(:disabled) {
+  transform: none;
+  filter: none;
+  box-shadow: none;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.sheet-close svg {
+  width: 15px;
+  height: 15px;
+}

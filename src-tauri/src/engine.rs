@@ -1503,6 +1503,29 @@ impl ChatSession {
         Ok(())
     }
 
+    /// Renames a session in the engine. The title was shown to the operator, so
+    /// only whitespace/length are enforced here.
+    pub fn rename_session(&self, id: &str, title: &str) -> Result<()> {
+        crate::manifest::parse_id(id, "session")?;
+        let title = title.trim();
+        if title.is_empty() {
+            return msg("session title is empty");
+        }
+        if title.chars().count() > 120 {
+            return msg("session title is longer than 120 characters");
+        }
+        let agent = agent();
+        http(
+            &agent,
+            &self.base,
+            &self.auth,
+            "PATCH",
+            &format!("/session/{id}"),
+            Some(&json!({ "title": title })),
+        )?;
+        Ok(())
+    }
+
     /// Synchronous prompt: returns when the agent finishes the turn. Callers
     /// run it on a worker thread so the UI stays responsive.
     pub fn prompt(&self, text: &str, variant: Option<&str>) -> Result<()> {

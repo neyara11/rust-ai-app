@@ -304,6 +304,73 @@ try {
   await page.locator("[data-remove-attachment]").first().click();
   assert(await page.locator("#chat-attachments").isHidden(), "paste/drop attachments were not removed");
 
+  // history grouping by date
+  assert(
+    (await page.locator("#chat-list .hist-group").count()) >= 1,
+    "chat history is not grouped by date",
+  );
+  const firstGroup = await page.locator("#chat-list .hist-group").first().textContent();
+  assert(firstGroup.trim() === "Сегодня", `unexpected first history group: ${firstGroup}`);
+
+  // rename through the history item (double click, Enter)
+  const renameTarget = page.locator(".chat-item").first();
+  const oldTitle = (await renameTarget.textContent()).trim();
+  await renameTarget.dblclick();
+  await page.waitForSelector(".chat-rename");
+  await page.fill(".chat-rename", "Переименованный чат");
+  await page.press(".chat-rename", "Enter");
+  await page.waitForFunction(
+    () => document.querySelector("#chat-list")?.textContent.includes("Переименованный чат"),
+  );
+  const renamed = await page.evaluate(
+    async () => (await invoke("chat_list", { app_id: ctx.appId }))[0].title,
+  );
+  assert(renamed === "Переименованный чат", `rename did not persist: ${renamed} (was ${oldTitle})`);
+
+  // custom confirmation instead of window.confirm
+  let nativeDialog = false;
+  page.on("dialog", (dialog) => {
+    nativeDialog = true;
+    dialog.dismiss();
+  });
+  await page.locator(".chat-del").first().click();
+  await page.waitForSelector("#confirm-overlay:not([hidden])");
+  const confirmTitle = (await page.locator("#confirm-title").textContent()).trim();
+  assert(confirmTitle.length > 0, "confirm dialog has no title");
+  await page.click("#confirm-cancel");
+  await page.waitForFunction(
+    () => document.getElementById("confirm-overlay")?.hidden === true,
+  );
+  assert(!nativeDialog, "a native window.confirm dialog was used");
+  assert(
+    (await page.locator(".chat-item").count()) > 0,
+    "cancelled delete removed a chat",
+  );
+
+  // collapsed rail + Ctrl+K peek
+  await page.click("#btn-collapse");
+  await page.waitForFunction(() => document.querySelector(".app").classList.contains("collapsed"));
+  assert(await page.locator("#btn-rail-hist").isVisible(), "history rail button is not visible");
+  const railWidth = await page.evaluate(() => document.querySelector(".side").getBoundingClientRect().width);
+  assert(railWidth < 80, `collapsed sidebar is ${railWidth}px wide`);
+  await page.keyboard.press("Control+k");
+  await page.waitForFunction(() => document.querySelector(".app").classList.contains("peek"));
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => !document.querySelector(".app").classList.contains("peek"));
+  await page.click("#btn-collapse");
+  await page.waitForFunction(() => !document.querySelector(".app").classList.contains("collapsed"));
+
+  // toast stack keeps several messages and dismisses on click
+  await page.evaluate(() => {
+    toast("первое уведомление");
+    toast("второе уведомление", true);
+  });
+  await page.waitForFunction(() => document.querySelectorAll("#toast .toast").length >= 2);
+  const toastCount = await page.locator("#toast .toast").count();
+  assert(toastCount >= 2, `toast stack has ${toastCount} items`);
+  await page.locator("#toast .toast").first().click();
+  await page.waitForFunction(() => document.querySelectorAll("#toast .toast").length < 2);
+
   await page.evaluate(() => {
     ctx.pendingPermissions = [
       {
@@ -804,6 +871,19 @@ try {
   await page.waitForFunction(
     () => (document.querySelector("#llm-endpoint")?.value || "").length > 0,
   );
+  assert(await page.locator("#sheet-scrim").isVisible(), "settings sheet has no scrim");
+  assert(await page.locator("#settings-close").isVisible(), "settings sheet has no close button");
+  await page.waitForTimeout(300);
+  const sheetBox = await page.locator("#tab-settings").boundingBox();
+  assert(
+    sheetBox && sheetBox.x > 0 && sheetBox.x + sheetBox.width <= 901,
+    `settings sheet is outside the viewport: ${JSON.stringify(sheetBox)}`,
+  );
+  await page.click("#settings-close");
+  await page.waitForSelector("#tab-apps.active");
+  assert(await page.locator("#sheet-scrim").isHidden(), "scrim stayed after closing the sheet");
+  await page.click('.tab[data-tab="settings"]');
+  await page.waitForSelector("#tab-settings.active");
 
   const tabOverflow = async (selector, controlIds = []) =>
     page.evaluate(
@@ -914,7 +994,7 @@ try {
   );
   assert(pageErrors.length === 0, `page errors: ${pageErrors.join("; ")}`);
   console.log(
-    "ui smoke ok: catalog, allowlist, chat, highlight, workspace files, diagrams, app settings, artifacts, attachments, permission target, package import, modes, topbar density, chat-log height, settings/dev overflow",
+    "ui smoke ok: catalog, allowlist, chat, highlight, workspace files, diagrams, app settings, artifacts, attachments, permission target, package import, modes, topbar density, chat-log height, settings/dev overflow, history groups, rename, confirm dialog, collapsed rail, toast stack",
   );
 } finally {
   await browser.close();

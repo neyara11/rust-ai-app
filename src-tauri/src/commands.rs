@@ -1934,6 +1934,28 @@ pub async fn chat_list(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn chat_rename(
+    app: tauri::AppHandle,
+    app_id: String,
+    session_id: String,
+    title: String,
+) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<()> {
+        let state = app.state::<AppState>();
+        let session = {
+            let engines = engines_lock(&state)?;
+            let engine = engines
+                .get(&app_id)
+                .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
+            engine.snapshot()
+        };
+        session.rename_session(&session_id, &title)
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("chat rename task failed: {e}")))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn chat_new(
     app: tauri::AppHandle,
     app_id: String,

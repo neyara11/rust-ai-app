@@ -100,6 +100,7 @@ pub fn run() {
             commands::chat_open,
             commands::chat_send,
             commands::chat_list,
+            commands::chat_rename,
             commands::chat_new,
             commands::chat_select,
             commands::chat_abort,
