@@ -226,6 +226,19 @@ try {
     "code block background is transparent",
   );
 
+  // pre-wrap on the message must not turn markup indentation into blank lines
+  const codeLayout = await page.locator("#chat-log .md-code").first().evaluate((el) => {
+    const head = el.querySelector(".md-code-head");
+    const pre = el.querySelector("pre");
+    const parts = (head ? head.getBoundingClientRect().height : 0) +
+      (pre ? pre.getBoundingClientRect().height : 0);
+    return { block: el.getBoundingClientRect().height, parts };
+  });
+  assert(
+    codeLayout.block - codeLayout.parts < 14,
+    `code block has ${Math.round(codeLayout.block - codeLayout.parts)}px of phantom whitespace`,
+  );
+
   const codeColors = await page.evaluate(() => {
     const code = document.querySelector("#chat-log .md-code code.hljs");
     const keyword = document.querySelector("#chat-log .md-code code.hljs .hljs-keyword");
