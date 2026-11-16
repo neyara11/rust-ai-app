@@ -4866,3 +4866,57 @@ html[data-theme="light"] .sheet-scrim {
   width: 15px;
   height: 15px;
 }
+/* ===== message surface, file chips, native controls ===== */
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+}
+
+/* Answers are plain text on the chat surface, not cards. */
+.msg.assistant,
+.msg.reasoning {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
+}
+
+.msg.assistant .msg-body {
+  color: var(--text-secondary);
+}
+
+/* File chips must read as chips, not bare links. */
+.ws-file {
+  padding: 1px 4px 1px 2px;
+  border-color: var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.ws-file .ws-file-name {
+  text-decoration-color: var(--accent-line);
+}
+
+.ws-file .ws-file-act {
+  opacity: 0.55;
+}
+
+.ws-file:hover .ws-file-act,
+.ws-file:focus-within .ws-file-act {
+  opacity: 1;
+}
+
+/* Native dropdown list inherits the theme colours. */
+#chat-reasoning {
+  color: var(--text);
+}
+
+#chat-reasoning option {
+  background: var(--panel);
+  color: var(--text);
+}

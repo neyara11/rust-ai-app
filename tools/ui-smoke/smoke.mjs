@@ -860,6 +860,25 @@ try {
     );
   }
 
+  // Ending the session must clear the app-bound history: a stale item would
+  // call chat_select without an app id and surface an IPC error.
+  assert(await page.locator("#workspace").isVisible(), "expected an open session before closing");
+  await page.click("#ws-close");
+  await page.waitForFunction(() => document.querySelector("#chat-list")?.children.length === 0);
+  assert(
+    (await page.locator("#chat-list .chat-item").count()) === 0,
+    "history survived closing the session",
+  );
+  assert(await page.locator("#apps-panel").isVisible(), "catalog is not shown after closing");
+  assert(
+    (await page.locator("#toast .toast.error").count()) === 0,
+    "closing the session produced an error toast",
+  );
+  assert(
+    (await page.locator("#ws-title").textContent()) === "Агент не выбран",
+    "agent card was not reset after closing the session",
+  );
+
   // Settings and dev tabs must lay out without horizontal clipping at 900x600.
   await page.setViewportSize({ width: 900, height: 600 });
   if (await page.locator("#workspace").isVisible()) {
@@ -994,7 +1013,7 @@ try {
   );
   assert(pageErrors.length === 0, `page errors: ${pageErrors.join("; ")}`);
   console.log(
-    "ui smoke ok: catalog, allowlist, chat, highlight, workspace files, diagrams, app settings, artifacts, attachments, permission target, package import, modes, topbar density, chat-log height, settings/dev overflow, history groups, rename, confirm dialog, collapsed rail, toast stack",
+    "ui smoke ok: catalog, allowlist, chat, highlight, workspace files, diagrams, app settings, artifacts, attachments, permission target, package import, modes, topbar density, chat-log height, settings/dev overflow, history groups, rename, confirm dialog, collapsed rail, toast stack, session close",
   );
 } finally {
   await browser.close();

@@ -764,6 +764,18 @@ async function closeApp() {
     renderPermissionPrompt();
     ctx.appId = null;
     ctx.appMeta = null;
+    // A closed session must not leave clickable history behind: the list is
+    // bound to the app, and `chat_select` cannot run without one.
+    ctx.chats = [];
+    ctx.chatId = null;
+    ctx.chatItems = [];
+    ctx.chatQuery = "";
+    const search = $("chat-search");
+    if (search) search.value = "";
+    renderChatList();
+    $("chat-log").innerHTML = "";
+    ctx.rendered = [];
+    $("chat-list").scrollTop = 0;
     $("apps-panel").hidden = false;
     $("app-switch").hidden = true;
     $("workspace").hidden = true;
@@ -771,6 +783,13 @@ async function closeApp() {
     if (actions) actions.hidden = true;
     const back = $("ws-back");
     if (back) back.hidden = true;
+    const icon = $("ws-app-icon");
+    if (icon) icon.textContent = "AI";
+    $("ws-title").textContent = "Агент не выбран";
+    $("ws-publisher").textContent = "выберите приложение в каталоге";
+    const folder = $("ws-folder");
+    if (folder) folder.textContent = "—";
+    renderPermissionPrompt();
     setViewTitle("Каталог агентов");
   });
 }
@@ -1982,7 +2001,7 @@ async function newChat() {
 }
 
 async function selectChat(sessionId) {
-  if (!sessionId || sessionId === ctx.chatId) return;
+  if (!ctx.appId || !sessionId || sessionId === ctx.chatId) return;
   await guard(async () => {
     showWorkspace();
     await invoke("chat_select", { app_id: ctx.appId, session_id: sessionId });
@@ -1995,6 +2014,7 @@ async function selectChat(sessionId) {
 }
 
 async function deleteChat(sessionId) {
+  if (!ctx.appId) return;
   const chat = (ctx.chats || []).find((item) => item.id === sessionId);
   const ok = await askConfirm({
     title: "Удалить чат?",
@@ -2135,6 +2155,7 @@ function clearAttachments() {
 }
 
 async function sendChat() {
+  if (!ctx.appId) return;
   const text = $("chat-text").value.trim();
   const attachments = ctx.attachments.map((attachment) => ({
     mime: attachment.mime,
