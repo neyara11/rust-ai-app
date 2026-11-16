@@ -78,12 +78,28 @@ pub fn open_url(raw: &str) -> Result<()> {
     shell_open(std::ffi::OsStr::new(raw.trim()))
 }
 
+/// `fs::canonicalize` returns `\\?\`-prefixed paths on Windows. The shell
+/// handlers (ShellExecute, Explorer `/select`) do not open those verbatim paths,
+/// so strip the prefix before handing a path over.
+#[cfg(windows)]
+fn shell_path(target: &std::ffi::OsStr) -> std::ffi::OsString {
+    let text = target.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return std::ffi::OsString::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return std::ffi::OsString::from(rest);
+    }
+    std::ffi::OsString::from(text.as_ref())
+}
+
 #[cfg(windows)]
 fn shell_open(target: &std::ffi::OsStr) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
+    let target = shell_path(target);
     let wide: Vec<u16> = target.encode_wide().chain(std::iter::once(0)).collect();
     let verb: Vec<u16> = "open\0".encode_utf16().collect();
     let result = unsafe {
@@ -133,7 +149,7 @@ fn shell_open(target: &std::ffi::OsStr) -> Result<()> {
 #[cfg(windows)]
 pub fn reveal_path(path: &Path) -> Result<()> {
     let mut arg = std::ffi::OsString::from("/select,");
-    arg.push(path.as_os_str());
+    arg.push(shell_path(path.as_os_str()));
     std::process::Command::new("explorer.exe")
         .arg(arg)
         .spawn()?;
@@ -191,9 +207,27 @@ mod tests {
         assert!(url_allowed("").is_err());
     }
 
+    #[cfg(windows)]
     #[test]
-    fn cyrillic_workspace_paths_resolve() {
-        let root = temp_dir("кириллица");
+    fn verbatim_paths_are_stripped_before_the_shell() {
+        use std::ffi::OsStr;
+        assert_eq!(
+            shell_path(OsStr::new(r"\\?\D:\Download\Новая папка (3)\chart-test.md"))
+                .to_string_lossy(),
+            r"D:\Download\Новая папка (3)\chart-test.md"
+        );
+        assert_eq!(
+            shell_path(OsStr::new(r"\\?\UNC\srv\share\a.md")).to_string_lossy(),
+            r"\\srv\share\a.md"
+        );
+        assert_eq!(
+            shell_path(OsStr::new(r"D:\plain\a.md")).to_string_lossy(),
+            r"D:\plain\a.md"
+        );
+    }
+
+    #[test]
+    fn cyrillic_workspace_paths_resolve() {        let root = temp_dir("кириллица");
         fs::write(root.join("отчёт.md"), "x").unwrap();
 
         let resolved = resolve(&root, "отчёт.md").unwrap();
