@@ -339,6 +339,9 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
   `canonicalize`, а ShellExecute/Explorer такие пути молча игнорируют). Для текстовых
   форматов (md/txt/json/yaml/…), если расширение ассоциировано со скриптовым хостом
   (node, powershell, python, wscript), файл открывается в Блокноте, а не исполняется.
+- При старте приложение удаляет из своего окружения `ELECTRON_RUN_AS_NODE` и
+  `ELECTRON_NO_ATTACH_CONSOLE`: терминал редактора выставляет их детям, и унаследованный
+  флаг заставляет VS Code открывать файл как Node-скрипт (`node:electron/js2c/...`).
 - Аудит ручных MCP-вызовов: `audit/<app>.jsonl`.
 
 ### Оболочка (design-next) и сессии

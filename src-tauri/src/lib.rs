@@ -20,7 +20,18 @@ use secrets::SecretStore;
 use state::AppState;
 use tauri::Manager;
 
+/// Editor terminals export `ELECTRON_RUN_AS_NODE=1` for their own child
+/// processes. Inherited by the platform it makes every Electron-based handler
+/// (VS Code and friends) run as Node, so "open file" would execute the document
+/// instead of showing it. Drop the launcher flags before the UI starts.
+fn scrub_launcher_env() {
+    for key in ["ELECTRON_RUN_AS_NODE", "ELECTRON_NO_ATTACH_CONSOLE"] {
+        std::env::remove_var(key);
+    }
+}
+
 pub fn run() {
+    scrub_launcher_env();
     let state = AppState::new();
     // Restore runtime state parked by an interrupted install/rollback.
     registry::recover_runtime(&state.home);
@@ -1336,5 +1347,19 @@ pub fn cli_unrevoke(app_id: Option<&String>) -> i32 {
             println!("{{ \"ok\": false, \"problem\": \"{e}\" }}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod launcher_env_tests {
+    use super::scrub_launcher_env;
+
+    #[test]
+    fn launcher_flags_do_not_leak_into_the_platform() {
+        std::env::set_var("ELECTRON_RUN_AS_NODE", "1");
+        std::env::set_var("ELECTRON_NO_ATTACH_CONSOLE", "1");
+        scrub_launcher_env();
+        assert!(std::env::var("ELECTRON_RUN_AS_NODE").is_err());
+        assert!(std::env::var("ELECTRON_NO_ATTACH_CONSOLE").is_err());
     }
 }
