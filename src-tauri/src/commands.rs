@@ -976,6 +976,14 @@ pub async fn workspace_file_save_copy(
     .map_err(|e| Error::Msg(format!("save task failed: {e}")))?
 }
 
+/// Opens an http(s)/mailto link from the chat in the system browser or mail app.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn open_external(url: String) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || workspace::open_url(&url))
+        .await
+        .map_err(|e| Error::Msg(format!("open link task failed: {e}")))?
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn workspace_open_folder(
     state: tauri::State<'_, AppState>,

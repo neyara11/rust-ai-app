@@ -4920,3 +4920,17 @@ html[data-theme="light"] {
   background: var(--panel);
   color: var(--text);
 }
+/* ===== external links ===== */
+
+.msg .ext-link {
+  color: var(--accent-text);
+  text-decoration: underline;
+  text-decoration-color: var(--accent-line);
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.msg .ext-link:hover {
+  color: var(--accent);
+  text-decoration-color: var(--accent);
+}

@@ -263,6 +263,8 @@ const browserMock = (() => {
         return null;
       case "workspace_file_save_copy":
         return `D:\\Downloads\\${String(args.path || "artifact").split("/").pop()}`;
+      case "open_external":
+        return null;
       case "permission_grants":
         return permissionGrants.filter(
           (grant) => !args.app_id || grant.app_id === args.app_id,
@@ -827,6 +829,16 @@ async function openWorkspaceFile(name, action) {
   }
 }
 
+async function openExternal(url) {
+  if (!url) return;
+  try {
+    await invoke("open_external", { url });
+    toast("Ссылка открыта в браузере");
+  } catch (e) {
+    toast(String(e), true);
+  }
+}
+
 async function openWorkspaceFolder() {
   if (!ctx.appId) return;
   try {
@@ -926,6 +938,35 @@ function linkifyBareFiles(text) {
   );
 }
 
+/* ---------- external links ---------- */
+
+// Only http(s) and mailto are rendered as links; the backend re-validates the
+// scheme and hands the URL to the system handler, never to the webview.
+const EXT_URL_RE = /\b(?:https?:\/\/|mailto:)[^\s<>"'`]+/gi;
+
+function trimUrlEnd(value) {
+  let url = value;
+  while (/[.,;:!?»"”']$/.test(url)) url = url.slice(0, -1);
+  if (url.endsWith(")") && !url.includes("(")) url = url.slice(0, -1);
+  return url;
+}
+
+function linkifyUrls(text) {
+  return text.replace(EXT_URL_RE, (match) => {
+    const url = trimUrlEnd(match);
+    if (!url) return match;
+    const tail = match.slice(url.length);
+    return `<a class="ext-link" href="#" data-ext-link="${url}" rel="noreferrer noopener">${url}</a>${tail}`;
+  });
+}
+
+function linkifyBareFilesOutsideLinks(html) {
+  return html
+    .split(/(<a\b[^>]*>[\s\S]*?<\/a>)/)
+    .map((part, index) => (index % 2 ? part : linkifyBareFiles(part)))
+    .join("");
+}
+
 function inlineMd(text) {
   return text
     .split(/(`[^`]+`)/)
@@ -935,7 +976,7 @@ function inlineMd(text) {
         const name = workspaceFileRef(inner);
         return name ? fileChipHtml(name) : `<code>${inner}</code>`;
       }
-      return linkifyBareFiles(part);
+      return linkifyBareFilesOutsideLinks(linkifyUrls(part));
     })
     .join("")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
@@ -3629,6 +3670,10 @@ function bind() {
     const item = e.target.closest("[data-chat]");
     if (item) selectChat(item.dataset.chat);
   });
+  $("chat-log").addEventListener("auxclick", (e) => {
+    // A middle click must not navigate the webview to the link target.
+    if (e.target.closest("[data-ext-link]")) e.preventDefault();
+  });
   $("chat-log").addEventListener("click", (e) => {
     const starter = e.target.closest("[data-starter]");
     if (starter) {
@@ -3652,6 +3697,12 @@ function bind() {
     const wsFile = e.target.closest("[data-ws-file]");
     if (wsFile) {
       openWorkspaceFile(wsFile.dataset.wsFile || "", wsFile.dataset.wsAction || "open");
+      return;
+    }
+    const extLink = e.target.closest("[data-ext-link]");
+    if (extLink) {
+      e.preventDefault();
+      openExternal(extLink.dataset.extLink || "");
       return;
     }
     const copy = e.target.closest("[data-copy]");

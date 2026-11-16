@@ -240,6 +240,44 @@ try {
     `hljs keyword ${codeColors.keyword} must differ from code ${codeColors.code}`,
   );
 
+  // external links: only http(s)/mailto, never rendered inside code
+  const linkHtml = await page.evaluate(() =>
+    renderMarkdown(
+      "См. https://example.com/docs?id=1. Почта: mailto:ops@example.com. `https://inline.example` не ссылка.",
+    ),
+  );
+  assert(
+    linkHtml.includes('data-ext-link="https://example.com/docs?id=1"'),
+    `URL was not linkified: ${linkHtml}`,
+  );
+  assert(
+    linkHtml.includes('data-ext-link="mailto:ops@example.com"'),
+    `mailto was not linkified: ${linkHtml}`,
+  );
+  assert(
+    linkHtml.includes("<code>https://inline.example</code>"),
+    "inline code must stay code, not a link",
+  );
+  assert(!/javascript:|data:/i.test(linkHtml), "unsafe schemes must not become links");
+
+  await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.id = "link-probe";
+    probe.innerHTML = renderMarkdown("Источник: https://example.com/a?b=1.");
+    document.querySelector("#chat-log").appendChild(probe);
+  });
+  await page.click("#link-probe .ext-link");
+  await page.waitForFunction(
+    () => document.querySelector("#toast")?.textContent.includes("Ссылка открыта"),
+    null,
+    { timeout: 5000 },
+  );
+  assert(
+    page.url().startsWith("http://127.0.0.1"),
+    `webview navigated away from the app: ${page.url()}`,
+  );
+  await page.evaluate(() => document.querySelector("#link-probe")?.remove());
+
   const reasoningOptions = await page.locator("#chat-reasoning option").count();
   assert(reasoningOptions === 4, `expected 4 reasoning options, got ${reasoningOptions}`);
 
@@ -1013,7 +1051,7 @@ try {
   );
   assert(pageErrors.length === 0, `page errors: ${pageErrors.join("; ")}`);
   console.log(
-    "ui smoke ok: catalog, allowlist, chat, highlight, workspace files, diagrams, app settings, artifacts, attachments, permission target, package import, modes, topbar density, chat-log height, settings/dev overflow, history groups, rename, confirm dialog, collapsed rail, toast stack, session close",
+    "ui smoke ok: catalog, allowlist, chat, highlight, workspace files, diagrams, app settings, artifacts, attachments, permission target, package import, modes, topbar density, chat-log height, settings/dev overflow, history groups, rename, confirm dialog, collapsed rail, toast stack, session close, external links",
   );
 } finally {
   await browser.close();

@@ -63,6 +63,7 @@ pub fn run() {
             commands::workspace_file_open,
             commands::workspace_file_reveal,
             commands::workspace_file_save_copy,
+            commands::open_external,
             commands::workspace_open_folder,
             commands::artifacts_usage,
             commands::artifact_dumps,

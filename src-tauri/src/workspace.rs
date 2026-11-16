@@ -46,17 +46,39 @@ pub fn resolve(workspace: &Path, raw: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Only these schemes reach the shell. The text is model-authored, so `file:`,
+/// `javascript:`, `data:` and custom protocol handlers must stay out of reach.
+fn url_allowed(raw: &str) -> Result<()> {
+    let url = raw.trim();
+    if url.is_empty() || url.len() > 2048 {
+        return msg("link is empty or too long");
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return msg("link contains whitespace or control characters");
+    }
+    let lower = url.to_ascii_lowercase();
+    let allowed = lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:");
+    if !allowed {
+        return msg("only http(s) and mailto links are opened");
+    }
+    Ok(())
+}
+
+/// Opens a chat link in the user's default browser or mail client.
+pub fn open_url(raw: &str) -> Result<()> {
+    url_allowed(raw)?;
+    shell_open(std::ffi::OsStr::new(raw.trim()))
+}
+
 #[cfg(windows)]
-pub fn open_path(path: &Path) -> Result<()> {
+fn shell_open(target: &std::ffi::OsStr) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide: Vec<u16> = target.encode_wide().chain(std::iter::once(0)).collect();
     let verb: Vec<u16> = "open\0".encode_utf16().collect();
     let result = unsafe {
         ShellExecuteW(
@@ -70,9 +92,14 @@ pub fn open_path(path: &Path) -> Result<()> {
     };
     // ShellExecuteW returns a value above 32 on success.
     if result as isize <= 32 {
-        return msg("the shell could not open this file");
+        return msg("the shell could not open this target");
     }
     Ok(())
+}
+
+#[cfg(windows)]
+pub fn open_path(path: &Path) -> Result<()> {
+    shell_open(path.as_os_str())
 }
 
 #[cfg(not(windows))]
@@ -81,6 +108,15 @@ pub fn open_path(path: &Path) -> Result<()> {
         .arg(path)
         .spawn()
         .map_err(|e| msg(format!("could not open this file: {e}")))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn shell_open(target: &std::ffi::OsStr) -> Result<()> {
+    std::process::Command::new("xdg-open")
+        .arg(target)
+        .spawn()
+        .map_err(|e| msg(format!("could not open this target: {e}")))?;
     Ok(())
 }
 
@@ -131,6 +167,19 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn only_web_and_mail_links_are_allowed() {
+        assert!(url_allowed("https://example.com/docs?id=1").is_ok());
+        assert!(url_allowed("http://localhost:8080/health").is_ok());
+        assert!(url_allowed("mailto:ops@example.com").is_ok());
+        assert!(url_allowed(" file:///C:/Windows/System32/calc.exe ").is_err());
+        assert!(url_allowed("javascript:alert(1)").is_err());
+        assert!(url_allowed("data:text/html,<script>x</script>").is_err());
+        assert!(url_allowed("ms-msdt:/id PCWDiagnostic").is_err());
+        assert!(url_allowed("https://example.com/a b").is_err());
+        assert!(url_allowed("").is_err());
     }
 
     #[test]
