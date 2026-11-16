@@ -843,7 +843,8 @@ async function openWorkspaceFolder() {
   if (!ctx.appId) return;
   try {
     await invoke("workspace_open_folder", { app_id: ctx.appId });
-    toast("Открываю рабочую папку");
+    const folder = $("ws-folder");
+    toast(`Открываю рабочую папку: ${folder ? folder.textContent : ""}`);
   } catch (e) {
     toast(String(e), true);
   }

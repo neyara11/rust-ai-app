@@ -993,6 +993,7 @@ pub async fn workspace_open_folder(
     tauri::async_runtime::spawn_blocking(move || {
         manifest::parse_id(&app_id, "app")?;
         let workspace = config::workspace(&home, &app_id);
+        let target = workspace.display().to_string();
         let result = if workspace.is_dir() {
             workspace::open_path(&workspace)
         } else {
@@ -1002,7 +1003,7 @@ pub async fn workspace_open_folder(
             &home,
             &app_id,
             "workspace_open_folder",
-            "",
+            &target,
             result.is_err(),
             result.as_ref().err().map(|e| e.to_string()),
         );

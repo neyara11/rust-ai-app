@@ -420,6 +420,14 @@ try {
   assert(railWidth < 80, `collapsed sidebar is ${railWidth}px wide`);
   await page.keyboard.press("Control+k");
   await page.waitForFunction(() => document.querySelector(".app").classList.contains("peek"));
+  const peekLayout = await page.evaluate(() => ({
+    main: Math.round(document.querySelector(".main").getBoundingClientRect().width),
+    topbar: Boolean(document.querySelector(".topbar")?.getBoundingClientRect().height),
+    log: Math.round(document.querySelector("#chat-log")?.getBoundingClientRect().height || 0),
+  }));
+  assert(peekLayout.main > 500, `main collapsed to ${peekLayout.main}px in the peek state`);
+  assert(peekLayout.topbar, "topbar disappeared in the peek state");
+  assert(peekLayout.log > 200, `chat log shrank to ${peekLayout.log}px in the peek state`);
   await page.keyboard.press("Escape");
   await page.waitForFunction(() => !document.querySelector(".app").classList.contains("peek"));
   await page.click("#btn-collapse");

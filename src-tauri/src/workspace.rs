@@ -28,6 +28,42 @@ const BLOCKED: &[&str] = &[
     "url", "scf", "inf", "html", "htm", "svg", "doc", "xls", "rtf",
 ];
 
+/// Text formats that must never be handed to a script host. If Windows has the
+/// extension associated with `node.exe`, `powershell.exe` and the like, opening
+/// the file would execute it, so the platform picks a plain editor instead.
+const TEXT_EXT: &[&str] = &[
+    "md", "markdown", "txt", "log", "csv", "tsv", "json", "jsonl", "yaml", "yml", "xml", "css",
+];
+
+/// Whether a handler executable runs files instead of showing them.
+fn script_host(executable: &str) -> bool {
+    let name = Path::new(executable)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "node.exe"
+            | "wscript.exe"
+            | "cscript.exe"
+            | "mshta.exe"
+            | "powershell.exe"
+            | "pwsh.exe"
+            | "cmd.exe"
+            | "python.exe"
+            | "pythonw.exe"
+            | "py.exe"
+    )
+}
+
+fn is_text(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|ext| TEXT_EXT.contains(&ext.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 /// Whether a click on this file may be handed to the Windows shell.
 pub fn openable(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
@@ -124,7 +160,60 @@ fn shell_open(target: &std::ffi::OsStr) -> Result<()> {
 
 #[cfg(windows)]
 pub fn open_path(path: &Path) -> Result<()> {
+    if is_text(path) {
+        if let Some(executable) = association_executable(path) {
+            if script_host(&executable) {
+                return open_in_editor(path);
+            }
+        }
+    }
     shell_open(path.as_os_str())
+}
+
+/// The executable Windows would launch for `open` on this file's extension.
+#[cfg(windows)]
+fn association_executable(path: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{AssocQueryStringW, ASSOCF_NONE, ASSOCSTR_EXECUTABLE};
+
+    let ext = format!(".{}", path.extension()?.to_str()?.to_ascii_lowercase());
+    let ext_wide: Vec<u16> = std::ffi::OsStr::new(&ext)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let verb: Vec<u16> = "open\0".encode_utf16().collect();
+    let mut buffer = vec![0u16; 1024];
+    let mut length = buffer.len() as u32;
+    let result = unsafe {
+        AssocQueryStringW(
+            ASSOCF_NONE,
+            ASSOCSTR_EXECUTABLE,
+            ext_wide.as_ptr(),
+            verb.as_ptr(),
+            buffer.as_mut_ptr(),
+            &mut length,
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    let end = buffer
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(length as usize);
+    Some(String::from_utf16_lossy(&buffer[..end]))
+}
+
+/// Opens a text document in Notepad when the association would execute it.
+#[cfg(windows)]
+fn open_in_editor(path: &Path) -> Result<()> {
+    let notepad = std::env::var("SystemRoot")
+        .map(|root| format!("{root}\\System32\\notepad.exe"))
+        .unwrap_or_else(|_| "notepad.exe".to_string());
+    std::process::Command::new(notepad)
+        .arg(shell_path(path.as_os_str()))
+        .spawn()?;
+    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -205,6 +294,20 @@ mod tests {
         assert!(url_allowed("ms-msdt:/id PCWDiagnostic").is_err());
         assert!(url_allowed("https://example.com/a b").is_err());
         assert!(url_allowed("").is_err());
+    }
+
+    #[test]
+    fn script_hosts_and_text_extensions_are_recognised() {
+        assert!(script_host(r"C:\Program Files\nodejs\node.exe"));
+        assert!(script_host("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"));
+        assert!(script_host("wscript.exe"));
+        assert!(!script_host(r"C:\Program Files\Notepad++\notepad++.exe"));
+        assert!(!script_host(r"C:\Program Files\Microsoft Office\WINWORD.EXE"));
+
+        assert!(is_text(Path::new("отчёт.MD")));
+        assert!(is_text(Path::new("data.json")));
+        assert!(!is_text(Path::new("report.docx")));
+        assert!(!is_text(Path::new("chart.png")));
     }
 
     #[cfg(windows)]

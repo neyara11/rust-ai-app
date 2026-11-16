@@ -369,6 +369,9 @@ body {
 .main {
   position: relative;
   z-index: 1;
+  /* Pinned: in the peek state the sidebar leaves the grid flow, and an
+     auto-placed main would land in the 62px rail column. */
+  grid-column: 2;
   flex: 1;
   min-height: 0;
   display: flex;
