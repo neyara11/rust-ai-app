@@ -1162,6 +1162,50 @@ fn runtime_info(pid: u32, image: &Path) -> RuntimeInfo {
 /// Stops a sidecar left behind by a crash, a force-killed app, or an explicit
 /// token revocation. Refuses to kill when the pid no longer belongs to the
 /// recorded engine image. Safe to call when no engine is running.
+/// Keeps the engine child inside a job object that terminates it when the
+/// platform exits. Without this a crash or a force-killed window leaves an
+/// orphan `opencode serve`, which locks the app's engine home and makes the
+/// next start fail with "engine did not become ready in time".
+#[cfg(windows)]
+fn keep_engine_with_platform(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if configured == 0 {
+            let _ = CloseHandle(job);
+            return;
+        }
+        let process = child.as_raw_handle() as HANDLE;
+        if AssignProcessToJobObject(job, process) == 0 {
+            let _ = CloseHandle(job);
+            return;
+        }
+        // The handle is intentionally not closed: closing it would terminate
+        // the engine immediately. Windows closes it when the platform exits,
+        // and KILL_ON_JOB_CLOSE then takes the engine down with us.
+    }
+}
+
+#[cfg(not(windows))]
+fn keep_engine_with_platform(_child: &std::process::Child) {}
+
 pub fn kill_leftover(home: &Path, app_id: &str) -> Result<()> {
     let pid_file = home
         .join("apps")
@@ -1341,6 +1385,7 @@ impl Engine {
         let child = command
             .spawn()
             .map_err(|e| Error::Msg(format!("cannot start opencode: {e}")))?;
+        keep_engine_with_platform(&child);
         let runtime = runtime_info(child.id(), &binary);
         let mut child_guard = ChildGuard {
             child: Some(child),

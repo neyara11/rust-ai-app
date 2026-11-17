@@ -1533,7 +1533,40 @@ fn chat_open_blocking(state: &AppState, app_id: String) -> Result<crate::engine:
             .lock()
             .map_err(|_| Error::Msg("engine start lock poisoned".to_string()))?;
         if !starting.insert(app_id.clone()) {
-            return msg("the engine is already starting for this app");
+            drop(starting);
+            // Another caller is already starting this engine (for example the
+            // app-open and the first-send paths racing). Wait for that start
+            // instead of failing the user with "already starting".
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
+            loop {
+                {
+                    let engines = engines_lock(state)?;
+                    if let Some(engine) = engines.get(&app_id) {
+                        return Ok(engine.info());
+                    }
+                }
+                let pending = state
+                    .starting
+                    .lock()
+                    .map(|set| set.contains(&app_id))
+                    .unwrap_or(false);
+                if !pending {
+                    break;
+                }
+                if std::time::Instant::now() > deadline {
+                    return msg("the engine is already starting for this app");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            // The previous start finished without registering an engine; retry
+            // the acquisition below instead of failing.
+            let mut starting = state
+                .starting
+                .lock()
+                .map_err(|_| Error::Msg("engine start lock poisoned".to_string()))?;
+            if !starting.insert(app_id.clone()) {
+                return msg("the engine is already starting for this app");
+            }
         }
     }
     let _starting = StartingGuard {

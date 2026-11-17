@@ -2103,6 +2103,19 @@ function setSheetOpen(open) {
   if (scrim) scrim.hidden = !open;
 }
 
+/// Settings opens as a sheet over whatever is visible. Closing it must return
+/// to that view: a chat that was open stays open (with its history and engine),
+/// instead of silently dropping to the catalog.
+function closeSettings() {
+  activateTab("apps");
+  if (ctx.settingsReturn === "chat" && ctx.appId) {
+    showWorkspace();
+  } else {
+    showCatalog();
+  }
+  ctx.settingsReturn = null;
+}
+
 function activateTab(name) {
   document
     .querySelectorAll(".tab")
@@ -3682,6 +3695,10 @@ async function deleteSecret(name) {
 function bind() {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
+      if (tab.dataset.tab === "settings") {
+        ctx.settingsReturn =
+          ctx.appId && !$("workspace").hidden ? "chat" : "catalog";
+      }
       activateTab(tab.dataset.tab);
       if (tab.dataset.tab === "settings" && Date.now() - artifactsLastRefresh > 30000) {
         guard(refreshArtifacts);
@@ -3753,15 +3770,13 @@ function bind() {
   const scrim = $("sheet-scrim");
   if (scrim) {
     scrim.addEventListener("mousedown", () => {
-      activateTab("apps");
-      showCatalog();
+      closeSettings();
     });
   }
   const settingsClose = $("settings-close");
   if (settingsClose) {
     settingsClose.addEventListener("click", () => {
-      activateTab("apps");
-      showCatalog();
+      closeSettings();
     });
   }
 
@@ -3785,8 +3800,7 @@ function bind() {
       }
       const scrim = $("sheet-scrim");
       if (scrim && !scrim.hidden) {
-        activateTab("apps");
-        showCatalog();
+        closeSettings();
       }
       return;
     }

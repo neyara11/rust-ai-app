@@ -93,6 +93,18 @@ try {
   );
   await page.waitForSelector('.diagram-block[data-diagram="mermaid"] svg', { timeout: 15000 });
   await page.waitForSelector('.diagram-block[data-diagram="chart"] canvas', { timeout: 15000 });
+
+  // Opening settings over a chat and closing it must return to the chat, not
+  // drop the user to the catalog while the sidebar still lists its history.
+  await page.click('.side-nav .tab[data-tab="settings"]');
+  assert(await page.locator("#sheet-scrim").isVisible(), "settings sheet did not open");
+  await page.click("#settings-close");
+  assert(await page.locator("#workspace").isVisible(), "closing settings lost the open chat");
+  assert(await page.locator("#apps-panel").isHidden(), "closing settings fell back to the catalog");
+  assert(
+    (await page.locator("#chat-list .chat-item").count()) > 0,
+    "chat history disappeared after closing settings",
+  );
   assert(
     (await page.locator("#chat-log .md-table-wrap table").count()) === 1,
     "markdown table was not rendered",
