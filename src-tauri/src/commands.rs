@@ -1655,6 +1655,16 @@ pub fn chat_send(
         return msg("message is empty");
     }
     crate::engine::validate_attachments(&attachments, caps.vision)?;
+    // Cache images once so the history can reference them by hash instead of
+    // re-sending base64 on every load. Failures are not fatal.
+    for attachment in &attachments {
+        let _ = crate::engine::save_attachment_image(
+            &state.home,
+            &app_id,
+            &attachment.mime,
+            &attachment.data,
+        );
+    }
 
     // Resolve the tool contract once per turn. The map is used by both the
     // approval broker and the engine's permission config, so it is verified
@@ -2037,6 +2047,16 @@ pub fn chat_abort(
     clear_pending_for_app(&app, &app_id);
     Ok(())
 }
+#[tauri::command(rename_all = "snake_case")]
+pub fn chat_image(
+    app: tauri::AppHandle,
+    app_id: String,
+    image_ref: String,
+) -> Result<serde_json::Value> {
+    let state = app.state::<AppState>();
+    crate::engine::load_attachment_image(&state.home, &app_id, &image_ref)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn chat_list(
     app: tauri::AppHandle,

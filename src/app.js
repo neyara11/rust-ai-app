@@ -393,6 +393,11 @@ const browserMock = (() => {
         const current = sessions.find((s) => s.id === activeSession[args.app_id]) || sessions[0];
         return current ? current.items : [];
       }
+      case "chat_image":
+        return {
+          mime: "image/png",
+          data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        };
       case "chat_status":
         return { busy: false };
       case "chat_select":
@@ -1611,26 +1616,42 @@ function buildChatNode(item, streaming) {
     const div = document.createElement("div");
     div.className = "msg " + (item.role === "user" ? "user" : "assistant");
     const isImage = item.mime && item.mime.startsWith("image/");
-    if (isImage && item.data) {
+    const chip = () => {
+      const node = document.createElement("div");
+      node.className = "chat-attachment-chip";
+      const kind = isImage ? "изображение" : "файл";
+      node.textContent = `${kind}: ${item.text}`;
+      return node;
+    };
+    if (isImage && (item.data || item.image_ref)) {
       const figure = document.createElement("figure");
       figure.className = "chat-figure";
       const img = document.createElement("img");
       img.className = "chat-image";
       img.loading = "lazy";
       img.alt = item.text || "изображение";
-      img.src = `data:${item.mime};base64,${item.data}`;
       const caption = document.createElement("figcaption");
       caption.textContent = item.text || "";
       figure.appendChild(img);
       figure.appendChild(caption);
+      if (item.data) {
+        img.src = `data:${item.mime};base64,${item.data}`;
+      } else {
+        // The history stores only a content hash; load the picture on demand.
+        invoke("chat_image", { app_id: ctx.appId, image_ref: item.image_ref })
+          .then((image) => {
+            if (image && image.data) {
+              img.src = `data:${image.mime || item.mime};base64,${image.data}`;
+            } else {
+              figure.replaceWith(chip());
+            }
+          })
+          .catch(() => figure.replaceWith(chip()));
+      }
       div.appendChild(figure);
       return div;
     }
-    const chip = document.createElement("div");
-    chip.className = "chat-attachment-chip";
-    const kind = isImage ? "изображение" : "файл";
-    chip.textContent = `${kind}: ${item.text}`;
-    div.appendChild(chip);
+    div.appendChild(chip());
     return div;
   }
 

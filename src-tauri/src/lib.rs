@@ -119,6 +119,7 @@ pub fn run() {
             commands::chat_status,
             commands::chat_delete,
             commands::chat_history,
+            commands::chat_image,
             commands::chat_reset,
             commands::chat_stop,
             commands::chat_permission,

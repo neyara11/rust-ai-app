@@ -7,6 +7,7 @@ use crate::secrets::SecretStore;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -37,11 +38,11 @@ pub struct ChatItem {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime: Option<String>,
-    /// Base64 payload for image attachments from the session history, so the
-    /// chat can render a picture instead of a bare chip. Omitted for regular
-    /// files and for payloads above the UI limit.
+    /// Content-addressed reference to a saved attachment image. The history
+    /// itself never carries base64: the picture is fetched on demand by the UI
+    /// through `chat_image`, so a long chat does not re-send every screenshot.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<String>,
+    pub image_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_in: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,7 +220,7 @@ impl ChatItem {
             kind: kind.to_string(),
             text,
             mime: None,
-            data: None,
+            image_ref: None,
             tokens_in: None,
             tokens_out: None,
             reasoning_tokens: None,
@@ -2067,40 +2068,91 @@ fn data_uri_base64(url: &str) -> Option<&str> {
     Some(payload)
 }
 
+/// Content address of an uploaded image. The history stores only this hash.
+pub fn attachment_ref(payload: &str) -> String {
+    hex::encode(Sha256::digest(payload.as_bytes()))
+}
+
+fn attachments_dir(home: &Path, app_id: &str) -> PathBuf {
+    home.join("apps").join(app_id).join("attachments")
+}
+
+/// Saves an image attachment once per content hash. Returns `None` for
+/// non-images and for payloads above the UI limit; callers treat it as best
+/// effort and never fail the turn because the cache could not be written.
+pub fn save_attachment_image(
+    home: &Path,
+    app_id: &str,
+    mime: &str,
+    payload: &str,
+) -> Result<Option<String>> {
+    const MAX_CACHED_IMAGE: usize = 8 * 1024 * 1024;
+    if !mime.starts_with("image/") || payload.is_empty() || payload.len() > MAX_CACHED_IMAGE {
+        return Ok(None);
+    }
+    let image_ref = attachment_ref(payload);
+    let dir = attachments_dir(home, app_id);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{image_ref}.json"));
+    if !path.exists() {
+        let body = json!({ "mime": mime, "data": payload });
+        std::fs::write(&path, serde_json::to_vec(&body)?)?;
+        prune_attachments(&dir);
+    }
+    Ok(Some(image_ref))
+}
+
+/// Reads a cached attachment image by its content hash.
+pub fn load_attachment_image(home: &Path, app_id: &str, image_ref: &str) -> Result<Value> {
+    let valid = image_ref.len() == 64 && image_ref.chars().all(|ch| ch.is_ascii_hexdigit());
+    if !valid {
+        return msg("invalid image reference");
+    }
+    let path = attachments_dir(home, app_id).join(format!("{image_ref}.json"));
+    let raw = std::fs::read(&path)
+        .map_err(|_| Error::Msg("attachment image is not cached anymore".to_string()))?;
+    let value: Value = serde_json::from_slice(&raw)?;
+    let mime = value.get("mime").and_then(Value::as_str).unwrap_or("");
+    let data = value.get("data").and_then(Value::as_str).unwrap_or("");
+    if !mime.starts_with("image/") || data.is_empty() {
+        return msg("attachment image is corrupt");
+    }
+    Ok(value)
+}
+
+/// Keeps the attachment cache bounded; old pictures are dropped in favour of
+/// recent ones and simply fall back to a text chip in the history.
+fn prune_attachments(dir: &Path) {
+    const MAX_CACHED_FILES: usize = 200;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    if files.len() <= MAX_CACHED_FILES {
+        return;
+    }
+    files.sort_by_key(|(modified, _)| *modified);
+    let excess = files.len() - MAX_CACHED_FILES;
+    for (_, path) in files.into_iter().take(excess) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
     let mut items = Vec::new();
     let Some(messages) = raw.as_array() else {
         return items;
     };
-    // The whole history is re-sent on every load and after every turn, so the
-    // inline image payload is bounded both per picture and in total. The budget
-    // is spent from the newest messages first: recent pictures matter more.
-    const MAX_IMAGE_PAYLOAD: usize = 4 * 1024 * 1024;
-    const MAX_IMAGE_BUDGET: usize = 8 * 1024 * 1024;
-    let mut allowed_images = std::collections::HashSet::new();
-    let mut image_budget = MAX_IMAGE_BUDGET;
-    for (mi, message) in messages.iter().enumerate().rev() {
-        let Some(parts) = message.get("parts").and_then(Value::as_array) else {
-            continue;
-        };
-        for (pi, part) in parts.iter().enumerate().rev() {
-            if part.get("type").and_then(Value::as_str) != Some("file") {
-                continue;
-            }
-            let Some(payload) = part
-                .get("url")
-                .and_then(Value::as_str)
-                .and_then(data_uri_base64)
-            else {
-                continue;
-            };
-            if payload.len() <= MAX_IMAGE_PAYLOAD && payload.len() <= image_budget {
-                image_budget = image_budget.saturating_sub(payload.len());
-                allowed_images.insert((mi, pi));
-            }
-        }
-    }
-    for (mi, message) in messages.iter().enumerate() {
+    // The history never carries image bytes: pictures are stored once in the
+    // app's attachment cache and fetched on demand by the UI.
+    for message in messages.iter() {
         let info = message.get("info");
         let role = info
             .and_then(|i| i.get("role"))
@@ -2113,7 +2165,7 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
         let mut tools = Vec::new();
         let mut files: Vec<(String, String, Option<String>)> = Vec::new();
         if let Some(parts) = message.get("parts").and_then(Value::as_array) {
-            for (pi, part) in parts.iter().enumerate() {
+            for part in parts {
                 match part.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         if let Some(t) = part.get("text").and_then(Value::as_str) {
@@ -2140,18 +2192,14 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
                             .unwrap_or("")
                             .to_string();
                         // OpenCode keeps the uploaded payload in `url` as a data
-                        // URI. Hand images back to the UI so it can show them
-                        // instead of a text chip; cap the size to keep the history
-                        // payload bounded.
-                        let data = if allowed_images.contains(&(mi, pi)) {
-                            part.get("url")
-                                .and_then(Value::as_str)
-                                .and_then(data_uri_base64)
-                                .map(str::to_string)
-                        } else {
-                            None
-                        };
-                        files.push((filename, mime, data));
+                        // URI. Store only a content hash: the UI fetches the
+                        // picture through `chat_image` when it renders the item.
+                        let image_ref = part
+                            .get("url")
+                            .and_then(Value::as_str)
+                            .and_then(data_uri_base64)
+                            .map(attachment_ref);
+                        files.push((filename, mime, image_ref));
                     }
                     Some("reasoning") => {
                         if let Some(t) = part.get("text").and_then(Value::as_str) {
@@ -2234,10 +2282,10 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
         for tool in tools {
             items.push(ChatItem::new("tool", "tool", tool));
         }
-        for (filename, mime, data) in files {
+        for (filename, mime, image_ref) in files {
             let mut item = ChatItem::new(&role, "file", filename);
             item.mime = Some(mime).filter(|mime| !mime.is_empty());
-            item.data = data;
+            item.image_ref = image_ref;
             items.push(item);
         }
     }
@@ -2702,6 +2750,43 @@ mod tests {
         let text = parts[0]["text"].as_str().unwrap();
         assert!(text.contains("[attachment: notes.txt]"));
         assert!(text.contains("hello"));
+    }
+
+    #[test]
+    fn attachment_images_are_cached_by_hash() {
+        let home = std::env::temp_dir().join(format!("eco-attach-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let payload = "iVBORw0KGgo=";
+        let image_ref = save_attachment_image(&home, "demo", "image/png", payload)
+            .unwrap()
+            .expect("image should be cached");
+        assert_eq!(image_ref, attachment_ref(payload));
+
+        let loaded = load_attachment_image(&home, "demo", &image_ref).unwrap();
+        assert_eq!(loaded["mime"], json!("image/png"));
+        assert_eq!(loaded["data"], json!(payload));
+        assert!(load_attachment_image(&home, "demo", "../../secrets").is_err());
+        assert!(save_attachment_image(&home, "demo", "text/plain", payload)
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn history_uses_image_refs_instead_of_payloads() {
+        let raw = json!([{
+            "info": { "role": "user" },
+            "parts": [
+                { "type": "file", "mime": "image/png", "filename": "shot.png",
+                  "url": "data:image/png;base64,iVBORw0KGgo=" }
+            ]
+        }]);
+        let items = parse_history(&raw);
+        let file = items.iter().find(|item| item.kind == "file").unwrap();
+        let expected = attachment_ref("iVBORw0KGgo=");
+        assert_eq!(file.image_ref.as_deref(), Some(expected.as_str()));
+        let serialized = serde_json::to_value(file).unwrap();
+        assert!(serialized.get("data").is_none());
     }
 
     #[test]

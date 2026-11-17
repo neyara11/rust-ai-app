@@ -386,8 +386,31 @@ try {
     return Boolean(document.querySelector("#chat-log img.chat-image"));
   });
   assert(imageItem, "image attachment was not rendered as a picture in the chat");
+  const cachedImage = await page.evaluate(async () => {
+    document
+      .querySelector("#chat-log")
+      .appendChild(
+        buildChatNode(
+          {
+            role: "user",
+            kind: "file",
+            text: "cached.png",
+            mime: "image/png",
+            image_ref: "a".repeat(64),
+          },
+          false,
+        ),
+      );
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const images = document.querySelectorAll("#chat-log img.chat-image");
+    return images.length ? images[images.length - 1].src : "";
+  });
+  assert(
+    cachedImage.startsWith("data:image/png;base64,"),
+    `history image was not loaded by reference: ${cachedImage}`,
+  );
   await page.evaluate(() => {
-    document.querySelector("#chat-log .chat-figure")?.parentElement?.remove();
+    document.querySelectorAll("#chat-log .chat-figure").forEach((el) => el.parentElement?.remove());
     ctx.attachments = [];
     renderAttachments();
   });
