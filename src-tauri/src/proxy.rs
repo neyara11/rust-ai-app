@@ -33,10 +33,10 @@ const DUMP_MIN_BYTES: usize = 8 * 1024;
 
 const FILE_TOOLS: &[&str] = &["list_files", "read_file", "write_file", "append_file"];
 
-const INSTRUCTIONS: &str = "Все инструменты проходят через шлюз платформы: вне allow-list \
-приложения вызов невозможен. Файловые инструменты работают только в рабочей папке \
-приложения; абсолютные пути и выход за неё запрещены. Для Word используйте инструмент \
-docx_export с относительными путями input и output.";
+const INSTRUCTIONS: &str = "Р’СЃРµ РёРЅСЃС‚СЂСѓРјРµРЅС‚С‹ РїСЂРѕС…РѕРґСЏС‚ С‡РµСЂРµР· С€Р»СЋР· РїР»Р°С‚С„РѕСЂРјС‹: РІРЅРµ allow-list \
+РїСЂРёР»РѕР¶РµРЅРёСЏ РІС‹Р·РѕРІ РЅРµРІРѕР·РјРѕР¶РµРЅ. Р¤Р°Р№Р»РѕРІС‹Рµ РёРЅСЃС‚СЂСѓРјРµРЅС‚С‹ СЂР°Р±РѕС‚Р°СЋС‚ С‚РѕР»СЊРєРѕ РІ СЂР°Р±РѕС‡РµР№ РїР°РїРєРµ \
+РїСЂРёР»РѕР¶РµРЅРёСЏ; Р°Р±СЃРѕР»СЋС‚РЅС‹Рµ РїСѓС‚Рё Рё РІС‹С…РѕРґ Р·Р° РЅРµС‘ Р·Р°РїСЂРµС‰РµРЅС‹. Р”Р»СЏ Word РёСЃРїРѕР»СЊР·СѓР№С‚Рµ РёРЅСЃС‚СЂСѓРјРµРЅС‚ \
+docx_export СЃ РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅС‹РјРё РїСѓС‚СЏРјРё input Рё output.";
 
 /// opencode normalizes tool names to letters, numbers, `_` and `-`. Do the same
 /// so permission entries in the generated config match exactly.
@@ -270,12 +270,12 @@ impl Proxy {
             self.routes.insert("skill".to_string(), Route::Skill);
             tools.push(json!({
                 "name": "skill",
-                "description": "Навыки (скилы) приложения. action=list возвращает список, action=read с именем возвращает полный SKILL.md. Загрузи нужный скил перед выполнением задачи.",
+                "description": "РќР°РІС‹РєРё (СЃРєРёР»С‹) РїСЂРёР»РѕР¶РµРЅРёСЏ. action=list РІРѕР·РІСЂР°С‰Р°РµС‚ СЃРїРёСЃРѕРє, action=read СЃ РёРјРµРЅРµРј РІРѕР·РІСЂР°С‰Р°РµС‚ РїРѕР»РЅС‹Р№ SKILL.md. Р—Р°РіСЂСѓР·Рё РЅСѓР¶РЅС‹Р№ СЃРєРёР» РїРµСЂРµРґ РІС‹РїРѕР»РЅРµРЅРёРµРј Р·Р°РґР°С‡Рё.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "action": { "enum": ["list", "read"] },
-                        "name": { "type": "string", "description": "Имя скила из action=list" }
+                        "name": { "type": "string", "description": "РРјСЏ СЃРєРёР»Р° РёР· action=list" }
                     },
                     "required": ["action"],
                     "additionalProperties": false
@@ -366,7 +366,7 @@ impl Proxy {
                     None => json!({
                         "name": exposed,
                         "description": format!(
-                            "Инструмент {} сервера {}.",
+                            "РРЅСЃС‚СЂСѓРјРµРЅС‚ {} СЃРµСЂРІРµСЂР° {}.",
                             tool.tool, connection.id
                         ),
                         "inputSchema": { "type": "object" }
@@ -568,11 +568,18 @@ impl Proxy {
         let timeout = timeout_secs
             .map(|secs| Duration::from_secs(secs.clamp(1, MAX_PACKAGE_TOOL_TIMEOUT_SECS)))
             .unwrap_or_else(package_timeout);
+        let cancel_path = self
+            .home
+            .join("apps")
+            .join(&self.app.app_id)
+            .join("engine")
+            .join("tool.pid");
         let run = run_with_limits(
             &mut command,
             timeout,
             MAX_PACKAGE_OUTPUT,
             stdin_payload.as_deref(),
+            Some(&cancel_path),
         )?;
         if run.timed_out {
             return msg(format!(
@@ -886,15 +893,48 @@ fn kill_tree(child: &mut Child) {
 
 /// Runs a package-provided executable with a hard timeout and bounded output.
 /// The caller interprets `timed_out` / `overflowed` and `status`.
+/// Marks the package tool that is currently running, so `chat_abort` can kill
+/// its process tree even though the proxy lives in another process. The marker
+/// is removed as soon as the call returns to avoid killing an unrelated reuse
+/// of the same pid later.
+struct ToolPidFile(Option<PathBuf>);
+
+impl ToolPidFile {
+    fn create(path: Option<&Path>, pid: u32) -> Self {
+        let Some(path) = path else {
+            return Self(None);
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(path, pid.to_string()) {
+            Ok(()) => Self(Some(path.to_path_buf())),
+            Err(_) => Self(None),
+        }
+    }
+}
+
+impl Drop for ToolPidFile {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 fn run_with_limits(
     command: &mut Command,
     timeout: Duration,
     cap: usize,
     input: Option<&[u8]>,
+    cancel_path: Option<&Path>,
 ) -> Result<BoundedRun> {
     let mut child = command
         .spawn()
         .map_err(|e| Error::Msg(format!("cannot start package tool: {e}")))?;
+    // Record the running tool so the platform can kill it when the user presses
+    // Stop: the proxy is a separate process from the UI command handler.
+    let _cancel_file = ToolPidFile::create(cancel_path, child.id());
     let overflow = Arc::new(AtomicBool::new(false));
 
     let stdin_handle = match (input, child.stdin.take()) {
@@ -967,7 +1007,7 @@ fn file_specs() -> Vec<Value> {
     vec![
         json!({
             "name": "list_files",
-            "description": "Список файлов и папок в рабочей папке. path — относительный путь, по умолчанию корень.",
+            "description": "РЎРїРёСЃРѕРє С„Р°Р№Р»РѕРІ Рё РїР°РїРѕРє РІ СЂР°Р±РѕС‡РµР№ РїР°РїРєРµ. path вЂ” РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅС‹Р№ РїСѓС‚СЊ, РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ РєРѕСЂРµРЅСЊ.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
@@ -976,7 +1016,7 @@ fn file_specs() -> Vec<Value> {
         }),
         json!({
             "name": "read_file",
-            "description": "Прочитать текстовый файл из рабочей папки. Абсолютные пути и выход за папку запрещены.",
+            "description": "РџСЂРѕС‡РёС‚Р°С‚СЊ С‚РµРєСЃС‚РѕРІС‹Р№ С„Р°Р№Р» РёР· СЂР°Р±РѕС‡РµР№ РїР°РїРєРё. РђР±СЃРѕР»СЋС‚РЅС‹Рµ РїСѓС‚Рё Рё РІС‹С…РѕРґ Р·Р° РїР°РїРєСѓ Р·Р°РїСЂРµС‰РµРЅС‹.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
@@ -986,7 +1026,7 @@ fn file_specs() -> Vec<Value> {
         }),
         json!({
             "name": "write_file",
-            "description": "Создать или перезаписать текстовый файл в рабочей папке. Путь относительный.",
+            "description": "РЎРѕР·РґР°С‚СЊ РёР»Рё РїРµСЂРµР·Р°РїРёСЃР°С‚СЊ С‚РµРєСЃС‚РѕРІС‹Р№ С„Р°Р№Р» РІ СЂР°Р±РѕС‡РµР№ РїР°РїРєРµ. РџСѓС‚СЊ РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅС‹Р№.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -999,7 +1039,7 @@ fn file_specs() -> Vec<Value> {
         }),
         json!({
             "name": "append_file",
-            "description": "Дописать текст в конец файла в рабочей папке; создаёт файл, если его нет.",
+            "description": "Р”РѕРїРёСЃР°С‚СЊ С‚РµРєСЃС‚ РІ РєРѕРЅРµС† С„Р°Р№Р»Р° РІ СЂР°Р±РѕС‡РµР№ РїР°РїРєРµ; СЃРѕР·РґР°С‘С‚ С„Р°Р№Р», РµСЃР»Рё РµРіРѕ РЅРµС‚.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1024,7 +1064,7 @@ fn package_spec(tool: &ToolDef) -> Value {
         return json!({
             "name": name,
             "description": format!(
-                "Инструмент приложения {}. Аргументы передаются JSON-объектом по схеме инструмента; секреты и сеть настраиваются платформой.",
+                "РРЅСЃС‚СЂСѓРјРµРЅС‚ РїСЂРёР»РѕР¶РµРЅРёСЏ {}. РђСЂРіСѓРјРµРЅС‚С‹ РїРµСЂРµРґР°СЋС‚СЃСЏ JSON-РѕР±СЉРµРєС‚РѕРј РїРѕ СЃС…РµРјРµ РёРЅСЃС‚СЂСѓРјРµРЅС‚Р°; СЃРµРєСЂРµС‚С‹ Рё СЃРµС‚СЊ РЅР°СЃС‚СЂР°РёРІР°СЋС‚СЃСЏ РїР»Р°С‚С„РѕСЂРјРѕР№.",
                 tool.tool
             ),
             "inputSchema": schema
@@ -1033,7 +1073,7 @@ fn package_spec(tool: &ToolDef) -> Value {
     if tool.tool == "docx_export" {
         return json!({
             "name": name,
-            "description": "Конвертировать markdown-файл из рабочей папки в Word .docx. Пути input и output относительные, вне рабочей папки запрещены.",
+            "description": "РљРѕРЅРІРµСЂС‚РёСЂРѕРІР°С‚СЊ markdown-С„Р°Р№Р» РёР· СЂР°Р±РѕС‡РµР№ РїР°РїРєРё РІ Word .docx. РџСѓС‚Рё input Рё output РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅС‹Рµ, РІРЅРµ СЂР°Р±РѕС‡РµР№ РїР°РїРєРё Р·Р°РїСЂРµС‰РµРЅС‹.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1048,7 +1088,7 @@ fn package_spec(tool: &ToolDef) -> Value {
     json!({
         "name": name,
         "description": format!(
-            "Инструмент приложения {}. Пути input и output относительные и не могут выходить за рабочую папку.",
+            "РРЅСЃС‚СЂСѓРјРµРЅС‚ РїСЂРёР»РѕР¶РµРЅРёСЏ {}. РџСѓС‚Рё input Рё output РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅС‹Рµ Рё РЅРµ РјРѕРіСѓС‚ РІС‹С…РѕРґРёС‚СЊ Р·Р° СЂР°Р±РѕС‡СѓСЋ РїР°РїРєСѓ.",
             tool.tool
         ),
         "inputSchema": {
@@ -1677,6 +1717,7 @@ mod tests {
             Duration::from_secs(5),
             4096,
             Some(b"{\"query\":\"hello\"}\n"),
+            None,
         )
         .unwrap();
         let stdout = String::from_utf8_lossy(&run.stdout);
@@ -1710,12 +1751,34 @@ mod tests {
     }
 
     #[test]
+    fn cancel_marker_is_removed_after_the_call() {
+        let dir = std::env::temp_dir().join(format!(
+            "eco-proxy-cancel-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("tool.pid");
+        let mut command = Command::new("cmd");
+        command
+            .args(["/C", "exit", "0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let run = run_with_limits(&mut command, Duration::from_secs(5), 1024, None, Some(&marker))
+            .unwrap();
+        assert!(run.status.success());
+        assert!(!marker.exists(), "cancel marker must not outlive the tool call");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn package_runner_enforces_timeout_and_captures_output() {
         let mut ok = Command::new("cmd");
         ok.args(["/C", "echo", "hi"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let run = run_with_limits(&mut ok, Duration::from_secs(5), 1024, None).unwrap();
+        let run = run_with_limits(&mut ok, Duration::from_secs(5), 1024, None, None).unwrap();
         assert!(run.status.success());
         assert!(String::from_utf8_lossy(&run.stdout).contains("hi"));
 
@@ -1723,7 +1786,7 @@ mod tests {
         slow.args(["/C", "ping -n 20 127.0.0.1 >nul"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let run = run_with_limits(&mut slow, Duration::from_millis(200), 1024, None).unwrap();
+        let run = run_with_limits(&mut slow, Duration::from_millis(200), 1024, None, None).unwrap();
         assert!(run.timed_out);
     }
 }

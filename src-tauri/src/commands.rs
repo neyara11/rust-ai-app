@@ -800,8 +800,39 @@ pub async fn open_app(state: tauri::State<'_, AppState>, app_id: String) -> Resu
     .map_err(|e| Error::Msg(format!("open task failed: {e}")))?
 }
 
+/// Kills the package tool process tree recorded by the proxy. The proxy runs in
+/// its own process, so neither the engine abort nor closing the app stops a
+/// converter by itself: the pid file is the only shared handle.
+fn cancel_package_tool(home: &std::path::Path, app_id: &str) {
+    let marker = home
+        .join("apps")
+        .join(app_id)
+        .join("engine")
+        .join("tool.pid");
+    let Ok(raw) = std::fs::read_to_string(&marker) else {
+        return;
+    };
+    let Ok(pid) = raw.trim().parse::<u32>() else {
+        let _ = std::fs::remove_file(&marker);
+        return;
+    };
+    let mut kill = std::process::Command::new("taskkill");
+    kill.args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        kill.creation_flags(0x0800_0000);
+    }
+    let _ = kill.status();
+    let _ = std::fs::remove_file(&marker);
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn close_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<()> {
+    cancel_package_tool(&state.home, &app_id);
     if let Ok(mut engines) = state.engines.lock() {
         engines.remove(&app_id);
     }
@@ -816,6 +847,13 @@ pub fn close_app(state: tauri::State<'_, AppState>, app_id: String) -> Result<()
 /// stopped. Switching between apps keeps engines alive instead.
 #[tauri::command(rename_all = "snake_case")]
 pub fn close_all_apps(state: tauri::State<'_, AppState>) -> Result<()> {
+    if let Ok(entries) = std::fs::read_dir(state.home.join("apps")) {
+        for entry in entries.flatten() {
+            if let Some(app_id) = entry.file_name().to_str() {
+                cancel_package_tool(&state.home, app_id);
+            }
+        }
+    }
     if let Ok(mut engines) = state.engines.lock() {
         engines.clear();
     }
@@ -1945,6 +1983,9 @@ pub fn chat_abort(
     state: tauri::State<'_, AppState>,
     app_id: String,
 ) -> Result<()> {
+    // A package tool runs in the proxy process, not under the engine request:
+    // aborting the turn alone leaves the converter running. Kill its tree first.
+    cancel_package_tool(&state.home, &app_id);
     {
         let engines = engines_lock(&state)?;
         let engine = engines
@@ -2139,6 +2180,7 @@ pub async fn chat_reset(app: tauri::AppHandle, app_id: String) -> Result<()> {
 pub async fn chat_stop(app: tauri::AppHandle, app_id: String) -> Result<()> {
     tauri::async_runtime::spawn_blocking(move || -> Result<()> {
         let state = app.state::<AppState>();
+        cancel_package_tool(&state.home, &app_id);
         let mut engines = engines_lock(&state)?;
         engines.remove(&app_id);
         drop(engines);

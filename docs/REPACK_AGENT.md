@@ -266,6 +266,9 @@ pyinstaller --onefile --clean --name crm_sync crm_sync.py
 - Любой исполняемый файл в `bin/` (`exe`, `bat`, `cmd`, `ps1`) обязан быть
   объявлен в `tools[]`: `eco-pack validate` считает необъявленный launcher
   ошибкой. Прочие файлы рядом (DLL, данные) — предупреждение и попадают в seal.
+- Имена в `tools[]` не повторяются. Инструмент без `bin` — это remote
+  MCP-инструмент, поэтому в `connections` должен быть хотя бы один `http-mcp`.
+- `timeout_secs` — целое от 1 до 7200.
 
 ## 7. Сборка и проверка
 

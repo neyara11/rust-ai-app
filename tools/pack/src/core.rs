@@ -437,10 +437,40 @@ pub fn validate(dir: &Path) -> Result<Report> {
     }
 
     if let Some(tools) = manifest.get("tools").and_then(Value::as_array) {
+        let mut seen_tools: Vec<String> = Vec::new();
+        let has_mcp = manifest
+            .get("connections")
+            .and_then(Value::as_array)
+            .map(|connections| {
+                connections.iter().any(|connection| {
+                    connection.get("type").and_then(Value::as_str) == Some("http-mcp")
+                })
+            })
+            .unwrap_or(false);
         for tool in tools {
             let name = tool.get("tool").and_then(Value::as_str).unwrap_or("");
             if name.is_empty() {
                 report.errors.push("tools[] entry has no name".to_string());
+            } else if seen_tools.contains(&name.to_string()) {
+                report
+                    .errors
+                    .push(format!("tool {name}: declared more than once"));
+            } else {
+                seen_tools.push(name.to_string());
+            }
+            let has_bin = tool.get("bin").and_then(Value::as_str).is_some();
+            if !has_bin && !has_mcp {
+                report.errors.push(format!(
+                    "tool {name}: no bin and no http-mcp connection; remote MCP tools need a connection"
+                ));
+            }
+            if let Some(timeout) = tool.get("timeout_secs") {
+                match timeout.as_u64() {
+                    Some(secs) if (1..=7200).contains(&secs) => {}
+                    _ => report.errors.push(format!(
+                        "tool {name}: timeout_secs must be between 1 and 7200"
+                    )),
+                }
             }
             if let Some(bin) = tool.get("bin").and_then(Value::as_str) {
                 if !rel_path_ok(bin) {
@@ -746,12 +776,12 @@ pub fn init(
     fs::write(manifest_path(dir), manifest).map_err(|e| e.to_string())?;
 
     let prompt = format!(
-        "# {name}\n\nТы — ассистент мини-приложения `{app_id}`. Опиши здесь задачу, тон и ограничения.\n"
+        "# {name}\n\nРўС‹ вЂ” Р°СЃСЃРёСЃС‚РµРЅС‚ РјРёРЅРё-РїСЂРёР»РѕР¶РµРЅРёСЏ `{app_id}`. РћРїРёС€Рё Р·РґРµСЃСЊ Р·Р°РґР°С‡Сѓ, С‚РѕРЅ Рё РѕРіСЂР°РЅРёС‡РµРЅРёСЏ.\n"
     );
     fs::write(dir.join("prompt").join("system.md"), prompt).map_err(|e| e.to_string())?;
 
     let skill = format!(
-        "# {name}\n\n## Когда применять\n\nОпиши триггеры навыка.\n\n## Шаги\n\n1. Уточни входные данные.\n2. Выполни задачу.\n3. Проверь результат.\n"
+        "# {name}\n\n## РљРѕРіРґР° РїСЂРёРјРµРЅСЏС‚СЊ\n\nРћРїРёС€Рё С‚СЂРёРіРіРµСЂС‹ РЅР°РІС‹РєР°.\n\n## РЁР°РіРё\n\n1. РЈС‚РѕС‡РЅРё РІС…РѕРґРЅС‹Рµ РґР°РЅРЅС‹Рµ.\n2. Р’С‹РїРѕР»РЅРё Р·Р°РґР°С‡Сѓ.\n3. РџСЂРѕРІРµСЂСЊ СЂРµР·СѓР»СЊС‚Р°С‚.\n"
     );
     fs::write(
         dir.join("skills").join("main").join("SKILL.md"),
@@ -884,6 +914,35 @@ mod tests {
             "expected an undeclared bin error: {:?}",
             report.errors
         );
+    }
+
+    #[test]
+    fn duplicate_and_orphan_remote_tools_are_errors() {
+        let app = make_package("tool-schema");
+        let mut manifest: Value =
+            serde_json::from_str(&fs::read_to_string(app.join("manifest.json")).unwrap()).unwrap();
+        manifest["connections"] = serde_json::json!([{ "id": "llm", "type": "llm" }]);
+        manifest["tools"] = serde_json::json!([
+            { "tool": "run", "bin": "bin/run.exe" },
+            { "tool": "run", "bin": "bin/run.exe" },
+            { "tool": "resolve", "stream": "read" }
+        ]);
+        fs::create_dir_all(app.join("bin")).unwrap();
+        fs::write(app.join("bin/run.exe"), b"MZ").unwrap();
+        write_manifest_text(&app, &serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        recompute_hashes(&app).unwrap();
+
+        let report = validate(&app).unwrap();
+        assert!(!report.ok());
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("declared more than once")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("no bin and no http-mcp connection")));
+        let _ = fs::remove_dir_all(app.parent().unwrap());
     }
 
     #[test]
