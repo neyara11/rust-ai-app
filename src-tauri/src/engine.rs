@@ -1732,14 +1732,23 @@ impl ChatSession {
     /// Opens the server-sent event stream. Connect before sending the prompt,
     /// otherwise the first deltas (reasoning start) are lost.
     pub fn event_stream(&self) -> Result<ureq::Response> {
+        self.open_event_stream(None)
+    }
+
+    /// Re-opens the bus stream, resuming from the last seen SSE id when the
+    /// engine supports it. Used when a long, silent tool outlives the read
+    /// timeout: a dropped stream must not end the turn's live updates.
+    fn open_event_stream(&self, last_event_id: Option<&str>) -> Result<ureq::Response> {
         let agent = stream_agent();
         let url = format!("{}/global/event", self.base);
-        match agent
+        let mut request = agent
             .get(&url)
             .set("Authorization", &self.auth)
-            .set("Accept", "text/event-stream")
-            .call()
-        {
+            .set("Accept", "text/event-stream");
+        if let Some(id) = last_event_id {
+            request = request.set("Last-Event-ID", id);
+        }
+        match request.call() {
             Ok(response) => Ok(response),
             Err(ureq::Error::Status(code, response)) => {
                 let body = response.into_string().unwrap_or_default();
@@ -1772,21 +1781,47 @@ impl ChatSession {
         let mut line = String::new();
         let mut last_emit = Instant::now() - Duration::from_secs(1);
         let mut waiting: Vec<WaitingAsk> = Vec::new();
+        let mut last_event_id: Option<String> = None;
+        let mut reconnect_attempts = 0u32;
 
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
             line.clear();
-            let read = reader
-                .read_line(&mut line)
-                .map_err(|e| Error::Msg(format!("event stream read failed: {e}")))?;
+            let read = reader.read_line(&mut line).unwrap_or(0);
             if read == 0 {
-                break;
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                // The read timeout also fires during a legitimately silent tool.
+                // Re-open the stream (resuming by SSE id when supported) instead
+                // of ending live updates for the rest of the turn.
+                if reconnect_attempts >= 10 {
+                    return Err(Error::Msg(
+                        "event stream was lost and did not resume".to_string(),
+                    ));
+                }
+                reconnect_attempts += 1;
+                let wait = Duration::from_millis(250 * reconnect_attempts as u64).min(Duration::from_secs(3));
+                let until = Instant::now() + wait;
+                while Instant::now() < until && !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Ok(next) = self.open_event_stream(last_event_id.as_deref()) {
+                    reader = BufReader::new(next.into_reader());
+                }
+                continue;
             }
+            reconnect_attempts = 0;
             let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
             if !trimmed.is_empty() {
-                if let Some(rest) = trimmed.strip_prefix("data:") {
+                if let Some(rest) = trimmed.strip_prefix("id:") {
+                    last_event_id = Some(rest.trim().to_string());
+                } else if let Some(rest) = trimmed.strip_prefix("data:") {
                     data.push_str(rest.trim_start());
                 }
                 continue;
