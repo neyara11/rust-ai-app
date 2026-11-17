@@ -1770,53 +1770,67 @@ function renderChat(items) {
   if (ctx.busy) renderThinking();
 }
 
-// Shows how much of the model context window the last turn occupied. The
-// prompt/answer usage comes from the assistant message; the window size comes
-// from the model capabilities configured for the gateway.
+// Shows how much of the model context window the last turn occupied, how many
+// of those tokens came from the provider cache, and (in the tooltip) the cache
+// hit rate. The prompt usage comes from the assistant message; the window size
+// comes from the model capabilities configured for the gateway.
 function updateContextMeter(items) {
   const chip = $("chat-context");
   const text = $("chat-context-text");
   if (!chip || !text) return;
   let usage = null;
-  let cacheRead = 0;
-  let cacheWrite = 0;
   for (let i = (items || []).length - 1; i >= 0; i--) {
     const item = items[i];
     if (item.role === "user") continue;
     if (item.tokens_in == null && item.cache_read == null && item.cache_write == null) continue;
-    cacheRead = item.cache_read || 0;
-    cacheWrite = item.cache_write || 0;
-    usage = contextTokensUsed(item.tokens_in, cacheRead, cacheWrite);
+    usage = contextUsage(item);
     break;
   }
-  if (usage == null) {
+  if (!usage) {
     chip.hidden = true;
     return;
   }
   const cap = Number((ctx.config && ctx.config.llm_capabilities && ctx.config.llm_capabilities.context_tokens) || 0);
   chip.hidden = false;
+  const cached = usage.cached > 0 ? ` · кэш ${fmtNum(usage.cached)}` : "";
   if (!cap) {
     chip.classList.remove("warn", "bad");
-    text.textContent = `контекст: ${fmtNum(usage)}`;
+    text.textContent = `контекст: ${fmtNum(usage.used)}${cached}`;
     chip.title = "Лимит контекстного окна не задан: укажите context_tokens в настройках модели";
     return;
   }
-  const percent = Math.round((usage / cap) * 1000) / 10;
-  const left = Math.max(0, cap - usage);
+  const percent = Math.round((usage.used / cap) * 1000) / 10;
+  const left = Math.max(0, cap - usage.used);
   chip.classList.toggle("warn", percent >= 75 && percent < 90);
   chip.classList.toggle("bad", percent >= 90);
-  text.textContent = `контекст ${percent}% · ${fmtNum(usage)} / ${fmtNum(cap)}`;
-  chip.title = `Занято ${usage} из ${cap} токенов, осталось ~${fmtNum(left)}`
-    + (cacheRead || cacheWrite ? ` · кэш: чтение ${cacheRead}, запись ${cacheWrite}` : "");
+  text.textContent = `контекст ${percent}% · ${fmtNum(usage.used)} / ${fmtNum(cap)}${cached}`;
+  const parts = [`Занято ${usage.used} из ${cap} токенов, осталось ~${fmtNum(left)}`];
+  if (usage.cached || usage.cacheWrite) {
+    parts.push(`кэш: прочитано ${usage.cached}, записано ${usage.cacheWrite}`);
+  }
+  if (usage.cached) {
+    parts.push(`попадание в кэш ${usage.hitRate.toFixed(1)}%`);
+  }
+  chip.title = parts.join(" · ");
 }
 
 /// Providers disagree about cached prompt tokens: OpenAI-compatible ones count
-/// them inside `input`, Anthropic-style ones report `input` without the cache
-/// and add it separately. A cache read larger than the fresh input can only be
-/// the latter, so it is added; otherwise `input` already covers the window.
-function contextTokensUsed(input, cacheRead, cacheWrite) {
-  if (input == null) return cacheRead + cacheWrite > 0 ? cacheRead + cacheWrite : null;
-  return cacheRead > input ? input + cacheRead + cacheWrite : input;
+/// them inside `input`, Anthropic-style ones report `input` without the cache.
+/// A cache read larger than the fresh input can only be the latter, so the
+/// cache is added; otherwise `input` already is the whole window. The cached
+/// count and the hit rate stay separate from the occupied size.
+function contextUsage(item) {
+  const input = item.tokens_in == null ? 0 : item.tokens_in;
+  const cacheRead = item.cache_read || 0;
+  const cacheWrite = item.cache_write || 0;
+  const used = cacheRead > input ? input + cacheRead + cacheWrite : input + cacheWrite;
+  if (!used && !cacheRead) return null;
+  return {
+    used,
+    cached: cacheRead,
+    cacheWrite,
+    hitRate: used > 0 ? (cacheRead / used) * 100 : 0,
+  };
 }
 
 function fmtNum(value) {

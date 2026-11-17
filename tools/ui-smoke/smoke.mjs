@@ -441,15 +441,16 @@ try {
     updateContextMeter([{ role: "assistant", tokens_in: 120000 }]);
     const bad = chipEl().classList.contains("bad");
     const title = chipEl().title;
-    // Anthropic-style: input excludes the cache, so it is added.
+    // Anthropic-style: input excludes the cache, so it is added to the window.
     updateContextMeter([{ role: "assistant", tokens_in: 2000, cache_read: 50000 }]);
     const excludedText = chipEl().textContent.trim();
+    const cacheTitle = chipEl().title;
     // OpenAI-style: cached tokens are already inside input, no double count.
     updateContextMeter([{ role: "assistant", tokens_in: 52000, cache_read: 50000 }]);
     const includedText = chipEl().textContent.trim();
     updateContextMeter([]);
     const hiddenWhenEmpty = chipEl().hidden;
-    return { warnHidden, warnText, warn, bad, title, excludedText, includedText, hiddenWhenEmpty };
+    return { warnHidden, warnText, warn, bad, title, excludedText, cacheTitle, includedText, hiddenWhenEmpty };
   });
   assert(
     !contextMeter.warnHidden && /контекст 78\.1%/.test(contextMeter.warnText),
@@ -459,8 +460,15 @@ try {
   assert(contextMeter.bad, "context meter did not mark 90% as danger");
   assert(/осталось/.test(contextMeter.title), "context meter title does not mention the remaining tokens");
   assert(
-    /52\.0k/.test(contextMeter.excludedText) && /52\.0k/.test(contextMeter.includedText),
+    /52\.0k/.test(contextMeter.excludedText) &&
+      /52\.0k/.test(contextMeter.includedText) &&
+      /кэш 50\.0k/.test(contextMeter.excludedText) &&
+      /кэш 50\.0k/.test(contextMeter.includedText),
     `cached tokens are counted incorrectly: ${contextMeter.excludedText} / ${contextMeter.includedText}`,
+  );
+  assert(
+    /попадание в кэш 96\.2%/.test(contextMeter.cacheTitle),
+    `cache hit rate is missing from the tooltip: ${contextMeter.cacheTitle}`,
   );
   assert(contextMeter.hiddenWhenEmpty, "context meter stayed visible for an empty chat");
 
