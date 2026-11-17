@@ -2788,6 +2788,62 @@ mod tests {
     }
 
     #[test]
+    fn event_stream_reconnects_after_eof() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let total = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = total.clone();
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                counter.fetch_add(1, Ordering::Relaxed);
+                let mut buf = [0u8; 2048];
+                let _ = socket.read(&mut buf);
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+                let _ = socket.write_all(head.as_bytes());
+                if index == 1 {
+                    let body = "data: {\"payload\":{\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_test\"}}}\n\n";
+                    let _ = socket.write_all(body.as_bytes());
+                }
+                let _ = socket.shutdown(std::net::Shutdown::Both);
+            }
+        });
+
+        let session = ChatSession {
+            base: format!("http://127.0.0.1:{port}"),
+            auth: "Basic eA==".to_string(),
+            provider_id: "gw".to_string(),
+            model_id: "m".to_string(),
+            session_id: "ses_test".to_string(),
+            system: "s".to_string(),
+            home: std::env::temp_dir(),
+            app_id: "demo".to_string(),
+            app_name: "Demo".to_string(),
+            app_version: "0.1.0".to_string(),
+            token_id: "tok".to_string(),
+        };
+        let response = session.open_event_stream(None).unwrap();
+        let stop = AtomicBool::new(false);
+        session
+            .consume_events(
+                response,
+                &stop,
+                |_| {},
+                |_| crate::permissions::PermissionVerdict::Pending,
+            )
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            total.load(Ordering::Relaxed),
+            2,
+            "the stream must reconnect after EOF"
+        );
+    }
+
+    #[test]
     fn attachment_images_are_cached_by_hash() {
         let home = std::env::temp_dir().join(format!("eco-attach-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
