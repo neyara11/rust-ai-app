@@ -441,9 +441,15 @@ try {
     updateContextMeter([{ role: "assistant", tokens_in: 120000 }]);
     const bad = chipEl().classList.contains("bad");
     const title = chipEl().title;
+    // Anthropic-style: input excludes the cache, so it is added.
+    updateContextMeter([{ role: "assistant", tokens_in: 2000, cache_read: 50000 }]);
+    const excludedText = chipEl().textContent.trim();
+    // OpenAI-style: cached tokens are already inside input, no double count.
+    updateContextMeter([{ role: "assistant", tokens_in: 52000, cache_read: 50000 }]);
+    const includedText = chipEl().textContent.trim();
     updateContextMeter([]);
     const hiddenWhenEmpty = chipEl().hidden;
-    return { warnHidden, warnText, warn, bad, title, hiddenWhenEmpty };
+    return { warnHidden, warnText, warn, bad, title, excludedText, includedText, hiddenWhenEmpty };
   });
   assert(
     !contextMeter.warnHidden && /контекст 78\.1%/.test(contextMeter.warnText),
@@ -452,6 +458,10 @@ try {
   assert(contextMeter.warn, "context meter did not warn at 75%");
   assert(contextMeter.bad, "context meter did not mark 90% as danger");
   assert(/осталось/.test(contextMeter.title), "context meter title does not mention the remaining tokens");
+  assert(
+    /52\.0k/.test(contextMeter.excludedText) && /52\.0k/.test(contextMeter.includedText),
+    `cached tokens are counted incorrectly: ${contextMeter.excludedText} / ${contextMeter.includedText}`,
+  );
   assert(contextMeter.hiddenWhenEmpty, "context meter stayed visible for an empty chat");
 
   await page.evaluate(() => {

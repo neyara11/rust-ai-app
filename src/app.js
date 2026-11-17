@@ -1786,7 +1786,7 @@ function updateContextMeter(items) {
     if (item.tokens_in == null && item.cache_read == null && item.cache_write == null) continue;
     cacheRead = item.cache_read || 0;
     cacheWrite = item.cache_write || 0;
-    usage = item.tokens_in != null ? item.tokens_in : cacheRead + cacheWrite;
+    usage = contextTokensUsed(item.tokens_in, cacheRead, cacheWrite);
     break;
   }
   if (usage == null) {
@@ -1808,6 +1808,15 @@ function updateContextMeter(items) {
   text.textContent = `контекст ${percent}% · ${fmtNum(usage)} / ${fmtNum(cap)}`;
   chip.title = `Занято ${usage} из ${cap} токенов, осталось ~${fmtNum(left)}`
     + (cacheRead || cacheWrite ? ` · кэш: чтение ${cacheRead}, запись ${cacheWrite}` : "");
+}
+
+/// Providers disagree about cached prompt tokens: OpenAI-compatible ones count
+/// them inside `input`, Anthropic-style ones report `input` without the cache
+/// and add it separately. A cache read larger than the fresh input can only be
+/// the latter, so it is added; otherwise `input` already covers the window.
+function contextTokensUsed(input, cacheRead, cacheWrite) {
+  if (input == null) return cacheRead + cacheWrite > 0 ? cacheRead + cacheWrite : null;
+  return cacheRead > input ? input + cacheRead + cacheWrite : input;
 }
 
 function fmtNum(value) {
