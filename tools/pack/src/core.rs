@@ -447,40 +447,41 @@ pub fn validate(dir: &Path) -> Result<Report> {
                 })
             })
             .unwrap_or(false);
-        for tool in tools {
+        for (index, tool) in tools.iter().enumerate() {
+            let path = format!("tools[{index}]");
             let name = tool.get("tool").and_then(Value::as_str).unwrap_or("");
             if name.is_empty() {
-                report.errors.push("tools[] entry has no name".to_string());
+                report.errors.push(format!("{path}: entry has no name"));
             } else if seen_tools.contains(&name.to_string()) {
                 report
                     .errors
-                    .push(format!("tool {name}: declared more than once"));
+                    .push(format!("{path} ({name}): declared more than once"));
             } else {
                 seen_tools.push(name.to_string());
             }
             let has_bin = tool.get("bin").and_then(Value::as_str).is_some();
             if !has_bin && !has_mcp {
                 report.errors.push(format!(
-                    "tool {name}: no bin and no http-mcp connection; remote MCP tools need a connection"
+                    "{path}: no bin and no http-mcp connection; remote MCP tools need a connection"
                 ));
             }
             if let Some(timeout) = tool.get("timeout_secs") {
                 match timeout.as_u64() {
                     Some(secs) if (1..=7200).contains(&secs) => {}
-                    _ => report.errors.push(format!(
-                        "tool {name}: timeout_secs must be between 1 and 7200"
-                    )),
+                    _ => report
+                        .errors
+                        .push(format!("{path}.timeout_secs: must be between 1 and 7200")),
                 }
             }
             if let Some(bin) = tool.get("bin").and_then(Value::as_str) {
                 if !rel_path_ok(bin) {
                     report
                         .errors
-                        .push(format!("tool {name}: bin is not a safe path: {bin}"));
+                        .push(format!("{path}.bin: not a safe path: {bin}"));
                 } else if !file_for(dir, bin).is_file() {
                     report
                         .errors
-                        .push(format!("tool {name}: bin is missing: {bin}"));
+                        .push(format!("{path}.bin: bin is missing: {bin}"));
                 }
             }
             let io = tool
@@ -491,14 +492,14 @@ pub fn validate(dir: &Path) -> Result<Report> {
             if io != "files" && io != "json" {
                 report
                     .errors
-                    .push(format!("tool {name}: io must be files or json"));
+                    .push(format!("{path}.io: must be files or json"));
             }
             if io == "json" {
                 if let Some(parameters) = tool.get("parameters") {
                     if !parameters.is_object() {
                         report
                             .errors
-                            .push(format!("tool {name}: parameters must be a JSON object"));
+                            .push(format!("{path}.parameters: must be a JSON object"));
                     }
                 }
                 if let Some(argv) = tool.get("argv").and_then(Value::as_array) {
@@ -508,7 +509,7 @@ pub fn validate(dir: &Path) -> Result<Report> {
                             .unwrap_or(false)
                     }) {
                         report.errors.push(format!(
-                            "tool {name}: io=json must not use {{input}}/{{output}} in argv"
+                            "{path}.argv: io=json must not use {{input}}/{{output}}"
                         ));
                     }
                 }
@@ -517,34 +518,72 @@ pub fn validate(dir: &Path) -> Result<Report> {
                 let Some(secrets) = secrets.as_object() else {
                     report
                         .errors
-                        .push(format!("tool {name}: secrets must be an object"));
+                        .push(format!("{path}.secrets: must be an object"));
                     continue;
                 };
                 if secrets.len() > 16 {
                     report
                         .errors
-                        .push(format!("tool {name}: too many secrets (max 16)"));
+                        .push(format!("{path}.secrets: too many secrets (max 16)"));
                 }
                 for (env, secret) in secrets {
                     if !env_name_ok(env) {
                         report.errors.push(format!(
-                            "tool {name}: invalid env name in secrets: {env}"
+                            "{path}.secrets.{env}: invalid env name"
                         ));
                     }
                     match secret.as_str() {
                         Some(secret) if secret_name_ok(secret) => {}
-                        Some(_) => report.errors.push(format!(
-                            "tool {name}: invalid secret name for {env}"
-                        )),
+                        Some(_) => report
+                            .errors
+                            .push(format!("{path}.secrets.{env}: invalid secret name")),
                         None => report
                             .errors
-                            .push(format!("tool {name}: secret for {env} must be a string")),
+                            .push(format!("{path}.secrets.{env}: must be a string")),
                     }
                 }
             }
         }
     } else if manifest.get("tools").is_some() {
         report.errors.push("tools must be an array".to_string());
+    }
+
+    if let Some(connections) = manifest.get("connections") {
+        let connections = match connections.as_array() {
+            Some(connections) => Some(connections),
+            None => {
+                report
+                    .errors
+                    .push("connections: must be an array".to_string());
+                None
+            }
+        };
+        if let Some(connections) = connections {
+            let mut ids: Vec<String> = Vec::new();
+            for (index, connection) in connections.iter().enumerate() {
+                let path = format!("connections[{index}]");
+                match connection.get("id").and_then(Value::as_str) {
+                    Some(id) if app_id_ok(id) => {
+                        if ids.contains(&id.to_string()) {
+                            report
+                                .errors
+                                .push(format!("{path}.id: declared more than once"));
+                        } else {
+                            ids.push(id.to_string());
+                        }
+                    }
+                    Some(_) => report.errors.push(format!("{path}.id: invalid id")),
+                    None => report.errors.push(format!("{path}.id: missing")),
+                }
+                match connection.get("type").and_then(Value::as_str) {
+                    Some("llm") | Some("http-mcp") => {}
+                    Some(other) => report
+                        .errors
+                        .push(format!("{path}.type: unknown type {other}")),
+                    None => report.errors.push(format!("{path}.type: missing")),
+                }
+            }
+        }
     }
 
     if let Some(caps) = manifest.get("capabilities") {
@@ -560,10 +599,34 @@ pub fn validate(dir: &Path) -> Result<Report> {
             }
         }
         if let Some(writes) = caps.get("external_writes").and_then(Value::as_array) {
-            if !writes.is_empty() {
-                report
-                    .warnings
-                    .push("external_writes is not empty".to_string());
+            let mcp_ids: Vec<String> = manifest
+                .get("connections")
+                .and_then(Value::as_array)
+                .map(|connections| {
+                    connections
+                        .iter()
+                        .filter(|connection| {
+                            connection.get("type").and_then(Value::as_str) == Some("http-mcp")
+                        })
+                        .filter_map(|connection| {
+                            connection
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (index, write) in writes.iter().enumerate() {
+                match write.as_str() {
+                    Some(id) if mcp_ids.contains(&id.to_string()) => {}
+                    Some(id) => report.errors.push(format!(
+                        "capabilities.external_writes[{index}]: unknown http-mcp connection {id}"
+                    )),
+                    None => report.errors.push(format!(
+                        "capabilities.external_writes[{index}]: must be a string"
+                    )),
+                }
             }
         }
     }
@@ -917,6 +980,51 @@ mod tests {
     }
 
     #[test]
+    fn schema_document_matches_the_manifest_shape() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/manifest.schema.json");
+        let schema: Value =
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            schema["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+        assert_eq!(schema["properties"]["schema_version"]["const"], 2);
+        assert_eq!(
+            schema["properties"]["tools"]["items"]["properties"]["timeout_secs"]["maximum"],
+            7200
+        );
+    }
+
+    #[test]
+    fn broken_connections_are_reported_with_paths() {
+        let app = make_package("connections");
+        let mut manifest: Value =
+            serde_json::from_str(&fs::read_to_string(app.join("manifest.json")).unwrap()).unwrap();
+        manifest["connections"] = serde_json::json!([
+            { "id": "llm", "type": "llm" },
+            { "id": "llm", "type": "http-mcp" },
+            { "id": "bad id", "type": "nope" }
+        ]);
+        write_manifest_text(&app, &serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+
+        let report = validate(&app).unwrap();
+        assert!(!report.ok());
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("connections[1].id: declared more than once")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("connections[2].type: unknown type nope")));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("connections[2].id: invalid id")));
+        let _ = fs::remove_dir_all(app.parent().unwrap());
+    }
+
+    #[test]
     fn duplicate_and_orphan_remote_tools_are_errors() {
         let app = make_package("tool-schema");
         let mut manifest: Value =
@@ -937,11 +1045,11 @@ mod tests {
         assert!(report
             .errors
             .iter()
-            .any(|error| error.contains("declared more than once")));
+            .any(|error| error.contains("tools[1]") && error.contains("declared more than once")));
         assert!(report
             .errors
             .iter()
-            .any(|error| error.contains("no bin and no http-mcp connection")));
+            .any(|error| error.contains("tools[2]") && error.contains("no bin and no http-mcp connection")));
         let _ = fs::remove_dir_all(app.parent().unwrap());
     }
 

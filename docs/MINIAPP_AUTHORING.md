@@ -23,7 +23,7 @@ MCP-подключения, `external_writes`).
 
 ```text
 my-app/
-├─ manifest.json              # создаётся мастером или вручную, схема 2
+├─ manifest.json              # схема 2; JSON Schema: docs/manifest.schema.json
 ├─ AGENTS.md                  # допустимая замена prompt/system.md в корне
 ├─ SKILL.md                   # допустимый корневой навык
 ├─ prompt/

@@ -491,7 +491,7 @@ UserConfig {
 
 ### 10.4. Пакеты и авторский опыт
 
-13. **JSON Schema манифеста** и валидация в `eco-pack` с указанием пути поля; сейчас ошибки текстовые. Частично сделано 17.11.2026: `validate` ловит дубли `tools[]`, remote-инструмент без `http-mcp`, небезопасный/несуществующий `bin`, `io=json` с `{input}/{output}` и `timeout_secs` вне 1..7200; полноценная схема с путями полей — ещё нет.
+13. **JSON Schema манифеста** и валидация в `eco-pack` с указанием пути поля. Сделано 17.11.2026: опубликован `docs/manifest.schema.json` (draft 2020-12, `additionalProperties: false`), ошибки `validate` теперь адресуют поле (`tools[2].bin`, `connections[1].type`, `capabilities.external_writes[0]`), добавлены проверки `connections[]` (id/type/дубли) и `external_writes` относительно `http-mcp`. Валидатор остаётся ручным (без внешней schema-библиотеки); схема служит контрактом для редакторов и тестов.
 14. **`eco-pack --dry-run`, `init --template`, `pack --reproducible`**, SBOM и фиксация версии упаковщика.
 15. **Подписанный wheelhouse/SBOM для Python-пакетов** — иначе офлайн-установка библиотек станет новым каналом поставки.
 16. **Провенанс и CI-подпись артефактов** — остаточный пробел из `docs/APP_LIFECYCLE.md:409-413`.

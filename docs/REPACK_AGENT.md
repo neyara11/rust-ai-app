@@ -222,7 +222,8 @@ pyinstaller --onefile --clean --name crm_sync crm_sync.py
 
 ## 6. Манифест
 
-Создай `<app_id>/manifest.json` со схемой 2. Шаблон, который нужно заполнить:
+Создай `<app_id>/manifest.json` со схемой 2. Полная JSON Schema (для редактора
+и проверки полей): `docs/manifest.schema.json`. Шаблон, который нужно заполнить:
 
 ```json
 {
