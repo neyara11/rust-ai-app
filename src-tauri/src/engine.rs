@@ -819,7 +819,7 @@ fn http(
 /// Fallbacks for a partially filled model capability block: the engine schema
 /// rejects a `limit` object that misses either number.
 const DEFAULT_CONTEXT_TOKENS: u64 = 128_000;
-const DEFAULT_OUTPUT_TOKENS: u64 = 8_192;
+const DEFAULT_OUTPUT_TOKENS: u64 = 32_000;
 
 fn model_entry(model_name: &str, caps: &config::ModelCapabilities) -> Value {
     let mut model = serde_json::Map::new();
@@ -1781,6 +1781,7 @@ impl ChatSession {
         let mut line = String::new();
         let mut last_emit = Instant::now() - Duration::from_secs(1);
         let mut waiting: Vec<WaitingAsk> = Vec::new();
+        let mut known_permissions: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut last_event_id: Option<String> = None;
         let mut reconnect_attempts = 0u32;
 
@@ -1813,6 +1814,8 @@ impl ChatSession {
                 }
                 if let Ok(next) = self.open_event_stream(last_event_id.as_deref()) {
                     reader = BufReader::new(next.into_reader());
+                    // An ask may have fired while the stream was down.
+                    self.reconcile_permissions(&mut on_permission, &mut known_permissions);
                 }
                 continue;
             }
@@ -1855,6 +1858,7 @@ impl ChatSession {
                 {
                     enrich_from_state(&mut request, &state);
                     let id = request.id.clone();
+                    known_permissions.insert(id.clone());
                     let call_id = request.call_id.clone();
                     let wants_target = crate::permissions::target_of(&request.metadata).is_none();
                     let waiting_request = request.clone();
@@ -1892,6 +1896,7 @@ impl ChatSession {
             if kind == "permission.replied" {
                 if let Some(id) = props.get("requestID").and_then(Value::as_str) {
                     waiting.retain(|ask| ask.request.id != id);
+                    known_permissions.remove(id);
                     on_permission(crate::permissions::PermissionBusEvent::Replied(
                         id.to_string(),
                     ));
@@ -1926,6 +1931,47 @@ impl ChatSession {
             }
         }
         Ok(())
+    }
+
+    /// Re-announces pending asks after a reconnect and applies auto-allow/reject
+    /// verdicts, so a request that fired in the gap cannot hang the turn.
+    fn reconcile_permissions<P>(
+        &self,
+        on_permission: &mut P,
+        known: &mut std::collections::HashSet<String>,
+    ) where
+        P: FnMut(crate::permissions::PermissionBusEvent) -> crate::permissions::PermissionVerdict,
+    {
+        let Ok(list) = self.pending_permissions() else {
+            return;
+        };
+        for item in list {
+            if item.get("sessionID").and_then(Value::as_str) != Some(self.session_id.as_str()) {
+                continue;
+            }
+            let Some(request) =
+                crate::permissions::parse_request(&self.app_id, &self.session_id, &item)
+            else {
+                continue;
+            };
+            if !known.insert(request.id.clone()) {
+                continue;
+            }
+            let id = request.id.clone();
+            match on_permission(crate::permissions::PermissionBusEvent::Asked(request)) {
+                crate::permissions::PermissionVerdict::Once => {
+                    if let Err(e) = self.reply_permission(&id, "once") {
+                        eprintln!("permission auto-reply failed after reconnect: {e}");
+                    }
+                }
+                crate::permissions::PermissionVerdict::Reject => {
+                    if let Err(e) = self.reply_permission(&id, "reject") {
+                        eprintln!("permission reject failed after reconnect: {e}");
+                    }
+                }
+                crate::permissions::PermissionVerdict::Pending => {}
+            }
+        }
     }
 
     /// Interrupts the current turn, if any.
@@ -2047,6 +2093,21 @@ impl ChatSession {
     /// a long but healthy turn.
     pub fn healthy(&self) -> bool {
         http(&health_agent(), &self.base, &self.auth, "GET", "/config", None).is_ok()
+    }
+
+    /// Pending permission requests for all sessions. Used after a stream
+    /// reconnect: an ask that fired during the gap would otherwise stay
+    /// invisible until the watchdog or the turn limit.
+    pub fn pending_permissions(&self) -> Result<Vec<Value>> {
+        let value = http(
+            &health_agent(),
+            &self.base,
+            &self.auth,
+            "GET",
+            "/permission",
+            None,
+        )?;
+        Ok(value.as_array().cloned().unwrap_or_default())
     }
 
     pub fn history(&self) -> Result<Vec<ChatItem>> {
@@ -2791,22 +2852,36 @@ mod tests {
     fn event_stream_reconnects_after_eof() {
         use std::io::{Read, Write};
         use std::sync::atomic::AtomicUsize;
+        use std::sync::Mutex;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let total = std::sync::Arc::new(AtomicUsize::new(0));
-        let counter = total.clone();
+        let streams = std::sync::Arc::new(AtomicUsize::new(0));
+        let permission_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let stream_counter = streams.clone();
+        let permission_counter = permission_calls.clone();
         let server = std::thread::spawn(move || {
-            for index in 0..2 {
+            for _ in 0..3 {
                 let (mut socket, _) = listener.accept().unwrap();
-                counter.fetch_add(1, Ordering::Relaxed);
-                let mut buf = [0u8; 2048];
-                let _ = socket.read(&mut buf);
-                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
-                let _ = socket.write_all(head.as_bytes());
-                if index == 1 {
-                    let body = "data: {\"payload\":{\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_test\"}}}\n\n";
-                    let _ = socket.write_all(body.as_bytes());
+                let mut buf = [0u8; 4096];
+                let read = socket.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                if request.starts_with("GET /permission") {
+                    permission_counter.fetch_add(1, Ordering::Relaxed);
+                    let body = r#"[{"id":"per_1","sessionID":"ses_test","permission":"platform_write_file","patterns":["*"],"metadata":{},"always":["*"],"tool":{"messageID":"m","callID":"c"}}]"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes());
+                } else {
+                    let index = stream_counter.fetch_add(1, Ordering::Relaxed);
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(head.as_bytes());
+                    if index == 1 {
+                        let body = "data: {\"payload\":{\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_test\"}}}\n\n";
+                        let _ = socket.write_all(body.as_bytes());
+                    }
                 }
                 let _ = socket.shutdown(std::net::Shutdown::Both);
             }
@@ -2827,20 +2902,35 @@ mod tests {
         };
         let response = session.open_event_stream(None).unwrap();
         let stop = AtomicBool::new(false);
+        let asked = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let asked_sink = asked.clone();
         session
             .consume_events(
                 response,
                 &stop,
                 |_| {},
-                |_| crate::permissions::PermissionVerdict::Pending,
+                move |event| {
+                    if let crate::permissions::PermissionBusEvent::Asked(request) = event {
+                        if let Ok(mut list) = asked_sink.lock() {
+                            list.push(request.id);
+                        }
+                    }
+                    crate::permissions::PermissionVerdict::Pending
+                },
             )
             .unwrap();
         server.join().unwrap();
         assert_eq!(
-            total.load(Ordering::Relaxed),
+            streams.load(Ordering::Relaxed),
             2,
             "the stream must reconnect after EOF"
         );
+        assert_eq!(
+            permission_calls.load(Ordering::Relaxed),
+            1,
+            "pending asks must be reconciled after the reconnect"
+        );
+        assert_eq!(asked.lock().unwrap().clone(), vec!["per_1".to_string()]);
     }
 
     #[test]
