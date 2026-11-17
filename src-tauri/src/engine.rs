@@ -760,6 +760,14 @@ fn probe_agent() -> ureq::Agent {
     builder.build()
 }
 
+fn health_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(5))
+        .build()
+}
+
 fn http(
     agent: &ureq::Agent,
     base: &str,
@@ -1996,6 +2004,13 @@ impl ChatSession {
             &format!("/session/{}/message", self.session_id),
             None,
         )
+    }
+
+    /// Cheap liveness probe: `/config` answers even while a tool runs, so a
+    /// wedged event loop (no answers for several probes) can be told apart from
+    /// a long but healthy turn.
+    pub fn healthy(&self) -> bool {
+        http(&health_agent(), &self.base, &self.auth, "GET", "/config", None).is_ok()
     }
 
     pub fn history(&self) -> Result<Vec<ChatItem>> {

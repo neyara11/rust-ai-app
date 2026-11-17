@@ -1704,6 +1704,40 @@ pub fn chat_send(
         }),
     );
 
+    // Liveness watchdog: a long tool can be silent for minutes, but a wedged
+    // engine stops answering `/config` too. Three misses (~45 s) drop the dead
+    // engine so the pending POST fails and the next open starts a fresh one.
+    {
+        let probe = session.clone();
+        let stop = stop_stream.clone();
+        let watchdog_app = app.clone();
+        let watchdog_app_id = app_id.clone();
+        std::thread::spawn(move || {
+            let mut misses = 0u32;
+            loop {
+                for _ in 0..15 {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+                if probe.healthy() {
+                    misses = 0;
+                    continue;
+                }
+                misses += 1;
+                if misses >= 3 {
+                    let state = watchdog_app.state::<AppState>();
+                    if let Ok(mut engines) = engines_lock(&state) {
+                        engines.remove(&watchdog_app_id);
+                    }
+                    stop.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+        });
+    }
+
     // Subscribe to the engine bus before sending the prompt so reasoning and
     // the first text deltas are not lost. The final authoritative history is
     // still fetched when the prompt call returns.
