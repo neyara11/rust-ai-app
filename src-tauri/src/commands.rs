@@ -538,6 +538,7 @@ pub fn remove_app(
     app_id: String,
 ) -> Result<()> {
     let home = state.home.clone();
+    cancel_package_tool(&home, &app_id);
     if let Ok(mut engines) = state.engines.lock() {
         engines.remove(&app_id);
     }
