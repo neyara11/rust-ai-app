@@ -1791,20 +1791,39 @@ pub fn chat_send(
             text.clone()
         };
         session.title_from_first_message(&title_source);
+        let turn_started_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
         let result = session.prompt_with_attachments(&text, variant.as_deref(), &attachments);
         stop_stream.store(true, Ordering::Relaxed);
+        let history = session.history_raw().ok();
+        let finished = history
+            .as_ref()
+            .map(|raw| crate::engine::completed_after(raw, turn_started_ms))
+            .unwrap_or(false);
+        let publish = |raw: &serde_json::Value| {
+            let items = crate::engine::parse_history(raw);
+            let _ = app.emit(
+                "chat://update",
+                serde_json::json!({
+                    "app_id": app_id,
+                    "session": session.session_id,
+                    "items": items
+                }),
+            );
+        };
         match result {
             Ok(()) => {
-                if let Ok(raw) = session.history_raw() {
-                    let items = crate::engine::parse_history(&raw);
-                    let _ = app.emit(
-                        "chat://update",
-                        serde_json::json!({
-                            "app_id": app_id,
-                            "session": session.session_id,
-                            "items": items
-                        }),
-                    );
+                if let Some(raw) = &history {
+                    publish(raw);
+                }
+            }
+            // A lost response does not mean a lost turn: if the engine already
+            // completed the message, this is a success, not an interruption.
+            Err(_) if finished => {
+                if let Some(raw) = &history {
+                    publish(raw);
                 }
             }
             Err(e) => {
@@ -1813,7 +1832,8 @@ pub fn chat_send(
                     serde_json::json!({
                         "app_id": app_id,
                         "session": session.session_id,
-                        "message": e.to_string()
+                        "message": e.to_string(),
+                        "interrupted": true
                     }),
                 );
             }

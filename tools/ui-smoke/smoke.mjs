@@ -542,6 +542,21 @@ try {
   });
   assert(await page.locator("#chat-context").isHidden(), "context meter stayed visible for an empty chat");
 
+  const retryUi = await page.evaluate(async () => {
+    ctx.chatItems = [{ role: "user", kind: "text", text: "повтори меня" }];
+    chatInterrupted("тестовый обрыв");
+    const node = document.querySelector("#chat-log .msg.error.interrupted");
+    const button = node && node.querySelector("[data-retry-turn]");
+    if (!button) return { ok: false, text: "" };
+    button.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    return { ok: true, text: node.textContent };
+  });
+  assert(
+    retryUi.ok && /Ход прерван/.test(retryUi.text),
+    "interrupted turn has no retry button",
+  );
+
   await page.evaluate(() => {
     const transfer = new DataTransfer();
     transfer.items.add(new File(["pasted"], "pasted.txt", { type: "text/plain" }));

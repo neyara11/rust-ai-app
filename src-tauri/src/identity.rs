@@ -15,8 +15,10 @@ pub const DEFAULT_TTL_SECS: u64 = 12 * 60 * 60;
 /// Expired or revoked token records are kept for this long for audit correlation.
 const KEEP_SECS: u64 = 7 * 24 * 60 * 60;
 const MAX_RECORDS: usize = 200;
-const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
-const LOCK_STALE: Duration = Duration::from_secs(5);
+/// A crashed process may leave the lock file behind; it must only be stolen
+/// after a period longer than the longest legitimate hold below.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(25);
+const LOCK_STALE: Duration = Duration::from_secs(30);
 
 fn now_secs() -> u64 {
     crate::artifacts::now_secs()
@@ -131,11 +133,31 @@ impl Drop for StoreLock {
     }
 }
 
+/// Antivirus scanners briefly hold freshly written files on Windows. Retry the
+/// permission-denied window instead of failing a token issue under load.
+fn retry_permission<T>(
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut attempts = 0;
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if attempts < 100 && error.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// A corrupt or unreadable store is an error, not an empty store: silently
 /// dropping records would resurrect revoked tokens.
 fn load(home: &Path) -> Result<Store> {
     let path = path(home);
-    match std::fs::read_to_string(&path) {
+    match retry_permission(|| std::fs::read_to_string(&path)) {
         Ok(raw) => serde_json::from_str(&raw)
             .map_err(|e| Error::Msg(format!("token store is corrupt: {e}"))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Store::default()),
@@ -146,38 +168,23 @@ fn load(home: &Path) -> Result<Store> {
 fn save(home: &Path, store: &Store) -> Result<()> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = dir(home);
-    std::fs::create_dir_all(&dir)?;
+    retry_permission(|| std::fs::create_dir_all(&dir))?;
     let raw = serde_json::to_string_pretty(store)?;
     let tmp = dir.join(format!(
         "tokens.{}.{}.tmp",
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    {
+    retry_permission(|| {
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(raw.as_bytes())?;
-        file.sync_all()?;
-    }
-    // Windows can briefly return PermissionDenied when an antivirus scanner
-    // or another reader still has the destination open. The store lock already
-    // serializes writers, so a short retry is safe and avoids a spurious
-    // failure during concurrent token issuance.
-    let mut attempts = 0u32;
-    loop {
-        match std::fs::rename(&tmp, path(home)) {
-            Ok(()) => return Ok(()),
-            Err(e)
-                if attempts < 60
-                    && (e.kind() == std::io::ErrorKind::PermissionDenied
-                        || e.kind() == std::io::ErrorKind::AlreadyExists) =>
-            {
-                attempts += 1;
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(Error::Io(e));
-            }
+        file.sync_all()
+    })?;
+    match retry_permission(|| std::fs::rename(&tmp, path(home))) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(Error::Io(e))
         }
     }
 }

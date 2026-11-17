@@ -4290,6 +4290,20 @@ html[data-theme="light"] .mode-overlay {
   font-size: 12px;
 }
 
+.msg.error.interrupted {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.msg.error.interrupted .ghost.small {
+  flex: none;
+  color: var(--bad);
+  border-color: var(--bad-line);
+}
+
 .msg.reasoning {
   align-self: stretch;
   max-width: 100%;

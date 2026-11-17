@@ -2139,6 +2139,41 @@ impl ChatSession {
     }
 }
 
+/// True when the session already has an assistant message created after
+/// `since_ms` and that message is marked completed. Used to tell a lost POST
+/// response apart from a turn that never finished.
+pub fn completed_after(raw: &Value, since_ms: u64) -> bool {
+    let Some(messages) = raw.as_array() else {
+        return false;
+    };
+    let mut last: Option<&Value> = None;
+    for message in messages {
+        if message
+            .get("info")
+            .and_then(|info| info.get("role"))
+            .and_then(Value::as_str)
+            == Some("assistant")
+        {
+            last = Some(message);
+        }
+    }
+    let Some(info) = last.and_then(|message| message.get("info")) else {
+        return false;
+    };
+    let created = info
+        .get("time")
+        .and_then(|time| time.get("created"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let completed = info
+        .get("time")
+        .and_then(|time| time.get("completed"))
+        .and_then(Value::as_u64)
+        .is_some()
+        || info.get("completed").and_then(Value::as_u64).is_some();
+    created >= since_ms && completed
+}
+
 fn inlined_attachment_name(text: &str) -> Option<&str> {
     let rest = text.strip_prefix("[attachment: ")?;
     let end = rest.find(']')?;
@@ -2951,6 +2986,22 @@ mod tests {
             .unwrap()
             .is_none());
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn completed_turn_is_detected_after_lost_response() {
+        let raw = json!([{
+            "info": { "role": "assistant", "time": { "created": 1000, "completed": 2000 } },
+            "parts": []
+        }]);
+        assert!(completed_after(&raw, 900));
+        assert!(!completed_after(&raw, 1500));
+
+        let running = json!([{
+            "info": { "role": "assistant", "time": { "created": 1000 } },
+            "parts": []
+        }]);
+        assert!(!completed_after(&running, 900));
     }
 
     #[test]

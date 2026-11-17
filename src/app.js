@@ -1917,6 +1917,23 @@ function fmtNum(value) {
   return String(value);
 }
 
+function chatInterrupted(message) {
+  const log = $("chat-log");
+  const stick = nearLogBottom(log);
+  const div = document.createElement("div");
+  div.className = "msg error interrupted";
+  const text = document.createElement("span");
+  text.textContent = `Ход прерван: ${message}`;
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "ghost small";
+  retry.dataset.retryTurn = "1";
+  retry.textContent = "Повторить";
+  div.append(text, retry);
+  log.appendChild(div);
+  if (stick) log.scrollTop = log.scrollHeight;
+}
+
 function chatError(message) {
   const log = $("chat-log");
   const stick = nearLogBottom(log);
@@ -2477,7 +2494,12 @@ async function sendChat() {
   autosizeComposer();
   clearAttachments();
   setBusy(true);
-  const variant = $("chat-reasoning").value || null;
+  await dispatchTurn(text, attachments, $("chat-reasoning").value || null);
+}
+
+/// Sends one turn and renders the optimistic user message. Shared by the
+/// composer and the "Повторить" button on an interrupted turn.
+async function dispatchTurn(text, attachments, variant) {
   try {
     await ensureChat();
     const optimistic = [...(ctx.chatItems || [])];
@@ -2510,6 +2532,52 @@ async function sendChat() {
     chatError(String(e));
     setBusy(false);
   }
+}
+
+/// Resends the last user message (with cached images) after an interrupted
+/// turn. The user decides to retry; nothing is resent automatically.
+async function retryLastTurn() {
+  if (!ctx.appId || ctx.busy) return;
+  const items = ctx.chatItems || [];
+  let start = -1;
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (items[i].role === "user") {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) {
+    toast("Нет сообщения для повтора", true);
+    return;
+  }
+  let text = "";
+  const attachments = [];
+  for (let i = start; i < items.length; i++) {
+    const item = items[i];
+    if (item.role !== "user") continue;
+    if (item.kind === "text") {
+      text = text ? `${text}\n${item.text}` : item.text;
+      continue;
+    }
+    if (item.kind !== "file" || !item.mime || !item.mime.startsWith("image/")) continue;
+    let data = item.data;
+    if (!data && item.image_ref) {
+      try {
+        const image = await invoke("chat_image", {
+          app_id: ctx.appId,
+          image_ref: item.image_ref,
+        });
+        data = image && image.data;
+      } catch (_) {}
+    }
+    if (data) attachments.push({ mime: item.mime, filename: item.text, data });
+  }
+  if (!text.trim() && !attachments.length) {
+    toast("Повторите сообщение вручную — вложение больше не доступно", true);
+    return;
+  }
+  setBusy(true);
+  await dispatchTurn(text, attachments.slice(0, MAX_ATTACHMENTS), $("chat-reasoning").value || null);
 }
 
 async function stopChat() {
@@ -2698,7 +2766,11 @@ function bindChatEvents() {
       (item) => item.session_id !== ctx.chatId,
     );
     renderPermissionPrompt();
-    chatError(payload.message || "ошибка движка");
+    if (payload.interrupted) {
+      chatInterrupted(payload.message || "движок перестал отвечать");
+    } else {
+      chatError(payload.message || "ошибка движка");
+    }
     setBusy(false);
   });
 }
@@ -3966,6 +4038,10 @@ function bind() {
     if (e.target.closest("[data-ext-link]")) e.preventDefault();
   });
   $("chat-log").addEventListener("click", (e) => {
+    if (e.target.closest("[data-retry-turn]")) {
+      guard(retryLastTurn);
+      return;
+    }
     const starter = e.target.closest("[data-starter]");
     if (starter) {
       $("chat-text").value = starter.dataset.starter || "";
