@@ -1788,30 +1788,90 @@ function updateContextMeter(items) {
   }
   if (!usage) {
     chip.hidden = true;
+    closeContextPopover();
     return;
   }
   const cap = Number((ctx.config && ctx.config.llm_capabilities && ctx.config.llm_capabilities.context_tokens) || 0);
+  ctx.contextUsage = usage;
+  ctx.contextLimit = cap;
   chip.hidden = false;
-  const cached = usage.cached > 0 ? ` · кэш ${fmtNum(usage.cached)}` : "";
+  chip.classList.remove("warn", "bad");
+  chip.title = "Заполнение контекстного окна — нажмите для подробностей";
   if (!cap) {
-    chip.classList.remove("warn", "bad");
-    text.textContent = `контекст: ${fmtNum(usage.used)}${cached}`;
-    chip.title = "Лимит контекстного окна не задан: укажите context_tokens в настройках модели";
-    return;
+    text.textContent = `контекст ${fmtNum(usage.used)}`;
+  } else {
+    const percent = Math.round((usage.used / cap) * 1000) / 10;
+    chip.classList.toggle("warn", percent >= 75 && percent < 90);
+    chip.classList.toggle("bad", percent >= 90);
+    text.textContent = `контекст ${percent}%`;
   }
-  const percent = Math.round((usage.used / cap) * 1000) / 10;
-  const left = Math.max(0, cap - usage.used);
-  chip.classList.toggle("warn", percent >= 75 && percent < 90);
-  chip.classList.toggle("bad", percent >= 90);
-  text.textContent = `контекст ${percent}% · ${fmtNum(usage.used)} / ${fmtNum(cap)}${cached}`;
-  const parts = [`Занято ${usage.used} из ${cap} токенов, осталось ~${fmtNum(left)}`];
-  if (usage.cached || usage.cacheWrite) {
-    parts.push(`кэш: прочитано ${usage.cached}, записано ${usage.cacheWrite}`);
+  renderContextPopover();
+}
+
+function contextRows(usage, cap) {
+  const rows = [["Занято", fmtNum(usage.used)]];
+  if (cap) {
+    rows.push(["Окно", fmtNum(cap)]);
+    rows.push(["Осталось", fmtNum(Math.max(0, cap - usage.used))]);
+  } else {
+    rows.push(["Окно", "лимит не задан"]);
   }
   if (usage.cached) {
-    parts.push(`попадание в кэш ${usage.hitRate.toFixed(1)}%`);
+    rows.push(["Закешировано", fmtNum(usage.cached)]);
+    rows.push(["Попадание в кэш", `${usage.hitRate.toFixed(1)}%`]);
   }
-  chip.title = parts.join(" · ");
+  if (usage.cacheWrite) {
+    rows.push(["Записано в кэш", fmtNum(usage.cacheWrite)]);
+  }
+  return rows;
+}
+
+function renderContextPopover() {
+  const pop = $("chat-context-popover");
+  const body = $("chat-context-body");
+  if (!pop || !body || !ctx.contextUsage) return;
+  body.replaceChildren();
+  for (const [label, value] of contextRows(ctx.contextUsage, ctx.contextLimit || 0)) {
+    const row = document.createElement("div");
+    row.className = "context-row";
+    const name = document.createElement("span");
+    name.textContent = label;
+    const val = document.createElement("strong");
+    val.className = "mono";
+    val.textContent = value;
+    row.append(name, val);
+    body.appendChild(row);
+  }
+}
+
+function closeContextPopover() {
+  const pop = $("chat-context-popover");
+  const chip = $("chat-context");
+  if (!pop || pop.hidden) return;
+  pop.hidden = true;
+  if (chip) chip.setAttribute("aria-expanded", "false");
+}
+
+function toggleContextPopover() {
+  const pop = $("chat-context-popover");
+  const chip = $("chat-context");
+  if (!pop || !chip) return;
+  if (!pop.hidden) {
+    closeContextPopover();
+    return;
+  }
+  if (!ctx.contextUsage) return;
+  renderContextPopover();
+  pop.hidden = false;
+  chip.setAttribute("aria-expanded", "true");
+  const rect = chip.getBoundingClientRect();
+  const box = pop.getBoundingClientRect();
+  let left = rect.right - box.width;
+  left = Math.max(8, Math.min(left, window.innerWidth - box.width - 8));
+  let top = rect.top - box.height - 8;
+  if (top < 8) top = rect.bottom + 8;
+  pop.style.left = `${Math.round(left)}px`;
+  pop.style.top = `${Math.round(top)}px`;
 }
 
 /// Providers disagree about cached prompt tokens: OpenAI-compatible ones count
@@ -3901,6 +3961,22 @@ function bind() {
     }
   });
   $("chat-text").addEventListener("input", autosizeComposer);
+
+  $("chat-context").addEventListener("click", toggleContextPopover);
+  $("chat-context").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggleContextPopover();
+    }
+    if (event.key === "Escape") closeContextPopover();
+  });
+  document.addEventListener("click", (event) => {
+    if (event.target.closest("#chat-context, #chat-context-popover")) return;
+    closeContextPopover();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeContextPopover();
+  });
 
   $("chat-file-input").addEventListener("change", async (event) => {
     await addAttachments(event.target.files);

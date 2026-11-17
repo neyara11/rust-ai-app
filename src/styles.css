@@ -4532,6 +4532,45 @@ html[data-theme="light"] .mode-overlay {
   color: var(--bad);
 }
 
+.context-popover {
+  position: fixed;
+  z-index: 90;
+  min-width: 230px;
+  max-width: 300px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: var(--panel-shadow);
+}
+
+.context-popover-title {
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.context-popover-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.context-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.context-row strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
 @media (max-width: 1020px) {
   .chip {
     max-width: 168px;

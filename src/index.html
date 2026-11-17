@@ -218,7 +218,7 @@
                     </select>
                   </label>
                   <span class="sp"></span>
-                  <span class="chip context-chip" id="chat-context" title="Заполнение контекстного окна" hidden>
+                  <span class="chip context-chip" id="chat-context" role="button" tabindex="0" aria-haspopup="dialog" aria-expanded="false" aria-label="Заполнение контекстного окна, подробности" hidden>
                     <span class="mono" id="chat-context-text">контекст: —</span>
                   </span>
                   <span class="chip model-chip" title="Модель и шлюз">
@@ -235,6 +235,10 @@
                 </div>
               </div>
               <div class="c-hint">Enter — отправить · Shift+Enter — новая строка</div>
+              <div class="context-popover" id="chat-context-popover" role="dialog" aria-label="Контекст модели" hidden>
+                <div class="context-popover-title">Контекст модели</div>
+                <div class="context-popover-body" id="chat-context-body"></div>
+              </div>
             </div>
           </div>
         </div>

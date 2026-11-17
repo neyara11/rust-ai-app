@@ -432,45 +432,65 @@ try {
   assert(scrollGuard.stayed, "thinking indicator scrolled the log while the user was reading history");
   assert(scrollGuard.followed, "thinking indicator did not follow the tail at the bottom");
 
-  const contextMeter = await page.evaluate(() => {
-    const chipEl = () => document.querySelector("#chat-context");
+  await page.evaluate(() => {
     updateContextMeter([{ role: "assistant", tokens_in: 100000 }]);
-    const warnHidden = chipEl().hidden;
-    const warnText = chipEl().textContent.trim();
-    const warn = chipEl().classList.contains("warn");
-    updateContextMeter([{ role: "assistant", tokens_in: 120000 }]);
-    const bad = chipEl().classList.contains("bad");
-    const title = chipEl().title;
-    // Anthropic-style: input excludes the cache, so it is added to the window.
-    updateContextMeter([{ role: "assistant", tokens_in: 2000, cache_read: 50000 }]);
-    const excludedText = chipEl().textContent.trim();
-    const cacheTitle = chipEl().title;
-    // OpenAI-style: cached tokens are already inside input, no double count.
-    updateContextMeter([{ role: "assistant", tokens_in: 52000, cache_read: 50000 }]);
-    const includedText = chipEl().textContent.trim();
-    updateContextMeter([]);
-    const hiddenWhenEmpty = chipEl().hidden;
-    return { warnHidden, warnText, warn, bad, title, excludedText, cacheTitle, includedText, hiddenWhenEmpty };
   });
+  const meterText = (await page.locator("#chat-context-text").textContent()).trim();
+  const meterWarn = await page
+    .locator("#chat-context")
+    .evaluate((el) => el.classList.contains("warn"));
   assert(
-    !contextMeter.warnHidden && /контекст 78\.1%/.test(contextMeter.warnText),
-    `context meter did not render usage: ${JSON.stringify(contextMeter)}`,
+    meterText === "контекст 78.1%",
+    `context meter must show a single number: ${meterText}`,
   );
-  assert(contextMeter.warn, "context meter did not warn at 75%");
-  assert(contextMeter.bad, "context meter did not mark 90% as danger");
-  assert(/осталось/.test(contextMeter.title), "context meter title does not mention the remaining tokens");
+  assert(meterWarn, "context meter did not warn at 75%");
+
+  // Anthropic-style: input excludes the cache, so it is added to the window.
+  await page.evaluate(() => {
+    updateContextMeter([{ role: "assistant", tokens_in: 2000, cache_read: 50000 }]);
+  });
+  await page.click("#chat-context");
+  const popover = await page.evaluate(() => {
+    const pop = document.querySelector("#chat-context-popover");
+    const chip = document.querySelector("#chat-context");
+    return {
+      hidden: pop.hidden,
+      text: pop.textContent.replace(/\s+/g, " "),
+      expanded: chip.getAttribute("aria-expanded"),
+    };
+  });
+  assert(!popover.hidden && popover.expanded === "true", "context popover did not open on click");
   assert(
-    /52\.0k/.test(contextMeter.excludedText) &&
-      /52\.0k/.test(contextMeter.includedText) &&
-      /кэш 50\.0k/.test(contextMeter.excludedText) &&
-      /кэш 50\.0k/.test(contextMeter.includedText),
-    `cached tokens are counted incorrectly: ${contextMeter.excludedText} / ${contextMeter.includedText}`,
+    /Занято\s*52\.0k/.test(popover.text) &&
+      /Окно\s*128\.0k/.test(popover.text) &&
+      /Осталось\s*76\.0k/.test(popover.text) &&
+      /Закешировано\s*50\.0k/.test(popover.text) &&
+      /Попадание в кэш\s*96\.2%/.test(popover.text),
+    `context popover is missing details: ${popover.text}`,
   );
+  // OpenAI-style: cached tokens are already inside input, no double count.
+  await page.evaluate(() => {
+    updateContextMeter([{ role: "assistant", tokens_in: 52000, cache_read: 50000 }]);
+  });
+  const includedText = await page.locator("#chat-context-body").textContent();
   assert(
-    /попадание в кэш 96\.2%/.test(contextMeter.cacheTitle),
-    `cache hit rate is missing from the tooltip: ${contextMeter.cacheTitle}`,
+    /Занято\s*52\.0k/.test(includedText.replace(/\s+/g, " ")),
+    `cached tokens are double counted: ${includedText}`,
   );
-  assert(contextMeter.hiddenWhenEmpty, "context meter stayed visible for an empty chat");
+  await page.keyboard.press("Escape");
+  assert(await page.locator("#chat-context-popover").isHidden(), "Escape did not close the popover");
+
+  await page.evaluate(() => {
+    updateContextMeter([{ role: "assistant", tokens_in: 120000 }]);
+  });
+  const meterBad = await page
+    .locator("#chat-context")
+    .evaluate((el) => el.classList.contains("bad"));
+  assert(meterBad, "context meter did not mark 90% as danger");
+  await page.evaluate(() => {
+    updateContextMeter([]);
+  });
+  assert(await page.locator("#chat-context").isHidden(), "context meter stayed visible for an empty chat");
 
   await page.evaluate(() => {
     const transfer = new DataTransfer();
