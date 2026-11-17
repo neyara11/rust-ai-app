@@ -807,6 +807,11 @@ fn http(
 /// Model metadata for the generated provider config. Opencode does not know
 /// capabilities of a custom gateway model, so they come from the platform
 /// config. Fields match the models.dev schema that opencode already consumes.
+/// Fallbacks for a partially filled model capability block: the engine schema
+/// rejects a `limit` object that misses either number.
+const DEFAULT_CONTEXT_TOKENS: u64 = 128_000;
+const DEFAULT_OUTPUT_TOKENS: u64 = 8_192;
+
 fn model_entry(model_name: &str, caps: &config::ModelCapabilities) -> Value {
     let mut model = serde_json::Map::new();
     model.insert("name".to_string(), json!(model_name));
@@ -821,13 +826,18 @@ fn model_entry(model_name: &str, caps: &config::ModelCapabilities) -> Value {
         }),
     );
     if caps.context_tokens.is_some() || caps.output_tokens.is_some() {
+        // OpenCode's config schema requires both numbers once `limit` exists:
+        // an empty output/context entry makes the whole engine config invalid
+        // and the engine exits before it can serve `/config`.
         let mut limit = serde_json::Map::new();
-        if let Some(context) = caps.context_tokens {
-            limit.insert("context".to_string(), json!(context));
-        }
-        if let Some(output) = caps.output_tokens {
-            limit.insert("output".to_string(), json!(output));
-        }
+        limit.insert(
+            "context".to_string(),
+            json!(caps.context_tokens.unwrap_or(DEFAULT_CONTEXT_TOKENS)),
+        );
+        limit.insert(
+            "output".to_string(),
+            json!(caps.output_tokens.unwrap_or(DEFAULT_OUTPUT_TOKENS)),
+        );
         model.insert("limit".to_string(), Value::Object(limit));
     }
     let mut variants = serde_json::Map::new();
@@ -1352,6 +1362,12 @@ impl Engine {
         let auth = basic_auth(&password);
 
         let mut command = Command::new(&binary);
+        // A start that never becomes ready is otherwise invisible: keep the
+        // engine's stderr next to the pid file so the reason can be read.
+        let stderr_log = engine_home.join("engine.stderr.log");
+        let stderr = std::fs::File::create(&stderr_log)
+            .map(Stdio::from)
+            .unwrap_or_else(|_| Stdio::null());
         command
             .args(["serve", "--port", &port.to_string(), "--hostname", "127.0.0.1"])
             .current_dir(workdir)
@@ -1370,7 +1386,7 @@ impl Engine {
             .env("OPENCODE_DISABLE_LSP_DOWNLOAD", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(stderr);
         if let Some(models) = &models {
             command.env("OPENCODE_MODELS_PATH", models);
         }
@@ -2591,6 +2607,27 @@ mod tests {
         assert_eq!(entry["limit"]["output"], json!(32_000));
         assert_eq!(entry["variants"]["max"]["reasoningEffort"], json!("max"));
         assert_eq!(entry["variants"]["low"]["reasoningEffort"], json!("low"));
+    }
+
+    #[test]
+    fn partial_model_limits_are_completed() {
+        let caps = crate::config::ModelCapabilities {
+            context_tokens: Some(1_000_000),
+            output_tokens: None,
+            ..Default::default()
+        };
+        let entry = model_entry("gateway-model", &caps);
+        assert_eq!(entry["limit"]["context"], json!(1_000_000));
+        assert_eq!(entry["limit"]["output"], json!(DEFAULT_OUTPUT_TOKENS));
+
+        let caps = crate::config::ModelCapabilities {
+            context_tokens: None,
+            output_tokens: Some(32_000),
+            ..Default::default()
+        };
+        let entry = model_entry("gateway-model", &caps);
+        assert_eq!(entry["limit"]["context"], json!(DEFAULT_CONTEXT_TOKENS));
+        assert_eq!(entry["limit"]["output"], json!(32_000));
     }
 
     #[test]

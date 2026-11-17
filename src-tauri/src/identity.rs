@@ -167,12 +167,12 @@ fn save(home: &Path, store: &Store) -> Result<()> {
         match std::fs::rename(&tmp, path(home)) {
             Ok(()) => return Ok(()),
             Err(e)
-                if attempts < 20
+                if attempts < 60
                     && (e.kind() == std::io::ErrorKind::PermissionDenied
                         || e.kind() == std::io::ErrorKind::AlreadyExists) =>
             {
                 attempts += 1;
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(20));
             }
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
