@@ -484,6 +484,13 @@ fn import_impl(
             env_files.join(", ")
         ));
     }
+    let bins = scan_impl(root)?.bins;
+    if !bins.is_empty() {
+        notes.push(format!(
+            "warning: найдены exe, но они не объявлены в tools[]: {} — добавьте каждый как инструмент (bin, режим io: files для конвертера или io: json для stdin-скрипта, secrets) или validate/build завершится ошибкой",
+            bins.join(", ")
+        ));
+    }
 
     if template == "minimal" {
         let mut probe = fs::read_to_string(&prompt_path).unwrap_or_default();
@@ -1040,6 +1047,30 @@ mod tests {
         let manifest: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(root.join("manifest.json")).unwrap()).unwrap();
         assert_eq!(manifest["capabilities"]["external_writes"], json!([]));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn import_warns_about_undeclared_bins() {
+        let root = temp("import-bins");
+        fs::write(root.join("AGENTS.md"), "# Agent\n").unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(root.join("bin").join("docx-export.exe"), b"MZ").unwrap();
+
+        let run = import_impl(&root, "demo", "Demo", "files").unwrap();
+        assert!(
+            run.output.contains("bin/docx-export.exe"),
+            "import report must list the found exe: {}",
+            run.output
+        );
+        assert!(
+            run.output.contains("не объявлены в tools[]"),
+            "import report must warn that bins are undeclared: {}",
+            run.output
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["tools"], json!([]));
         let _ = fs::remove_dir_all(&root);
     }
 

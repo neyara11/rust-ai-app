@@ -309,6 +309,17 @@ pub fn set_workspace(home: &Path, app_id: &str, path: &Path) -> Result<()> {
     save(home, &cfg)
 }
 
+/// Applies a settings snapshot from the UI. Fields that are owned by their own
+/// commands are kept from disk: the settings form sends whatever it loaded at
+/// start-up, so trusting it would roll back a workspace chosen or an approval
+/// granted since then.
+pub fn merge_settings(existing: UserConfig, mut incoming: UserConfig) -> UserConfig {
+    incoming.workspaces = existing.workspaces;
+    incoming.enabled_apps = existing.enabled_apps;
+    incoming.permissions.grants = existing.permissions.grants;
+    incoming
+}
+
 fn path(home: &Path) -> std::path::PathBuf {
     home.join("config.json")
 }
@@ -462,6 +473,25 @@ mod tests {
         let disk: UserConfig = serde_json::from_str(&raw).unwrap();
         assert_eq!(disk.role, Role::Developer);
         let _ = fs::remove_file(home.join("config.json"));
+    }
+
+    #[test]
+    fn settings_save_keeps_workspace_choices() {
+        let mut existing = UserConfig::default();
+        existing
+            .workspaces
+            .insert("doc-writer".to_string(), r"D:\projects\docs".to_string());
+        existing.enabled_apps.push("doc-writer".to_string());
+
+        // The UI form was loaded before the folder was picked, so it carries an
+        // empty map and must not erase the choice.
+        let incoming = UserConfig::default();
+        let merged = merge_settings(existing, incoming);
+        assert_eq!(
+            merged.workspaces.get("doc-writer").map(String::as_str),
+            Some(r"D:\projects\docs")
+        );
+        assert_eq!(merged.enabled_apps, vec!["doc-writer".to_string()]);
     }
 
     #[test]

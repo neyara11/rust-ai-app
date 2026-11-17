@@ -37,6 +37,11 @@ pub struct ChatItem {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime: Option<String>,
+    /// Base64 payload for image attachments from the session history, so the
+    /// chat can render a picture instead of a bare chip. Omitted for regular
+    /// files and for payloads above the UI limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_in: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,6 +213,7 @@ impl ChatItem {
             kind: kind.to_string(),
             text,
             mime: None,
+            data: None,
             tokens_in: None,
             tokens_out: None,
             reasoning_tokens: None,
@@ -707,9 +713,27 @@ fn agent() -> ureq::Agent {
 fn stream_agent() -> ureq::Agent {
     let mut builder = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(5))
-        // The stream is long-lived, but an idle socket must not pin a reader
-        // thread forever after a turn is aborted.
+        // The stream is long-lived, but a silent socket must not pin a reader
+        // thread forever. A generator/tool run longer than this can outlive the
+        // stream: completion still arrives through the turn POST, but the UI
+        // stops receiving live events until the next turn.
         .timeout_read(Duration::from_secs(120));
+    if let Ok(tls) = ureq::native_tls::TlsConnector::new() {
+        builder = builder.tls_connector(std::sync::Arc::new(tls));
+    }
+    builder.build()
+}
+
+/// The turn POST returns only when the model has finished the whole turn, so
+/// it must not carry the 300 s cap used by regular calls: runs can last hours.
+/// A generous ceiling still exists, otherwise a wedged engine would pin the
+/// worker (and the chat busy flag) forever.
+const MAX_TURN_SECS: u64 = 4 * 60 * 60;
+
+fn turn_agent() -> ureq::Agent {
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout(Duration::from_secs(MAX_TURN_SECS));
     if let Ok(tls) = ureq::native_tls::TlsConnector::new() {
         builder = builder.tls_connector(std::sync::Arc::new(tls));
     }
@@ -1563,7 +1587,7 @@ impl ChatSession {
         variant: Option<&str>,
         attachments: &[AttachmentInput],
     ) -> Result<Value> {
-        let agent = agent();
+        let agent = turn_agent();
         let mut payload = json!({
             "model": { "providerID": self.provider_id, "modelID": self.model_id },
             "system": self.system,
@@ -1945,12 +1969,54 @@ fn inlined_attachment_name(text: &str) -> Option<&str> {
     }
 }
 
+/// `data:image/png;base64,AAAA` -> `AAAA`. Non-base64 or non-data URLs yield
+/// `None`: the UI must not receive arbitrary remote references.
+fn data_uri_base64(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("data:")?;
+    let (meta, payload) = rest.split_once(',')?;
+    if !meta.to_ascii_lowercase().contains(";base64") {
+        return None;
+    }
+    if !meta.to_ascii_lowercase().starts_with("image/") {
+        return None;
+    }
+    Some(payload)
+}
+
 pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
     let mut items = Vec::new();
     let Some(messages) = raw.as_array() else {
         return items;
     };
-    for message in messages {
+    // The whole history is re-sent on every load and after every turn, so the
+    // inline image payload is bounded both per picture and in total. The budget
+    // is spent from the newest messages first: recent pictures matter more.
+    const MAX_IMAGE_PAYLOAD: usize = 4 * 1024 * 1024;
+    const MAX_IMAGE_BUDGET: usize = 8 * 1024 * 1024;
+    let mut allowed_images = std::collections::HashSet::new();
+    let mut image_budget = MAX_IMAGE_BUDGET;
+    for (mi, message) in messages.iter().enumerate().rev() {
+        let Some(parts) = message.get("parts").and_then(Value::as_array) else {
+            continue;
+        };
+        for (pi, part) in parts.iter().enumerate().rev() {
+            if part.get("type").and_then(Value::as_str) != Some("file") {
+                continue;
+            }
+            let Some(payload) = part
+                .get("url")
+                .and_then(Value::as_str)
+                .and_then(data_uri_base64)
+            else {
+                continue;
+            };
+            if payload.len() <= MAX_IMAGE_PAYLOAD && payload.len() <= image_budget {
+                image_budget = image_budget.saturating_sub(payload.len());
+                allowed_images.insert((mi, pi));
+            }
+        }
+    }
+    for (mi, message) in messages.iter().enumerate() {
         let info = message.get("info");
         let role = info
             .and_then(|i| i.get("role"))
@@ -1961,14 +2027,14 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
         let mut text = String::new();
         let mut reasoning = String::new();
         let mut tools = Vec::new();
-        let mut files: Vec<(String, String)> = Vec::new();
+        let mut files: Vec<(String, String, Option<String>)> = Vec::new();
         if let Some(parts) = message.get("parts").and_then(Value::as_array) {
-            for part in parts {
+            for (pi, part) in parts.iter().enumerate() {
                 match part.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         if let Some(t) = part.get("text").and_then(Value::as_str) {
                             if let Some(name) = inlined_attachment_name(t) {
-                                files.push((name.to_string(), "text/plain".to_string()));
+                                files.push((name.to_string(), "text/plain".to_string(), None));
                                 continue;
                             }
                             if !text.is_empty() {
@@ -1989,7 +2055,19 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_string();
-                        files.push((filename, mime));
+                        // OpenCode keeps the uploaded payload in `url` as a data
+                        // URI. Hand images back to the UI so it can show them
+                        // instead of a text chip; cap the size to keep the history
+                        // payload bounded.
+                        let data = if allowed_images.contains(&(mi, pi)) {
+                            part.get("url")
+                                .and_then(Value::as_str)
+                                .and_then(data_uri_base64)
+                                .map(str::to_string)
+                        } else {
+                            None
+                        };
+                        files.push((filename, mime, data));
                     }
                     Some("reasoning") => {
                         if let Some(t) = part.get("text").and_then(Value::as_str) {
@@ -2062,9 +2140,10 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
         for tool in tools {
             items.push(ChatItem::new("tool", "tool", tool));
         }
-        for (filename, mime) in files {
+        for (filename, mime, data) in files {
             let mut item = ChatItem::new(&role, "file", filename);
             item.mime = Some(mime).filter(|mime| !mime.is_empty());
+            item.data = data;
             items.push(item);
         }
     }

@@ -974,7 +974,9 @@ function linkifyBareFilesOutsideLinks(html) {
 }
 
 function inlineMd(text) {
-  return text
+  // Code spans are handled first and stay literal: image syntax inside
+  // backticks is a code sample, not a picture.
+  return String(text)
     .split(/(`[^`]+`)/)
     .map((part) => {
       if (part.length > 2 && part.startsWith("`") && part.endsWith("`")) {
@@ -982,11 +984,48 @@ function inlineMd(text) {
         const name = workspaceFileRef(inner);
         return name ? fileChipHtml(name) : `<code>${inner}</code>`;
       }
-      return linkifyBareFilesOutsideLinks(linkifyUrls(part));
+      return inlineNonCodeMd(part);
     })
-    .join("")
+    .join("");
+}
+
+function inlineNonCodeMd(text) {
+  // Pull images out before linkification: a data:/blob: URI must not be
+  // rewritten as a URL or a file chip. Placeholders are restored after the
+  // emphasis pass so `*` inside an attribute is never treated as markup.
+  const images = [];
+  const withImages = String(text).replace(
+    /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
+    (_match, alt, src) => {
+      const safe = safeImageSrc(src);
+      if (safe) {
+        images.push(
+          `<img class="md-image" src="${safe}" alt="${esc(alt)}" loading="lazy">`
+        );
+        return `\u0000img${images.length - 1}\u0000`;
+      }
+      const name = workspaceFileRef(src);
+      if (name) {
+        images.push(fileChipHtml(name));
+        return `\u0000img${images.length - 1}\u0000`;
+      }
+      images.push(esc(`![${alt}](${src})`));
+      return `\u0000img${images.length - 1}\u0000`;
+    }
+  );
+  return linkifyBareFilesOutsideLinks(linkifyUrls(withImages))
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+    .replace(/\u0000img(\d+)\u0000/g, (_match, index) => images[Number(index)] || "");
+}
+
+/// The closed contour does not fetch remote images, and the CSP only allows
+/// `self`, `data:` and `blob:`. Anything else is rendered as text or a file chip.
+function safeImageSrc(raw) {
+  const src = String(raw || "").trim();
+  if (/^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=\s]+$/i.test(src)) return src;
+  if (/^blob:/i.test(src)) return src;
+  return "";
 }
 
 const DIAGRAM_KINDS = new Set(["mermaid", "chart"]);
@@ -1571,9 +1610,25 @@ function buildChatNode(item, streaming) {
   if (item.kind === "file") {
     const div = document.createElement("div");
     div.className = "msg " + (item.role === "user" ? "user" : "assistant");
+    const isImage = item.mime && item.mime.startsWith("image/");
+    if (isImage && item.data) {
+      const figure = document.createElement("figure");
+      figure.className = "chat-figure";
+      const img = document.createElement("img");
+      img.className = "chat-image";
+      img.loading = "lazy";
+      img.alt = item.text || "изображение";
+      img.src = `data:${item.mime};base64,${item.data}`;
+      const caption = document.createElement("figcaption");
+      caption.textContent = item.text || "";
+      figure.appendChild(img);
+      figure.appendChild(caption);
+      div.appendChild(figure);
+      return div;
+    }
     const chip = document.createElement("div");
     chip.className = "chat-attachment-chip";
-    const kind = item.mime && item.mime.startsWith("image/") ? "изображение" : "файл";
+    const kind = isImage ? "изображение" : "файл";
     chip.textContent = `${kind}: ${item.text}`;
     div.appendChild(chip);
     return div;
@@ -1631,10 +1686,14 @@ function buildChatNode(item, streaming) {
 
 // Incremental rendering: polling fires every 700 ms and most items do not
 // change. Rebuilding the whole log made messages blink and reset the scroll.
+function nearLogBottom(log) {
+  return log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+}
+
 function renderChat(items) {
   const log = $("chat-log");
   const rendered = ctx.rendered || (ctx.rendered = []);
-  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+  const atBottom = nearLogBottom(log);
 
   if (!items || !items.length) {
     if (log.querySelector(".chat-empty")) return;
@@ -1716,11 +1775,13 @@ function fmtNum(value) {
 }
 
 function chatError(message) {
+  const log = $("chat-log");
+  const stick = nearLogBottom(log);
   const div = document.createElement("div");
   div.className = "msg error";
   div.textContent = message;
-  $("chat-log").appendChild(div);
-  $("chat-log").scrollTop = $("chat-log").scrollHeight;
+  log.appendChild(div);
+  if (stick) log.scrollTop = log.scrollHeight;
 }
 
 let busyTimer = null;
@@ -1758,6 +1819,9 @@ function renderThinking() {
     if (node) node.remove();
     return;
   }
+  // Follow the tail only while the user is already there: scrolling up during
+  // a long turn must not be undone by the once-a-second refresh.
+  const stick = nearLogBottom(log);
   if (!node) {
     node = document.createElement("div");
     node.className = "chat-thinking";
@@ -1766,7 +1830,7 @@ function renderThinking() {
   const secs = Math.max(0, Math.round((Date.now() - busyStart) / 1000));
   node.querySelector(".chat-thinking-text").textContent = secs ? `думает… ${secs} с` : "думает…";
   if (log.lastElementChild !== node) log.appendChild(node);
-  log.scrollTop = log.scrollHeight;
+  if (stick) log.scrollTop = log.scrollHeight;
 }
 
 function renderChatMeta(model) {
@@ -2084,6 +2148,8 @@ async function deleteChat(sessionId) {
 
 const MAX_ATTACHMENTS = 3;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+// Must match the backend magic check: anything else is rejected on send.
+const ATTACHMENT_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_TEXT_BYTES = 64 * 1024;
 const ATTACHMENT_TEXT_MIMES = new Set([
   "application/json",
@@ -2145,6 +2211,13 @@ function renderAttachments() {
   ctx.attachments.forEach((attachment, index) => {
     const chip = document.createElement("div");
     chip.className = "chat-attachment-chip";
+    if (attachment.mime && attachment.mime.startsWith("image/") && attachment.data) {
+      const thumb = document.createElement("img");
+      thumb.className = "chat-attachment-thumb";
+      thumb.alt = "";
+      thumb.src = `data:${attachment.mime};base64,${attachment.data}`;
+      chip.appendChild(thumb);
+    }
     const name = document.createElement("span");
     name.textContent = attachment.filename;
     const remove = document.createElement("button");
@@ -2170,6 +2243,10 @@ async function addAttachments(fileList) {
     const mime = attachmentMime(file);
     const isImage = mime.startsWith("image/");
     const isText = mime.startsWith("text/") || ATTACHMENT_TEXT_MIMES.has(mime);
+    if (isImage && !ATTACHMENT_IMAGE_MIMES.has(mime)) {
+      toast(`Формат изображения не поддерживается: ${file.name}`, true);
+      continue;
+    }
     if (!isImage && !isText) {
       toast(`Тип файла не поддерживается: ${file.name}`, true);
       continue;
@@ -2201,6 +2278,17 @@ function clearAttachments() {
   renderAttachments();
 }
 
+// The composer starts as a single row and grows with the text, up to the CSS
+// max-height, so a long message stays readable instead of scrolling sideways.
+function autosizeComposer() {
+  const textarea = $("chat-text");
+  if (!textarea) return;
+  textarea.style.height = "auto";
+  const max = 180;
+  textarea.style.height = `${Math.min(textarea.scrollHeight, max)}px`;
+  textarea.style.overflowY = textarea.scrollHeight > max ? "auto" : "hidden";
+}
+
 async function sendChat() {
   if (!ctx.appId) return;
   const text = $("chat-text").value.trim();
@@ -2211,6 +2299,7 @@ async function sendChat() {
   }));
   if ((!text && !attachments.length) || ctx.busy) return;
   $("chat-text").value = "";
+  autosizeComposer();
   clearAttachments();
   setBusy(true);
   const variant = $("chat-reasoning").value || null;
@@ -2224,12 +2313,15 @@ async function sendChat() {
         kind: "file",
         text: attachment.filename,
         mime: attachment.mime,
+        data: attachment.data,
       });
     }
     ctx.chatItems = optimistic;
     ctx.streamingItems = [];
     ctx.acceptStream = true;
     renderChat(optimistic);
+    const log = $("chat-log");
+    if (log) log.scrollTop = log.scrollHeight;
     await invoke("chat_send", { app_id: ctx.appId, text, variant, attachments });
     if (!(window.__TAURI__ && window.__TAURI__.event)) {
       ctx.acceptStream = false;
@@ -2418,6 +2510,14 @@ function bindChatEvents() {
     if (payload.app_id !== ctx.appId) return;
     if (payload.session && payload.session !== ctx.chatId) return;
     ctx.acceptStream = false;
+    // Keep what the user already saw: thoughts and tool steps that streamed
+    // before the failure are a real part of the turn (the engine persists
+    // them, they reappear after a restart). Commit the last live snapshot
+    // instead of discarding it.
+    if ((ctx.streamingItems || []).length) {
+      ctx.chatItems = [...(ctx.chatItems || []), ...ctx.streamingItems];
+      renderChat(ctx.chatItems);
+    }
     ctx.streamingItems = [];
     ctx.pendingPermissions = (ctx.pendingPermissions || []).filter(
       (item) => item.session_id !== ctx.chatId,
@@ -3684,6 +3784,7 @@ function bind() {
     const starter = e.target.closest("[data-starter]");
     if (starter) {
       $("chat-text").value = starter.dataset.starter || "";
+      autosizeComposer();
       $("chat-text").focus();
       return;
     }
@@ -3734,6 +3835,7 @@ function bind() {
       sendChat();
     }
   });
+  $("chat-text").addEventListener("input", autosizeComposer);
 
   $("chat-file-input").addEventListener("change", async (event) => {
     await addAttachments(event.target.files);

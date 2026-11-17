@@ -345,6 +345,93 @@ try {
   await page.locator("[data-remove-attachment]").click();
   assert(await page.locator("#chat-attachments").isHidden(), "attachment chip was not removed");
 
+  // image attachments get a thumbnail in the composer and in the transcript
+  await page.evaluate(() => {
+    ctx.config.llm_capabilities.vision = true;
+  });
+  const pngPixel = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  await page.setInputFiles("#chat-file-input", {
+    name: "pixel.png",
+    mimeType: "image/png",
+    buffer: pngPixel,
+  });
+  await page.waitForSelector("#chat-attachments .chat-attachment-thumb");
+  const thumbBox = await page.locator("#chat-attachments .chat-attachment-thumb").first().boundingBox();
+  assert(thumbBox && thumbBox.width > 0 && thumbBox.height > 0, "image thumbnail has no size");
+  const imageItem = await page.evaluate(() => {
+    const item = {
+      role: "user",
+      kind: "file",
+      text: "pixel.png",
+      mime: "image/png",
+      data:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    };
+    document.querySelector("#chat-log").appendChild(buildChatNode(item, false));
+    return Boolean(document.querySelector("#chat-log img.chat-image"));
+  });
+  assert(imageItem, "image attachment was not rendered as a picture in the chat");
+  await page.evaluate(() => {
+    document.querySelector("#chat-log .chat-figure")?.parentElement?.remove();
+    ctx.attachments = [];
+    renderAttachments();
+  });
+
+  const imageMarkdown = await page.evaluate(() =>
+    renderMarkdown("![точка](data:image/png;base64,iVBORw0KGgo=) и ![внешняя](https://example.com/a.png)"),
+  );
+  assert(
+    imageMarkdown.includes('class="md-image"') &&
+      imageMarkdown.includes("data:image/png;base64,iVBORw0KGgo="),
+    `data: image markdown was not rendered: ${imageMarkdown}`,
+  );
+  assert(
+    !/src="https:\/\/example\.com/.test(imageMarkdown),
+    `remote image must not become an img src: ${imageMarkdown}`,
+  );
+  const codeImageMarkdown = await page.evaluate(() =>
+    renderMarkdown("`![x](data:image/png;base64,AAAA)`"),
+  );
+  assert(
+    codeImageMarkdown.includes("<code>") && !codeImageMarkdown.includes("<img"),
+    `image syntax inside inline code must stay literal: ${codeImageMarkdown}`,
+  );
+
+  // a long message grows the composer instead of scrolling a single line
+  const composerHeight = async () =>
+    page.locator("#chat-text").evaluate((el) => el.getBoundingClientRect().height);
+  const heightBefore = await composerHeight();
+  await page.fill("#chat-text", "строка\n".repeat(6));
+  await page.evaluate(() => autosizeComposer());
+  const heightAfter = await composerHeight();
+  assert(
+    heightAfter > heightBefore + 10,
+    `composer did not grow: ${heightBefore} -> ${heightAfter}`,
+  );
+  await page.fill("#chat-text", "");
+  await page.evaluate(() => autosizeComposer());
+
+  // the thinking indicator must not fight a user who scrolled up
+  const scrollGuard = await page.evaluate(() => {
+    const log = document.querySelector("#chat-log");
+    ctx.busy = true;
+    busyStart = Date.now();
+    log.scrollTop = 0;
+    renderThinking();
+    const stayed = log.scrollTop <= 1;
+    log.scrollTop = log.scrollHeight;
+    renderThinking();
+    const followed = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+    ctx.busy = false;
+    renderThinking();
+    return { stayed, followed };
+  });
+  assert(scrollGuard.stayed, "thinking indicator scrolled the log while the user was reading history");
+  assert(scrollGuard.followed, "thinking indicator did not follow the tail at the bottom");
+
   await page.evaluate(() => {
     const transfer = new DataTransfer();
     transfer.items.add(new File(["pasted"], "pasted.txt", { type: "text/plain" }));

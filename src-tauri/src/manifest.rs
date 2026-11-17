@@ -38,6 +38,10 @@ pub struct ToolDef {
     /// package process for this call; secrets never live in the package.
     #[serde(default)]
     pub secrets: BTreeMap<String, String>,
+    /// Wall-clock limit for one call, in seconds. Absent keeps the platform
+    /// default; long-running tools declare their budget explicitly (cap 2 h).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
     #[serde(default = "stream_read")]
     pub stream: String,
 }

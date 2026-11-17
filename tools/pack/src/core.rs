@@ -617,9 +617,24 @@ pub fn validate(dir: &Path) -> Result<Report> {
         if path.extension().map(|e| e == "md").unwrap_or(false) {
             check_text_secrets(path, &mut report);
         }
-        report
-            .warnings
-            .push(format!("file is not covered by hashes: {rel}"));
+        if rel.starts_with("bin/")
+            && matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("exe" | "bat" | "cmd" | "ps1" | "com")
+            )
+        {
+            // A launcher that is not declared in tools[] would ship without a
+            // hash and never be offered to the model: fail instead of warning.
+            // Other files next to it (DLLs, data, readme) stay warnings: they
+            // are sealed with the package but are not callable tools.
+            report.errors.push(format!(
+                "executable is not declared in tools[] and not covered by hashes: {rel} (add it as tools[].bin, then run `eco-pack build`)"
+            ));
+        } else {
+            report
+                .warnings
+                .push(format!("file is not covered by hashes: {rel}"));
+        }
     }
     if total > 512 * 1024 * 1024 {
         report
@@ -850,6 +865,25 @@ mod tests {
             .any(|e| e.contains("not covered by hashes")));
         recompute_hashes(&app).unwrap();
         assert!(validate(&app).unwrap().ok());
+    }
+
+    #[test]
+    fn undeclared_executable_is_an_error() {
+        let app = make_package("undeclared-bin");
+        let bin_dir = app.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("converter.exe"), b"MZ").unwrap();
+        recompute_hashes(&app).unwrap();
+        let report = validate(&app).unwrap();
+        assert!(!report.ok());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("not declared in tools[]")),
+            "expected an undeclared bin error: {:?}",
+            report.errors
+        );
     }
 
     #[test]

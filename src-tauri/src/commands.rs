@@ -587,10 +587,11 @@ pub fn get_config(state: tauri::State<'_, AppState>) -> UserConfig {
 
 #[tauri::command(rename_all = "snake_case")]
 pub fn save_config(state: tauri::State<'_, AppState>, mut config: UserConfig) -> Result<()> {
-    // Grants belong to the broker. A settings save carries whatever snapshot the
-    // UI loaded at start-up, so trusting it would resurrect a revoked approval
-    // (and drop one granted since). Keep the grants that are on disk.
-    config.permissions.grants = config::load(&state.home).permissions.grants;
+    // Workspaces, enabled apps and grants belong to their own commands. A
+    // settings save carries whatever snapshot the UI loaded at start-up, so
+    // trusting it would roll back a folder chosen (or an approval granted)
+    // since then. Keep the values that are on disk.
+    config = config::merge_settings(config::load(&state.home), config);
     config::save(&state.home, &config)?;
     // Engine config is generated at start, so running engines must be restarted
     // to pick up a new endpoint, model or key.
@@ -1917,6 +1918,13 @@ pub fn chat_abort(
             .get(&app_id)
             .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?;
         engine.snapshot().abort()?;
+    }
+    // The worker thread releases the busy key only when the turn POST returns.
+    // An abort must release it immediately: otherwise a stalled request leaves
+    // the chat permanently "already working" and the next send is rejected.
+    if let Ok(mut busy) = state.busy.lock() {
+        let prefix = format!("{app_id}:");
+        busy.retain(|key| !key.starts_with(&prefix));
     }
     clear_pending_for_app(&app, &app_id);
     Ok(())

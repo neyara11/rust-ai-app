@@ -22,7 +22,12 @@ const MAX_WRITE_BYTES: usize = 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 200;
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PACKAGE_OUTPUT: usize = 64 * 1024;
-const PACKAGE_TOOL_TIMEOUT_SECS: u64 = 60;
+/// Platform default for one package tool call. A real converter or API client
+/// often needs minutes, so the floor is 5 minutes; longer tools declare
+/// `tools[].timeout_secs` instead of relying on this value.
+const PACKAGE_TOOL_TIMEOUT_SECS: u64 = 300;
+/// Hard ceiling for a manifest-declared tool timeout (2 hours).
+const MAX_PACKAGE_TOOL_TIMEOUT_SECS: u64 = 7200;
 /// Results at least this large are also dumped to the artifact NDJSON.
 const DUMP_MIN_BYTES: usize = 8 * 1024;
 
@@ -154,6 +159,7 @@ enum Route {
         argv: Vec<String>,
         io: String,
         secrets: std::collections::BTreeMap<String, String>,
+        timeout_secs: Option<u64>,
     },
 }
 
@@ -326,6 +332,7 @@ impl Proxy {
                     argv: tool.argv.clone(),
                     io,
                     secrets: tool.secrets.clone(),
+                    timeout_secs: tool.timeout_secs,
                 },
             );
             tools.push(package_spec(&tool));
@@ -458,6 +465,7 @@ impl Proxy {
         argv: &[String],
         io: &str,
         secrets: &std::collections::BTreeMap<String, String>,
+        timeout_secs: Option<u64>,
         arguments: &Value,
     ) -> Result<Value> {
         let files_mode = io != "json";
@@ -557,7 +565,9 @@ impl Proxy {
             command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
 
-        let timeout = package_timeout();
+        let timeout = timeout_secs
+            .map(|secs| Duration::from_secs(secs.clamp(1, MAX_PACKAGE_TOOL_TIMEOUT_SECS)))
+            .unwrap_or_else(package_timeout);
         let run = run_with_limits(
             &mut command,
             timeout,
@@ -696,7 +706,8 @@ impl Proxy {
                 argv,
                 io,
                 secrets,
-            } => self.package_call(tool, bin, argv, io, secrets, &arguments),
+                timeout_secs,
+            } => self.package_call(tool, bin, argv, io, secrets, *timeout_secs, &arguments),
         };
 
         let (value, bytes, truncated) = match raw {
@@ -829,7 +840,7 @@ fn package_timeout() -> Duration {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|secs| *secs > 0)
-        .map(Duration::from_secs)
+        .map(|secs| Duration::from_secs(secs.clamp(1, MAX_PACKAGE_TOOL_TIMEOUT_SECS)))
         .unwrap_or_else(|| Duration::from_secs(PACKAGE_TOOL_TIMEOUT_SECS))
 }
 

@@ -2740,6 +2740,47 @@ button:focus-visible,
   white-space: nowrap;
 }
 
+.chat-attachment-thumb {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  object-fit: cover;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: var(--surface-3);
+}
+
+.chat-figure {
+  margin: 0;
+  max-width: min(100%, 520px);
+}
+
+.chat-image {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.chat-figure figcaption {
+  margin-top: 4px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.msg-body img.md-image {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  margin: 8px 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
 .chat-attachment-chip button {
   width: 18px;
   height: 18px;
