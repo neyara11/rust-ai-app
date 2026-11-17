@@ -105,6 +105,21 @@ try {
     (await page.locator("#chat-list .chat-item").count()) > 0,
     "chat history disappeared after closing settings",
   );
+
+  // The workspace back button returns from its tabs to the chat first, and to
+  // the catalog only from the chat tab.
+  await page.click('.ws-tab[data-ws="settings"]');
+  assert(await page.locator("#ws-settings").isVisible(), "workspace settings tab did not open");
+  await page.click("#ws-back");
+  assert(
+    await page.locator("#ws-chat").isVisible(),
+    "workspace back skipped the chat and left the settings tab",
+  );
+  assert(await page.locator("#workspace").isVisible(), "workspace back closed the app");
+  await page.click("#ws-back");
+  assert(await page.locator("#apps-panel").isVisible(), "second back did not open the catalog");
+  await page.locator('[data-open="doc-writer"]').click();
+  await page.waitForSelector("#workspace:not([hidden])");
   assert(
     (await page.locator("#chat-log .md-table-wrap table").count()) === 1,
     "markdown table was not rendered",

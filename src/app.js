@@ -737,10 +737,7 @@ async function openApp(appId) {
     const wsToolsCount = $("ws-tools-count");
     if (wsToolsCount) wsToolsCount.textContent = String((ctx.appMeta.tools || []).length);
 
-    document.querySelectorAll(".ws-tab").forEach((t) => t.classList.toggle("active", t.dataset.ws === "chat"));
-    $("ws-chat").hidden = false;
-    $("ws-tools").hidden = true;
-    $("ws-settings").hidden = true;
+    showWorkspaceTab("chat");
     $("chat-log").innerHTML = "";
     renderChatList();
     renderChat([]);
@@ -2156,6 +2153,25 @@ function showCatalog() {
   const back = $("ws-back");
   if (back) back.hidden = true;
   setViewTitle("Каталог агентов");
+}
+
+/** Switches between the chat, tools and settings tabs inside an open app. */
+function showWorkspaceTab(name) {
+  document
+    .querySelectorAll(".ws-tab")
+    .forEach((tab) => tab.classList.toggle("active", tab.dataset.ws === name));
+  for (const key of ["chat", "tools", "settings"]) {
+    const body = $(`ws-${key}`);
+    if (body) body.hidden = key !== name;
+  }
+  if (name === "settings") guard(refreshAppSettings);
+  if (name === "chat") {
+    $("chat-text").focus();
+  }
+  const back = $("ws-back");
+  if (back) {
+    back.title = name === "chat" ? "Вернуться к каталогу" : "Вернуться к диалогу";
+  }
 }
 
 /** Returns to the chat of the selected app (the engine keeps running). */
@@ -3764,7 +3780,16 @@ function bind() {
   });
 
   const wsBack = $("ws-back");
-  if (wsBack) wsBack.addEventListener("click", showCatalog);
+  if (wsBack) {
+    wsBack.addEventListener("click", () => {
+      const active = document.querySelector(".ws-tab.active");
+      if (active && active.dataset.ws !== "chat") {
+        showWorkspaceTab("chat");
+        return;
+      }
+      showCatalog();
+    });
+  }
   $("ws-close").addEventListener("click", closeApp);
 
   const chatSearch = $("chat-search");
@@ -4079,12 +4104,7 @@ function bind() {
 
   document.querySelectorAll(".ws-tab").forEach((tab) => {
     tab.addEventListener("click", () => {
-      document.querySelectorAll(".ws-tab").forEach((t) => t.classList.toggle("active", t === tab));
-      for (const name of ["chat", "tools", "settings"]) {
-        const body = $(`ws-${name}`);
-        if (body) body.hidden = name !== tab.dataset.ws;
-      }
-      if (tab.dataset.ws === "settings") guard(refreshAppSettings);
+      showWorkspaceTab(tab.dataset.ws);
     });
   });
 
