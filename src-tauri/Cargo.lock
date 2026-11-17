@@ -994,6 +994,7 @@ dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
  "hex",
+ "quick-xml 0.42.0",
  "rfd",
  "serde",
  "serde_json",

@@ -169,6 +169,9 @@ fn targets_with_skills(manifest: &Value, dir: &Path) -> Vec<String> {
     for bin in tool_bins(manifest) {
         add(&bin);
     }
+    if let Some(icon) = manifest.get("icon").and_then(Value::as_str) {
+        add(icon);
+    }
     for key in existing_hash_keys(manifest) {
         add(&key);
     }
@@ -407,6 +410,49 @@ pub fn validate(dir: &Path) -> Result<Report> {
                 .errors
                 .push(format!("min_shell_version is not x.y.z: {min}"));
         }
+    }
+    match manifest.get("description") {
+        None | Some(Value::Null) => {}
+        Some(value) => match value.as_str() {
+            Some(text) if text.chars().count() <= 160 => {
+                if text.chars().any(char::is_control) {
+                    report
+                        .errors
+                        .push("description: control characters are not allowed".to_string());
+                }
+            }
+            Some(_) => report
+                .errors
+                .push("description: must be at most 160 characters".to_string()),
+            None => report
+                .errors
+                .push("description: must be a string".to_string()),
+        },
+    }
+    match manifest.get("icon") {
+        None | Some(Value::Null) => {}
+        Some(value) => match value.as_str() {
+            Some(rel) if !rel.to_ascii_lowercase().ends_with(".svg") => report
+                .errors
+                .push(format!("icon: only .svg is supported: {rel}")),
+            Some(rel) if !rel_path_ok(rel) => {
+                report.errors.push(format!("icon: not a safe path: {rel}"))
+            }
+            Some(rel) => {
+                let path = file_for(dir, rel);
+                match std::fs::metadata(&path) {
+                    Ok(meta) if meta.is_file() && meta.len() <= 128 * 1024 => {}
+                    Ok(meta) if meta.is_file() => report.errors.push(format!(
+                        "icon: file is larger than 128 KiB ({} bytes)",
+                        meta.len()
+                    )),
+                    _ => report
+                        .errors
+                        .push(format!("icon: file is missing: {rel}")),
+                }
+            }
+            None => report.errors.push("icon: must be a string".to_string()),
+        },
     }
 
     match manifest_string(&manifest, &["profile", "system_prompt"]) {

@@ -5,6 +5,8 @@
   "version": "0.1.0",
   "min_shell_version": "0.1.0",
   "publisher": "CN=ECO AIOps Dev",
+  "description": "Упаковывает проект в изолированный агентский пакет с манифестом и подписью.",
+  "icon": "icon.svg",
   "profile": {
     "system_prompt": "prompt/system.md",
     "model_hint": "gateway-default",
@@ -28,8 +30,9 @@
     "ttl_hours": 168
   },
   "hashes": {
-    "prompt/system.md": "sha256:84631d5883e07eb237b0609d3bc0c82063fcff35d13ab4084b7eb744538e1380",
+    "prompt/system.md": "sha256:508925e976542310e3b108d2aeae61acfd208fbaa87cf1a0bc5dda9d6df29e42",
     "skills/repack-playbook/SKILL.md": "sha256:1c982ebcde14e2ea5ba696322900e0ea42424872edd3a9025890ef66a83f2508",
-    "skills/tool-adapters/SKILL.md": "sha256:fec78793982c1b3b3ac80cfb4505159288bbc56325c9cfe30184be59f5e5b872"
+    "skills/tool-adapters/SKILL.md": "sha256:fec78793982c1b3b3ac80cfb4505159288bbc56325c9cfe30184be59f5e5b872",
+    "icon.svg": "sha256:3493b4bde5cb8613fdef7f922ea9388ed53117aa2d947b1c0391fbdd6fc078a3"
   }
 }

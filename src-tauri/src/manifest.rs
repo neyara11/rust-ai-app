@@ -108,6 +108,13 @@ pub struct Manifest {
     pub min_shell_version: String,
     #[serde(default)]
     pub publisher: String,
+    /// One line shown under the app name in the catalog. Optional so packages
+    /// built before this field existed keep working unchanged.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// `icon.svg` inside the package. Validated and sanitized before rendering.
+    #[serde(default)]
+    pub icon: Option<String>,
     pub profile: Profile,
     #[serde(default)]
     pub tools: Vec<ToolDef>,
@@ -119,6 +126,60 @@ pub struct Manifest {
     pub artifacts: ArtifactCfg,
     #[serde(default)]
     pub hashes: BTreeMap<String, String>,
+}
+
+pub const MAX_DESCRIPTION_CHARS: usize = 160;
+
+impl Manifest {
+    /// Trimmed, control-character-free description for the catalog card.
+    pub fn clean_description(&self) -> Option<String> {
+        let raw = self.description.as_deref()?.trim();
+        let spaced: String = raw
+            .chars()
+            .map(|ch| if ch.is_control() { ' ' } else { ch })
+            .collect();
+        let clean = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+        if clean.is_empty() {
+            None
+        } else {
+            Some(clean.chars().take(MAX_DESCRIPTION_CHARS).collect())
+        }
+    }
+
+    /// Sanitized icon as a data URL, or `None` when the manifest has no icon or
+    /// the file is unsafe/missing. A bad icon only loses the picture; the app
+    /// itself keeps working.
+    pub fn icon_data_url(&self, dir: &Path) -> Option<String> {
+        let rel = self.icon.as_deref()?.trim();
+        if !icon_path_ok(rel) {
+            return None;
+        }
+        let path = dir.join(rel);
+        let meta = fs::metadata(&path).ok()?;
+        if !meta.is_file() || meta.len() > crate::svg_icon::MAX_ICON_BYTES {
+            return None;
+        }
+        let bytes = fs::read(&path).ok()?;
+        let svg = crate::svg_icon::sanitize(&bytes).ok()?;
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(svg.as_bytes());
+        Some(format!("data:image/svg+xml;base64,{encoded}"))
+    }
+}
+
+/// Icons are SVG-only, stay inside the package and must not use drive/stream
+/// syntax or traversal segments.
+fn icon_path_ok(rel: &str) -> bool {
+    let rel = rel.replace('\\', "/");
+    if !rel.to_ascii_lowercase().ends_with(".svg") {
+        return false;
+    }
+    if rel.starts_with('/') || rel.contains(':') {
+        return false;
+    }
+    !rel
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -342,6 +403,12 @@ fn verify_impl(
                 if !manifest.hashes.contains_key(&rel) {
                     problems.push(format!("tool binary is not covered by hashes: {rel}"));
                 }
+            }
+        }
+        if let Some(icon) = &manifest.icon {
+            let rel = icon.replace('\\', "/");
+            if !manifest.hashes.contains_key(&rel) {
+                problems.push(format!("icon is not covered by hashes: {rel}"));
             }
         }
     }
@@ -592,6 +659,47 @@ mod tests {
             "{:?}",
             report.problems
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn old_manifest_without_description_and_icon_still_parses() {
+        let dir = tmp("icon-old");
+        std::fs::write(dir.join("prompt.md"), b"p").unwrap();
+        let plain = r#"{"schema_version":2,"app_id":"demo","name":"Demo","version":"1.0.0",
+            "profile":{"system_prompt":"prompt.md"},"hashes":{}}"#;
+        std::fs::write(dir.join("manifest.json"), plain).unwrap();
+        let manifest = load(&dir).unwrap();
+        assert!(manifest.description.is_none());
+        assert!(manifest.icon.is_none());
+        assert!(manifest.clean_description().is_none());
+        assert!(manifest.icon_data_url(&dir).is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn icon_is_sanitized_and_unsafe_paths_are_ignored() {
+        let dir = tmp("icon-load");
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><rect width="8" height="8" fill="#123"/></svg>"##;
+        std::fs::write(dir.join("icon.svg"), svg).unwrap();
+        let body = r#"{"schema_version":2,"app_id":"demo","name":"Demo","version":"1.0.0",
+            "description":"  Line one\nline two  ",
+            "icon":"icon.svg",
+            "profile":{"system_prompt":""},"hashes":{}}"#;
+        std::fs::write(dir.join("manifest.json"), body).unwrap();
+        let manifest = load(&dir).unwrap();
+        assert_eq!(
+            manifest.clean_description().as_deref(),
+            Some("Line one line two")
+        );
+        let url = manifest.icon_data_url(&dir).unwrap();
+        assert!(url.starts_with("data:image/svg+xml;base64,"));
+
+        let mut unsafe_manifest = manifest.clone();
+        unsafe_manifest.icon = Some("../icon.svg".to_string());
+        assert!(unsafe_manifest.icon_data_url(&dir).is_none());
+        unsafe_manifest.icon = Some("icon.png".to_string());
+        assert!(unsafe_manifest.icon_data_url(&dir).is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

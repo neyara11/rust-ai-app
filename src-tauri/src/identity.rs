@@ -89,7 +89,7 @@ struct StoreLock {
 impl StoreLock {
     fn acquire(home: &Path) -> Result<Self> {
         let dir = dir(home);
-        std::fs::create_dir_all(&dir)?;
+        retry_permission(|| std::fs::create_dir_all(&dir))?;
         let path = dir.join("tokens.lock");
         let started = Instant::now();
         loop {
@@ -102,7 +102,10 @@ impl StoreLock {
                     let _ = writeln!(file, "{}", std::process::id());
                     return Ok(Self { path });
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::AlreadyExists
+                        || e.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
                     if stale(&path) {
                         let _ = std::fs::remove_file(&path);
                         continue;

@@ -14,6 +14,10 @@ pub struct InstalledApp {
     pub name: String,
     pub version: String,
     pub publisher: String,
+    /// Optional one-liner from the manifest.
+    pub description: Option<String>,
+    /// Sanitized SVG icon as a data URL; `None` falls back to initials.
+    pub icon: Option<String>,
     pub path: String,
     pub trusted: bool,
     pub signer_fingerprint: Option<String>,
@@ -457,6 +461,8 @@ fn installed(
         name: manifest.name.clone(),
         version: manifest.version.clone(),
         publisher: manifest.publisher.clone(),
+        description: manifest.clean_description(),
+        icon: manifest.icon_data_url(path),
         path: path.display().to_string(),
         trusted: report.ok,
         signer_fingerprint: report.signer_fingerprint.clone(),
@@ -494,6 +500,8 @@ pub fn list(home: &Path) -> Vec<InstalledApp> {
                 name: entry.file_name().to_string_lossy().to_string(),
                 version: "?".into(),
                 publisher: String::new(),
+                description: None,
+                icon: None,
                 path: path.display().to_string(),
                 trusted: false,
                 signer_fingerprint: None,

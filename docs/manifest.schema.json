@@ -39,6 +39,15 @@
     "publisher": {
       "type": "string"
     },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "icon": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._/-]+\\.[sS][vV][gG]$"
+    },
     "profile": {
       "type": "object",
       "additionalProperties": false,

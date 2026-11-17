@@ -83,6 +83,28 @@ try {
   const allowBadge = await page.locator("#allowlist").textContent();
   assert(allowBadge.includes("allowlist: нет"), `unexpected allowlist badge: ${allowBadge}`);
 
+  const cardVisuals = await page.evaluate(() => {
+    const card = document.querySelector('[data-open="doc-writer"]').closest(".card");
+    const image = card.querySelector("img.app-icon-img");
+    const description = card.querySelector(".app-desc");
+    const bare = document.querySelector('[data-open="incident-brief"]').closest(".card");
+    return {
+      iconSrc: image ? image.getAttribute("src") : "",
+      description: description ? description.textContent : "",
+      fallback: bare.querySelector(".app-icon").textContent.trim(),
+      bareHasImage: Boolean(bare.querySelector("img.app-icon-img")),
+    };
+  });
+  assert(
+    cardVisuals.iconSrc.startsWith("data:image/svg+xml;base64,"),
+    "catalog card did not render the package icon",
+  );
+  assert(/Word/.test(cardVisuals.description), "catalog card did not render the description");
+  assert(
+    !cardVisuals.bareHasImage && cardVisuals.fallback.length > 0,
+    "package without an icon must fall back to initials",
+  );
+
   await trusted.click();
   await page.waitForSelector("#workspace:not([hidden])");
   await page.waitForFunction(

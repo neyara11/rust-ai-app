@@ -5,6 +5,8 @@
   "version": "0.1.0",
   "min_shell_version": "0.1.0",
   "publisher": "CN=ECO AIOps Dev",
+  "description": "Готовит документы, правит markdown и конвертирует их в Word.",
+  "icon": "icon.svg",
   "profile": {
     "system_prompt": "prompt/system.md",
     "model_hint": "gateway-default",
@@ -38,6 +40,7 @@
   "hashes": {
     "prompt/system.md": "sha256:f679fc488ea3689282e5b4c2c80b4fbe50caa0d4da39a5004d381be88b55c55d",
     "skills/doc-workflow/SKILL.md": "sha256:234d19d720d7668eb068485a4a199268453a7a2bd916000948e8c96af9e2bade",
-    "bin/docx-export.exe": "sha256:729dfba76aba5add65dc49c5a7aad87e86de5a2beaddbf1e58b1330592377896"
+    "bin/docx-export.exe": "sha256:729dfba76aba5add65dc49c5a7aad87e86de5a2beaddbf1e58b1330592377896",
+    "icon.svg": "sha256:0675d621e73ae6a327816a12b6550f61b93abb49cdeb2cb262a86fc74df1bd4d"
   }
 }

@@ -5,6 +5,8 @@ const browserMock = (() => {
       name: "Документы и Word",
       version: "0.1.0",
       publisher: "CN=ECO AIOps Dev",
+      description: "Готовит документы, правит markdown и конвертирует их в Word.",
+      icon: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4IDgiPjxyZWN0IHdpZHRoPSI4IiBoZWlnaHQ9IjgiIHJ4PSIyIiBmaWxsPSIjMjU2M2ViIi8+PC9zdmc+",
       path: "D:\\git\\rust-ai-app\\.data\\apps\\doc-writer",
       trusted: true,
       problems: [],
@@ -631,16 +633,24 @@ function renderApps() {
       ? `<button class="ghost small" data-rollback="${esc(app.app_id)}" data-version="${esc(history[0].version)}" title="Откатить к сохранённой версии">↩ v${esc(history[0].version)}</button>`
       : "";
 
+    const icon = app.icon
+      ? `<img class="app-icon-img" src="${esc(app.icon)}" alt="" loading="lazy">`
+      : esc(appInitials(app.name));
+    const description = app.description
+      ? `<div class="app-desc">${esc(app.description)}</div>`
+      : "";
+
     card.innerHTML = `
       <div class="app-card-top">
         <div class="app-identity">
-          <div class="app-icon" aria-hidden="true">${esc(appInitials(app.name))}</div>
+          <div class="app-icon" aria-hidden="true">${icon}</div>
           <div class="app-copy">
             <div class="title">
               <span>${esc(app.name)}</span>
               <span class="version-pill">v${esc(app.version)}</span>
             </div>
             <div class="app-submeta">${esc(app.app_id)} · ${esc(app.publisher || "без подписанта")}</div>
+            ${description}
           </div>
         </div>
         <span class="badge ${app.trusted ? "ok" : "bad"}">${app.trusted ? (app.signer_fingerprint ? "подпись ок" : "целостность ок") : "не доверенный"}</span>

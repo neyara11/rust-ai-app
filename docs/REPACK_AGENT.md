@@ -233,6 +233,8 @@ pyinstaller --onefile --clean --name crm_sync crm_sync.py
   "version": "0.1.0",
   "min_shell_version": "0.1.0",
   "publisher": "",
+  "description": "<одна строка до 160 символов, можно опустить>",
+  "icon": "icon.svg",
   "profile": {
     "system_prompt": "prompt/system.md",
     "model_hint": "gateway-default",
@@ -263,6 +265,11 @@ pyinstaller --onefile --clean --name crm_sync crm_sync.py
 - `connections` — `llm` плюс по одной записи на каждый remote MCP (только id и
   тип, без URL/токенов). Инструменты этого сервера перечисляются в `tools[]`
   без `bin`; сам сервер в `tools[]` не добавляй.
+- `description`/`icon` — необязательны. Иконка только `icon.svg`, ≤128 КиБ, без
+  `<script>`, `<foreignObject>`, `<image>`, событий `on*`, внешних
+  `href`/`url(...)` и DOCTYPE: платформа отвергнет такую иконку и покажет
+  буквенный аватар. Если логотипа нет — не придумывай сложную графику,
+  достаточно простых фигур или вовсе опусти поле.
 - `hashes` оставь пустым: их посчитает `eco-pack build`.
 - Любой исполняемый файл в `bin/` (`exe`, `bat`, `cmd`, `ps1`) обязан быть
   объявлен в `tools[]`: `eco-pack validate` считает необъявленный launcher

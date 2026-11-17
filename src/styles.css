@@ -1344,6 +1344,7 @@ button:focus-visible,
   color: var(--accent-text);
   font-family: var(--font-sans);
   font-size: 11px;
+  overflow: hidden;
   font-weight: 600;
   letter-spacing: 0.02em;
 }
@@ -1385,6 +1386,24 @@ button:focus-visible,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.app-icon-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.app-desc {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .app-specs {

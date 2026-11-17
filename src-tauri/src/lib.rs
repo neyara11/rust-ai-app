@@ -14,6 +14,7 @@ pub mod registry;
 pub mod seal;
 pub mod secrets;
 pub mod state;
+pub mod svg_icon;
 pub mod workspace;
 
 use secrets::SecretStore;
