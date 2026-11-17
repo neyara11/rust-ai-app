@@ -1716,6 +1716,7 @@ function renderChat(items) {
       <p>Сессия изолирована. Вызовы инструментов ограничены контрактом пакета и проходят через платформенный шлюз.</p>
       <div class="prompt-starters">${starters}</div>`;
     log.appendChild(empty);
+    updateContextMeter([]);
     return;
   }
 
@@ -1764,8 +1765,49 @@ function renderChat(items) {
   }
 
   enhanceDiagrams(log);
+  updateContextMeter(items);
   if (atBottom) log.scrollTop = log.scrollHeight;
   if (ctx.busy) renderThinking();
+}
+
+// Shows how much of the model context window the last turn occupied. The
+// prompt/answer usage comes from the assistant message; the window size comes
+// from the model capabilities configured for the gateway.
+function updateContextMeter(items) {
+  const chip = $("chat-context");
+  const text = $("chat-context-text");
+  if (!chip || !text) return;
+  let usage = null;
+  let cacheRead = 0;
+  let cacheWrite = 0;
+  for (let i = (items || []).length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item.role === "user") continue;
+    if (item.tokens_in == null && item.cache_read == null && item.cache_write == null) continue;
+    cacheRead = item.cache_read || 0;
+    cacheWrite = item.cache_write || 0;
+    usage = item.tokens_in != null ? item.tokens_in : cacheRead + cacheWrite;
+    break;
+  }
+  if (usage == null) {
+    chip.hidden = true;
+    return;
+  }
+  const cap = Number((ctx.config && ctx.config.llm_capabilities && ctx.config.llm_capabilities.context_tokens) || 0);
+  chip.hidden = false;
+  if (!cap) {
+    chip.classList.remove("warn", "bad");
+    text.textContent = `контекст: ${fmtNum(usage)}`;
+    chip.title = "Лимит контекстного окна не задан: укажите context_tokens в настройках модели";
+    return;
+  }
+  const percent = Math.round((usage / cap) * 1000) / 10;
+  const left = Math.max(0, cap - usage);
+  chip.classList.toggle("warn", percent >= 75 && percent < 90);
+  chip.classList.toggle("bad", percent >= 90);
+  text.textContent = `контекст ${percent}% · ${fmtNum(usage)} / ${fmtNum(cap)}`;
+  chip.title = `Занято ${usage} из ${cap} токенов, осталось ~${fmtNum(left)}`
+    + (cacheRead || cacheWrite ? ` · кэш: чтение ${cacheRead}, запись ${cacheWrite}` : "");
 }
 
 function fmtNum(value) {

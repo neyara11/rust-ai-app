@@ -48,6 +48,12 @@ pub struct ChatItem {
     pub tokens_out: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    /// Prompt tokens served from / written to the provider cache. Together with
+    /// `tokens_in` this is the context that was actually occupied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -217,6 +223,8 @@ impl ChatItem {
             tokens_in: None,
             tokens_out: None,
             reasoning_tokens: None,
+            cache_read: None,
+            cache_write: None,
             ms: None,
             tok_s: None,
             model: None,
@@ -2101,6 +2109,14 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
         let reasoning_tokens = tokens
             .and_then(|t| t.get("reasoning"))
             .and_then(Value::as_u64);
+        let cache_read = tokens
+            .and_then(|t| t.get("cache"))
+            .and_then(|c| c.get("read"))
+            .and_then(Value::as_u64);
+        let cache_write = tokens
+            .and_then(|t| t.get("cache"))
+            .and_then(|c| c.get("write"))
+            .and_then(Value::as_u64);
         let model = info
             .and_then(|i| i.get("modelID"))
             .and_then(Value::as_str)
@@ -2132,6 +2148,8 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
             item.tokens_in = tokens_in;
             item.tokens_out = tokens_out;
             item.reasoning_tokens = reasoning_tokens;
+            item.cache_read = cache_read;
+            item.cache_write = cache_write;
             item.ms = ms;
             item.tok_s = tok_s;
             item.model = model;

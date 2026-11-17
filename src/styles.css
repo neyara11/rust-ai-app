@@ -4510,12 +4510,38 @@ html[data-theme="light"] .mode-overlay {
   cursor: default;
 }
 
+.chip.context-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 260px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: default;
+}
+
+.chip.context-chip:hover {
+  background: transparent;
+}
+
+.chip.context-chip.warn {
+  color: var(--warn);
+}
+
+.chip.context-chip.bad {
+  color: var(--bad);
+}
+
 @media (max-width: 1020px) {
   .chip {
     max-width: 168px;
   }
 
   .chip.model-chip {
+    max-width: 150px;
+  }
+
+  .chip.context-chip {
     max-width: 150px;
   }
 }

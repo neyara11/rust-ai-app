@@ -432,6 +432,28 @@ try {
   assert(scrollGuard.stayed, "thinking indicator scrolled the log while the user was reading history");
   assert(scrollGuard.followed, "thinking indicator did not follow the tail at the bottom");
 
+  const contextMeter = await page.evaluate(() => {
+    const chipEl = () => document.querySelector("#chat-context");
+    updateContextMeter([{ role: "assistant", tokens_in: 100000 }]);
+    const warnHidden = chipEl().hidden;
+    const warnText = chipEl().textContent.trim();
+    const warn = chipEl().classList.contains("warn");
+    updateContextMeter([{ role: "assistant", tokens_in: 120000 }]);
+    const bad = chipEl().classList.contains("bad");
+    const title = chipEl().title;
+    updateContextMeter([]);
+    const hiddenWhenEmpty = chipEl().hidden;
+    return { warnHidden, warnText, warn, bad, title, hiddenWhenEmpty };
+  });
+  assert(
+    !contextMeter.warnHidden && /контекст 78\.1%/.test(contextMeter.warnText),
+    `context meter did not render usage: ${JSON.stringify(contextMeter)}`,
+  );
+  assert(contextMeter.warn, "context meter did not warn at 75%");
+  assert(contextMeter.bad, "context meter did not mark 90% as danger");
+  assert(/осталось/.test(contextMeter.title), "context meter title does not mention the remaining tokens");
+  assert(contextMeter.hiddenWhenEmpty, "context meter stayed visible for an empty chat");
+
   await page.evaluate(() => {
     const transfer = new DataTransfer();
     transfer.items.add(new File(["pasted"], "pasted.txt", { type: "text/plain" }));
