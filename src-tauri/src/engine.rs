@@ -1042,6 +1042,61 @@ fn read_system_prompt(package_dir: &Path, app: &manifest::Manifest) -> Result<St
     Ok(std::fs::read_to_string(path)?)
 }
 
+/// Full system prompt sent to the engine: the package prompt, skills, the
+/// environment note and the generated platform tool guide. Shared with the
+/// `--system-prompt` diagnostic so what is printed is exactly what the model
+/// receives.
+pub fn compose_system_prompt(
+    package_dir: &Path,
+    app: &manifest::Manifest,
+) -> Result<String> {
+    let mut system = read_system_prompt(package_dir, app)?;
+    let skills = skill_texts(package_dir);
+    match skills.len() {
+        0 => {}
+        // One skill is the app's whole behaviour: keep it inline for
+        // compatibility with existing single-skill packages.
+        1 => {
+            system.push_str("\n\n---\n\n");
+            system.push_str(&skills[0].1);
+        }
+        // A group of skills is loaded on demand so the prompt stays small
+        // and each skill keeps its own scope.
+        _ => {
+            let names = skills
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            system.push_str("\n\n---\n\n## Скилы приложения\n\nДоступны скилы: ");
+            system.push_str(&names);
+            system.push_str(
+                ".\nПеред выполнением задачи загрузи нужный скил инструментом platform_skill: {\"action\":\"read\",\"name\":\"<имя>\"}. Список скилов: {\"action\":\"list\"}. Работай строго по загруженному скилу; зависимые скилы загружай тем же инструментом по мере необходимости.\n",
+            );
+        }
+    }
+    let has_file_tools = app
+        .capabilities
+        .file_scopes
+        .iter()
+        .any(|scope| scope == "workspace");
+    let has_package_tools = app
+        .tools
+        .iter()
+        .any(|tool| tool.bin.as_deref().map(|bin| !bin.trim().is_empty()).unwrap_or(false));
+    let has_remote_tools = app
+        .connections
+        .iter()
+        .any(|connection| connection.kind == "http-mcp");
+    if !has_file_tools && !has_package_tools && !has_remote_tools {
+        system.push_str(
+            "\n\n---\n\n## Ограничения среды\n\nУ пакета нет собственных инструментов: доступны только платформенные (артефакты и скилы). Если задача требует файлов или команд, объясни ограничение и попроси включить нужные возможности в манифесте (file_scopes, tools, http-mcp).\n",
+        );
+    }
+    system.push_str(&platform_tools_prompt(app, package_dir));
+    Ok(system)
+}
+
 /// Platform-owned part of the system prompt: the tool list and usage rules are
 /// generated from the manifest, so packages do not have to describe platform
 /// tools by hand (and cannot drift from what the proxy actually exposes).
@@ -1516,52 +1571,7 @@ impl Engine {
             None => create_session(&agent, &base, &auth, &app.name)?,
         };
 
-        let mut system = read_system_prompt(&package_dir, &app)?;
-        let skills = skill_texts(&package_dir);
-        match skills.len() {
-            0 => {}
-            // One skill is the app's whole behaviour: keep it inline for
-            // compatibility with existing single-skill packages.
-            1 => {
-                system.push_str("\n\n---\n\n");
-                system.push_str(&skills[0].1);
-            }
-            // A group of skills is loaded on demand so the prompt stays small
-            // and each skill keeps its own scope.
-            _ => {
-                let names = skills
-                    .iter()
-                    .map(|(name, _)| name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                system.push_str(
-                    "\n\n---\n\n## Скилы приложения\n\nДоступны скилы: ",
-                );
-                system.push_str(&names);
-                system.push_str(
-                    ".\nПеред выполнением задачи загрузи нужный скил инструментом platform_skill: {\"action\":\"read\",\"name\":\"<имя>\"}. Список скилов: {\"action\":\"list\"}. Работай строго по загруженному скилу; зависимые скилы загружай тем же инструментом по мере необходимости.\n",
-                );
-            }
-        }
-        let has_file_tools = app
-            .capabilities
-            .file_scopes
-            .iter()
-            .any(|scope| scope == "workspace");
-        let has_package_tools = app
-            .tools
-            .iter()
-            .any(|tool| tool.bin.as_deref().map(|bin| !bin.trim().is_empty()).unwrap_or(false));
-        let has_remote_tools = app
-            .connections
-            .iter()
-            .any(|connection| connection.kind == "http-mcp");
-        if !has_file_tools && !has_package_tools && !has_remote_tools {
-            system.push_str(
-                "\n\n---\n\n## Ограничения среды\n\nУ пакета нет собственных инструментов: доступны только платформенные (артефакты и скилы). Если задача требует файлов или команд, объясни ограничение и попроси включить нужные возможности в манифесте (file_scopes, tools, http-mcp).\n",
-            );
-        }
-        system.push_str(&platform_tools_prompt(&app, &package_dir));
+        let system = compose_system_prompt(&package_dir, &app)?;
 
         artifact_guard.armed = false;
         let child = child_guard

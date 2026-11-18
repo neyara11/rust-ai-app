@@ -1112,6 +1112,31 @@ pub fn cli_chat_async(app_id: Option<&String>, message: Option<&String>) -> i32 
     }
 }
 
+/// `--system-prompt <app-id>`: prints the exact system prompt the engine gets,
+/// including the generated platform tool guide. Useful to verify what the model
+/// is told without starting a chat.
+pub fn cli_system_prompt(app_id: Option<&String>) -> i32 {
+    let Some(app_id) = app_id else {
+        eprintln!("usage: eco-platform --system-prompt <app-id>");
+        return 2;
+    };
+    let home = registry::home();
+    let result = (|| -> error::Result<()> {
+        let app = registry::verified_manifest(&home, app_id)?;
+        let dir = registry::apps_dir(&home).join(app_id);
+        let prompt = engine::compose_system_prompt(&dir, &app)?;
+        println!("{prompt}");
+        Ok(())
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
 /// `--chat-sessions <app-id>`: lists chats and creates one new chat, proving
 /// that starting a new chat does not delete the old ones.
 pub fn cli_chat_sessions(app_id: Option<&String>) -> i32 {

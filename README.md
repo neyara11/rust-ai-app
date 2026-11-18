@@ -312,6 +312,8 @@ powershell -File tools\build-installer.ps1 -Trust   # сборка + dev-под�
 --chat <app> <text> [low|medium|high]
 --chat-async <app> <text>
 --chat-sessions <app>
+--system-prompt <app>       показать точный системный промпт движка,
+                            включая сгенерированный список инструментов платформы
 ```
 
 Пример сквозной проверки:
