@@ -1042,6 +1042,92 @@ fn read_system_prompt(package_dir: &Path, app: &manifest::Manifest) -> Result<St
     Ok(std::fs::read_to_string(path)?)
 }
 
+/// Platform-owned part of the system prompt: the tool list and usage rules are
+/// generated from the manifest, so packages do not have to describe platform
+/// tools by hand (and cannot drift from what the proxy actually exposes).
+fn platform_tools_prompt(app: &manifest::Manifest, package_dir: &Path) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("\n\n---\n\n## Инструменты платформы\n".to_string());
+    lines.push(
+        "Их предоставляет платформа, описывать их в промпте пакета не нужно. \
+         Вызывай только те, что перечислены ниже.\n"
+            .to_string(),
+    );
+
+    let file_scope = app
+        .capabilities
+        .file_scopes
+        .iter()
+        .any(|scope| scope == "workspace");
+    if file_scope {
+        lines.push(
+            "- `platform_list_files`, `platform_read_file`, `platform_write_file`, \
+             `platform_append_file` — рабочая папка приложения; пути только \
+             относительные, выход за папку запрещён."
+                .to_string(),
+        );
+    }
+    if !skill_texts(package_dir).is_empty() {
+        lines.push(
+            "- `platform_skill` — список и загрузка скилов пакета: \
+             `{\"action\":\"list\"}` и `{\"action\":\"read\",\"name\":\"<имя>\"}`."
+                .to_string(),
+        );
+    }
+    lines.push(
+        "- `platform_artifact_list`, `platform_artifact_search`, `platform_artifact_read` \
+         — дампы сессий и полный вывод крупных tool-результатов. Если инструмент вернул \
+         `truncated`, не считай `preview` полным ответом: дочитай через \
+         `platform_artifact_read` (`file`, `offset` → `next_offset`, пока `eof` не станет true) \
+         или найди нужное `platform_artifact_search`."
+            .to_string(),
+    );
+
+    for tool in &app.tools {
+        if tool
+            .bin
+            .as_deref()
+            .map(|bin| !bin.trim().is_empty())
+            .unwrap_or(false)
+        {
+            let name = crate::proxy::normalize_tool_name(&tool.tool);
+            let mode = if tool.io.eq_ignore_ascii_case("json") {
+                "JSON-аргументы в stdin, результат в stdout"
+            } else {
+                "файловый режим: input/output, платформа передаёт --input/--output"
+            };
+            lines.push(format!("- `platform_{name}` — инструмент пакета ({mode})."));
+        }
+    }
+    for connection in &app.connections {
+        if connection.kind != "http-mcp" {
+            continue;
+        }
+        for tool in &app.tools {
+            if tool.bin.is_some() {
+                continue;
+            }
+            let name = crate::proxy::normalize_tool_name(&format!(
+                "{}_{}",
+                connection.id, tool.tool
+            ));
+            lines.push(format!(
+                "- `platform_{name}` — инструмент MCP-сервера `{}`.",
+                connection.id
+            ));
+        }
+    }
+
+    lines.push(
+        "Правила: не выводи служебную разметку вызовов (tool call, DSML); \
+         write-инструменты и запись в рабочую папку выполняй только по задаче; \
+         секреты не запрашивай и не печатай; ошибки инструментов показывай кратко \
+         и предлагай следующий шаг."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
 fn skill_texts(package_dir: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let dir = package_dir.join("skills");
@@ -1472,9 +1558,10 @@ impl Engine {
             .any(|connection| connection.kind == "http-mcp");
         if !has_file_tools && !has_package_tools && !has_remote_tools {
             system.push_str(
-                "\n\n---\n\n## Ограничения среды\n\nУ пакета нет доступных инструментов. Не вызывай инструменты и не выводи служебную разметку вызовов (tool call, DSML). Если задача требует файлов или команд, объясни ограничение и попроси включить нужные возможности в манифесте (file_scopes, tools, http-mcp).\n",
+                "\n\n---\n\n## Ограничения среды\n\nУ пакета нет собственных инструментов: доступны только платформенные (артефакты и скилы). Если задача требует файлов или команд, объясни ограничение и попроси включить нужные возможности в манифесте (file_scopes, tools, http-mcp).\n",
             );
         }
+        system.push_str(&platform_tools_prompt(&app, &package_dir));
 
         artifact_guard.armed = false;
         let child = child_guard
@@ -2822,6 +2909,46 @@ mod tests {
         let entry = model_entry("gateway-model", &caps);
         assert_eq!(entry["limit"]["context"], json!(DEFAULT_CONTEXT_TOKENS));
         assert_eq!(entry["limit"]["output"], json!(32_000));
+    }
+
+    #[test]
+    fn platform_prompt_lists_tools_and_truncation_rule() {
+        let dir = std::env::temp_dir().join(format!("eco-prompt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app: manifest::Manifest = serde_json::from_value(json!({
+            "schema_version": 2,
+            "app_id": "demo",
+            "name": "Demo",
+            "version": "0.1.0",
+            "profile": { "system_prompt": "" },
+            "hashes": {}
+        }))
+        .unwrap();
+        app.capabilities.file_scopes = vec!["workspace".to_string()];
+        app.tools.push(manifest::ToolDef {
+            tool: "docx_export".to_string(),
+            bin: Some("bin/docx-export.exe".to_string()),
+            argv: Vec::new(),
+            io: "files".to_string(),
+            parameters: None,
+            secrets: std::collections::BTreeMap::new(),
+            timeout_secs: None,
+            stream: "write".to_string(),
+        });
+        let prompt = platform_tools_prompt(&app, &dir);
+        assert!(prompt.contains("platform_read_file"));
+        assert!(prompt.contains("platform_artifact_read"));
+        assert!(prompt.contains("truncated"));
+        assert!(prompt.contains("platform_docx_export"));
+        assert!(prompt.contains("--input/--output"));
+
+        app.capabilities.file_scopes.clear();
+        let prompt = platform_tools_prompt(&app, &dir);
+        assert!(!prompt.contains("platform_read_file"));
+        // Dumps stay available without a workspace scope.
+        assert!(prompt.contains("platform_artifact_search"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

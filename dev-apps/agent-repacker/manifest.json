@@ -30,7 +30,7 @@
     "ttl_hours": 168
   },
   "hashes": {
-    "prompt/system.md": "sha256:4057ca1ee18283da7cab18f52e19b2956382980c66e0000ede8bd8533a8df6d9",
+    "prompt/system.md": "sha256:2b74c746e2e973e17ad4368c6a922944434500ded705fde30b41fb2ab14454a8",
     "skills/repack-playbook/SKILL.md": "sha256:1c982ebcde14e2ea5ba696322900e0ea42424872edd3a9025890ef66a83f2508",
     "skills/tool-adapters/SKILL.md": "sha256:fec78793982c1b3b3ac80cfb4505159288bbc56325c9cfe30184be59f5e5b872",
     "icon.svg": "sha256:3493b4bde5cb8613fdef7f922ea9388ed53117aa2d947b1c0391fbdd6fc078a3"
