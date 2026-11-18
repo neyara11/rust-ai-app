@@ -34,7 +34,7 @@ const browserMock = (() => {
     {
       app_id: "incident-brief",
       name: "Экспорт в внешний трекер",
-      version: "0.4.0",
+      version: "0.4.1",
       publisher: "CN=Untrusted Vendor",
       path: "D:\\git\\rust-ai-app\\.data\\apps\\incident-brief",
       trusted: false,
