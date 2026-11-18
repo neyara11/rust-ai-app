@@ -619,7 +619,7 @@ impl Proxy {
             }
             return msg(message);
         }
-        if run.overflowed {
+        if run.overflowed && (!files_mode || !run.status.success()) {
             let spill_hint = spill
                 .as_ref()
                 .map(|(stdout, _)| format!(" Full output: artifact_read file={stdout}"))
@@ -687,11 +687,22 @@ impl Proxy {
         if !output.is_file() {
             return msg(format!("package tool {tool} finished without creating the output file"));
         }
-        Ok(json!({
+        let mut result = json!({
             "input": input.display().to_string(),
             "output": output.display().to_string(),
             "bytes": fs::metadata(&output).map(|m| m.len()).unwrap_or(0)
-        }))
+        });
+        if run.overflowed {
+            result["stdout_truncated"] = json!(true);
+            if let Some((stdout, stderr)) = &spill {
+                result["stdout_file"] = json!(stdout);
+                result["stderr_file"] = json!(stderr);
+                result["hint"] = json!(
+                    "Логи инструмента усечены в ответе; полный текст доступен через artifact_read."
+                );
+            }
+        }
+        Ok(result)
     }
 
     /// Read-only access to the app's artifact dumps and saved full tool output.
@@ -1181,25 +1192,17 @@ fn run_with_limits(
 
     let timeout = timeout.max(Duration::from_millis(100));
     let deadline = Instant::now() + timeout;
-    let (status, timed_out, mut overflowed) = loop {
+    let (status, timed_out) = loop {
         match child.try_wait()? {
-            Some(status) => break (status, false, overflow.load(Ordering::Relaxed)),
+            Some(status) => break (status, false),
             None => {
-                let spooled_too_large = spool_files.as_ref().map_or(false, |(out, err)| {
-                    fs::metadata(out).map(|m| m.len() > cap as u64).unwrap_or(false)
-                        || fs::metadata(err)
-                            .map(|m| m.len() > cap as u64)
-                            .unwrap_or(false)
-                });
-                if overflow.load(Ordering::Relaxed) || spooled_too_large {
-                    kill_tree(&mut child);
-                    let status = child.wait()?;
-                    break (status, false, true);
-                }
+                // Output size is not a reason to kill the tool: the file is
+                // spooled to disk, and the model receives a small preview with
+                // a reference. Only the timeout stops the process.
                 if Instant::now() >= deadline {
                     kill_tree(&mut child);
                     let status = child.wait()?;
-                    break (status, true, false);
+                    break (status, true);
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
@@ -1210,28 +1213,29 @@ fn run_with_limits(
         let _ = handle.join();
     }
 
-    let (stdout, stderr, stdout_path, stderr_path) = if let Some((out_path, err_path)) = spool_files
-    {
-        let (stdout, out_size) = read_capped_path(&out_path, cap);
-        let (stderr, err_size) = read_capped_path(&err_path, cap);
-        overflowed = overflowed || out_size > cap as u64 || err_size > cap as u64;
-        let keep = overflowed || timed_out || !status.success();
-        if keep {
-            (stdout, stderr, Some(out_path), Some(err_path))
+    let (stdout, stderr, overflowed, stdout_path, stderr_path) =
+        if let Some((out_path, err_path)) = spool_files {
+            let (stdout, out_size) = read_capped_path(&out_path, cap);
+            let (stderr, err_size) = read_capped_path(&err_path, cap);
+            let overflowed = out_size > cap as u64 || err_size > cap as u64;
+            let keep = overflowed || timed_out || !status.success();
+            if keep {
+                (stdout, stderr, overflowed, Some(out_path), Some(err_path))
+            } else {
+                let _ = fs::remove_file(&out_path);
+                let _ = fs::remove_file(&err_path);
+                (stdout, stderr, overflowed, None, None)
+            }
         } else {
-            let _ = fs::remove_file(&out_path);
-            let _ = fs::remove_file(&err_path);
-            (stdout, stderr, None, None)
-        }
-    } else {
-        let (stdout, _) = stdout_handle
-            .and_then(|handle| handle.join().ok())
-            .unwrap_or_default();
-        let (stderr, _) = stderr_handle
-            .and_then(|handle| handle.join().ok())
-            .unwrap_or_default();
-        (stdout, stderr, None, None)
-    };
+            let (stdout, _) = stdout_handle
+                .and_then(|handle| handle.join().ok())
+                .unwrap_or_default();
+            let (stderr, _) = stderr_handle
+                .and_then(|handle| handle.join().ok())
+                .unwrap_or_default();
+            let overflowed = overflow.load(Ordering::Relaxed);
+            (stdout, stderr, overflowed, None, None)
+        };
 
     Ok(BoundedRun {
         status,
@@ -2106,7 +2110,7 @@ mod tests {
         assert!(run.overflowed, "output above the cap must be reported");
         let stdout_path = run.stdout_path.expect("spooled stdout must be kept");
         let size = fs::metadata(&stdout_path).unwrap().len();
-        assert!(size > 1024, "full output must stay on disk: {size}");
+        assert!(size > 100_000, "full output must stay on disk: {size}");
         let value = crate::artifacts::read_range(&stdout_path, 0, 64).unwrap();
         assert_eq!(value["text"].as_str().unwrap().len(), 64);
         let _ = fs::remove_dir_all(&dir);
