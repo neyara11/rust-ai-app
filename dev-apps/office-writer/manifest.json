@@ -1,0 +1,79 @@
+{
+  "schema_version": 2,
+  "app_id": "office-writer",
+  "name": "Документы, таблицы и схемы",
+  "version": "0.1.2",
+  "min_shell_version": "0.4.0",
+  "publisher": "CN=ECO AIOps Dev",
+  "description": "Готовит Word и Excel, встраивает графики и схемы, читает готовые docx и xlsx.",
+  "icon": "icon.svg",
+  "profile": {
+    "system_prompt": "prompt/system.md",
+    "model_hint": "gateway-default",
+    "max_steps": 32
+  },
+  "tools": [
+    {
+      "tool": "read_office",
+      "bin": "bin/office-kit.exe",
+      "argv": ["read", "--input", "{input}", "--output", "{output}"],
+      "stream": "read",
+      "timeout_secs": 120
+    },
+    {
+      "tool": "docx_export",
+      "bin": "bin/office-kit.exe",
+      "argv": ["docx", "--input", "{input}", "--output", "{output}"],
+      "stream": "write",
+      "timeout_secs": 120
+    },
+    {
+      "tool": "xlsx_export",
+      "bin": "bin/office-kit.exe",
+      "argv": ["xlsx", "--input", "{input}", "--output", "{output}"],
+      "stream": "write",
+      "timeout_secs": 120
+    },
+    {
+      "tool": "render_mermaid",
+      "bin": "bin/diagram-render.exe",
+      "argv": ["mermaid", "--input", "{input}", "--output", "{output}"],
+      "stream": "write",
+      "timeout_secs": 60
+    },
+    {
+      "tool": "render_chart",
+      "bin": "bin/diagram-render.exe",
+      "argv": ["chart", "--input", "{input}", "--output", "{output}"],
+      "stream": "write",
+      "timeout_secs": 60
+    }
+  ],
+  "connections": [
+    {
+      "id": "llm",
+      "type": "llm",
+      "required": true
+    }
+  ],
+  "capabilities": {
+    "index_allowlist": [],
+    "file_scopes": [
+      "workspace"
+    ],
+    "external_writes": []
+  },
+  "artifacts": {
+    "quota_mb": 50,
+    "ttl_hours": 72
+  },
+  "hashes": {
+    "prompt/system.md": "sha256:1490d21ec42b14e1f579aaac34a11d9e6c29ee41300d2be67a8ad7def12c85a6",
+    "skills/diagrams/SKILL.md": "sha256:4abd8e22b84c4cab66bb136769b9d1530808e905ac1e3bac3ed04514b70ecdf4",
+    "skills/office-format/SKILL.md": "sha256:25d2bb4b7a42b27b843e0609227fed5c09afbf5d30fd216f04063c02e5fda5a5",
+    "bin/office-kit.exe": "sha256:f6efccd0e48f67ef556ece308844711727d0fbf0e0987a67db520695dd4422ff",
+    "bin/diagram-render.exe": "sha256:d112e57f9f436ed24f24ee33201901d921c22efcd45762d5480678eed8aed41a",
+    "icon.svg": "sha256:fb5468ae7d2943d7e4260e3c2109050ad58cf1c509cb760533047dffd53076d4",
+    "THIRD_PARTY_NOTICES.md": "sha256:e7fce43037c100f44b852003ddf45dd51dc99534a05161213598ff5f8926bb42"
+  }
+}

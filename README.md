@@ -29,6 +29,9 @@ sidecar, интерфейс — Tauri v2 + WebView2.
   exe-инструменты из пакета и remote MCP. Allow-list, лимит ответа 64 КиБ, аудит.
 - **Демо `doc-writer`.** Агент создаёт markdown в рабочей папке и конвертирует его в
   Word через `docx-export.exe` из самого пакета.
+- **Демо `office-writer`.** Word и Excel из одной рабочей папки: чтение готовых
+  `.docx`/`.xlsx`, экспорт с картинками, нативные графики Excel и офлайн-рендер
+  Mermaid/Chart в PNG без браузера.
 - **MCP.** Streamable HTTP + SSE, токены в DPAPI, ручной вызов из UI. Один id может
   иметь разные URL/токены/TLS-политику в разных приложениях; переопределения задаются
   во вкладке «Настройки приложения».
@@ -198,6 +201,43 @@ powershell -File tools\package.ps1 -SkipConverter   # только hashes/sign/v
 Ключ `-Wheelhouse <dir>` передаёт офлайн-зависимости в сборку конвертера, `-NoInstall`
 оставляет только сборку и проверку пакета. Для закрытого контура см.
 `tools/docx-export/README.md`.
+
+## Мини-приложение `office-writer`
+
+Word, Excel и схемы в одном пакете. Office-файлы читаются из рабочей папки:
+пользователь копирует туда `.docx`/`.xlsx`, агент вызывает `read_office`, получает
+markdown с картинками, затем собирает результат через `docx_export` или
+`xlsx_export`. Графики и схемы рендерятся офлайн в PNG (`chart` → `charts-rs`,
+`mermaid` → `merman`), без Chromium, Node и интернета.
+
+```
+dev-apps/office-writer/
+  bin/office-kit.exe       # read_office, docx_export, xlsx_export (PyInstaller)
+  bin/diagram-render.exe   # render_chart, render_mermaid (Rust)
+  manifest.json
+  manifest.sig
+  prompt/system.md
+  skills/diagrams/SKILL.md
+  skills/office-format/SKILL.md
+```
+
+Сборка обоих бинарников и подпись пакета:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\office-kit\build.ps1
+powershell -ExecutionPolicy Bypass -File tools\diagram-render\build.ps1
+powershell -ExecutionPolicy Bypass -File tools\package.ps1 -App office-writer -SkipConverter -NoInstall
+```
+
+Офлайн-проверка инструментов без LLM:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\e2e-office.ps1
+```
+
+Ограничения: только `.docx`/`.xlsx` (без legacy `.doc`/`.xls`), вложения Office в
+чате не поддерживаются — файл должен лежать в рабочей папке, пиксельного паритета
+с превью чата нет.
 
 ## Упаковка мини-приложения (`eco-pack`)
 

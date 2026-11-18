@@ -5,7 +5,7 @@
 
 Связанные документы:
 - `PLAN.md` — целевая архитектура, фазы, риски, открытые вопросы.
-- `dev-apps/doc-writer`, `dev-apps/doc-lookup`, `dev-apps/agent-repacker` — примеры подписанных пакетов.
+- `dev-apps/doc-writer`, `dev-apps/office-writer`, `dev-apps/doc-lookup`, `dev-apps/agent-repacker` — примеры подписанных пакетов.
 
 ## 1. Что это
 
@@ -70,10 +70,13 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 | `tools/pack` | `eco-pack`: офлайн-утилита автора мини-приложения (init/validate/build/sign/dev-install) |
 | `tools/build-pack.ps1` | сборка `eco-pack.exe` и Authenticode-подпись в `vendor/pack` |
 | `tools/docx-export` | Python-скрипт markdown → docx, PyInstaller-сборка, README |
+| `tools/office-kit` | Python-инструменты `read_office`/`docx`/`xlsx`, PyInstaller-сборка, README |
+| `tools/diagram-render` | офлайн-рендер Mermaid (`merman`) и графиков (`charts-rs`) в PNG/SVG |
 | `tools/stub-llm/server.js` | локальная заглушка OpenAI-совместимого API (порт 4098) |
 | `tools/e2e-docx.ps1` | e2e: агент создаёт markdown и конвертирует в `.docx` |
+| `tools/e2e-office.ps1` | офлайн e2e `office-writer`: чтение, docx/xlsx, chart/mermaid |
 | `tools/ui-smoke` | Playwright-прогон UI на встроенном browser-mock |
-| `dev-apps/*` | подписанные пакеты-примеры: `doc-writer`, `doc-lookup`, `agent-repacker` |
+| `dev-apps/*` | подписанные пакеты-примеры: `doc-writer`, `office-writer`, `doc-lookup`, `agent-repacker` |
 | `examples/file-notes` | исходники примера: навыки + работа с файлами |
 | `examples/skill-only` | готовый dev-пример: `file_scopes: workspace`, hashes и подпись |
 | `examples/skill-only-source` | только `AGENTS.md` + `SKILL.md` для проверки генерации манифеста |
@@ -231,6 +234,28 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 - Конвертер является частью мини-приложения, а не платформы. Платформа не ищет его
   по глобальным путям и не запускает свои экспорты.
 - Пересборка и подпись пакета — `tools/package.ps1` (см. §7).
+
+### Пакет `office-writer` (Word + Excel + схемы)
+- Два бинарника в одном подписанном пакете:
+  `bin/office-kit.exe` (`read_office`, `docx_export`, `xlsx_export`) и
+  `bin/diagram-render.exe` (`render_chart`, `render_mermaid`).
+- `read_office` разбирает только `.docx`/`.xlsx` (legacy `.doc`/`.xls` — отказ),
+  пишет `<output-stem>.md` и `<output-stem>.assets/`, формулы сохраняет текстом,
+  лист обрезает до 200×40 с пометкой.
+- `docx_export` понимает markdown-подмножество `doc-writer` плюс картинки
+  отдельной строкой; `xlsx_export` принимает markdown-таблицы или `workbook.json`
+  (листы, ширины, форматы, merged, формулы, нативные графики openpyxl, картинки).
+- Рендер офлайн, без браузера: Mermaid через `merman` (12.3, системные шрифты,
+  `layout-cytoscape` без EPL-ELK), графики через `charts-rs` (JSON, PNG/SVG).
+  Вход графика — тот же `chart`-блок, что в чате; поддерживаются bar/line/pie/
+  doughnut/radar/scatter, bar+line mix, area (`line`+`fill`), горизонтальные
+  столбцы (`indexAxis:"y"`), stack и вторая ось через `options.scales`.
+- Пиксельного паритета с превью чата нет: экспорт рендерит тот же исходник
+  нативными движками. Вложения Office в чате не поддержаны — файл должен лежать
+  в рабочей папке.
+- Сборка: `tools/office-kit/build.ps1`, `tools/diagram-render/build.ps1`;
+  `tools/package.ps1` теперь сам вызывает оба скрипта по `tools[].bin`.
+  Офлайн-проверка — `tools/e2e-office.ps1` (`-Agent` добавляет `--chat-async`).
 
 ### Дистрибутив и закрытый контур
 - `tools/vendor.ps1` собирает `vendor/engine` (`opencode.exe` + `models.json`),

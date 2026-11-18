@@ -43,6 +43,22 @@ if (-not $SkipConverter -and $hasConverter -and (Test-Path -LiteralPath $convert
     if ($LASTEXITCODE -ne 0) { throw "converter build failed" }
 }
 
+$hasOfficeKit = @($manifest.tools | Where-Object { $_ -and $_.bin -eq "bin/office-kit.exe" }).Count -gt 0
+$officeKitScript = Join-Path $repo "tools\office-kit\build.ps1"
+if (-not $SkipConverter -and $hasOfficeKit -and (Test-Path -LiteralPath $officeKitScript)) {
+    $officeKitArgs = @()
+    if ($Wheelhouse) { $officeKitArgs += @("-Wheelhouse", $Wheelhouse) }
+    & $officeKitScript @officeKitArgs
+    if ($LASTEXITCODE -ne 0) { throw "office-kit build failed" }
+}
+
+$hasDiagramRender = @($manifest.tools | Where-Object { $_ -and $_.bin -eq "bin/diagram-render.exe" }).Count -gt 0
+$diagramRenderScript = Join-Path $repo "tools\diagram-render\build.ps1"
+if (-not $SkipConverter -and $hasDiagramRender -and (Test-Path -LiteralPath $diagramRenderScript)) {
+    & $diagramRenderScript
+    if ($LASTEXITCODE -ne 0) { throw "diagram-render build failed" }
+}
+
 if (-not $SkipBuild) {
     if (-not (Test-Path -LiteralPath $signerExe)) {
         & cargo build --manifest-path (Join-Path $repo "tools\signer\Cargo.toml")

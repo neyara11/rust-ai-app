@@ -1,0 +1,28 @@
+[package]
+name = "diagram-render"
+version = "0.1.0"
+edition = "2021"
+description = "Offline Mermaid and chart renderer for the office-writer package"
+license = "UNLICENSED"
+publish = false
+
+[[bin]]
+name = "diagram-render"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+charts-rs = { version = "2", features = ["png"] }
+merman = { version = "0.10", default-features = false, features = [
+    "all-diagrams",
+    "png",
+    "layout-cytoscape",
+    "system-fonts",
+] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+opt-level = "s"

@@ -22,3 +22,10 @@ Thumbs.db
 /examples/trusted.pub
 /examples/dify-plugin-publishing/
 /dist
+tools/office-kit/.venv/
+tools/office-kit/build/
+tools/office-kit/dist/
+tools/office-kit/*.spec
+tools/diagram-render/target/
+__pycache__/
+*.pyc
