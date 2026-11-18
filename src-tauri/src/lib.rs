@@ -1137,6 +1137,61 @@ pub fn cli_system_prompt(app_id: Option<&String>) -> i32 {
     }
 }
 
+/// `--artifact-tool <app> <tool> <json>`: runs a platform tool through the same
+/// proxy path the agent uses (token check, allowlist, routing) and prints the
+/// result. Intended for verifying artifact_list/search/read without a chat.
+pub fn cli_artifact_tool(
+    app_id: Option<&String>,
+    tool: Option<&String>,
+    arguments: Option<&String>,
+) -> i32 {
+    let (Some(app_id), Some(tool)) = (app_id, tool) else {
+        eprintln!("usage: eco-platform --artifact-tool <app-id> <tool> <json>");
+        return 2;
+    };
+    let home = registry::home();
+    let result = (|| -> error::Result<()> {
+        let app = registry::verified_manifest(&home, app_id)?;
+        let root = artifacts::sessions_root(&home, app_id);
+        std::fs::create_dir_all(&root)?;
+        let policy = config::policy(&home);
+        let session_dir = match artifacts::list_dumps(&root).first() {
+            Some(dump) => std::path::Path::new(&dump.path)
+                .parent()
+                .map(|path| path.to_path_buf())
+                .ok_or_else(|| error::Error::Msg("invalid dump path".to_string()))?,
+            None => artifacts::open_session(&root, &policy)?,
+        };
+        let workspace = config::workspace(&home, app_id);
+        std::fs::create_dir_all(&workspace)?;
+        let token = identity::issue(&home, app_id, &app.version, 120, "cli")?;
+        std::env::set_var("ECO_AGENT_TOKEN", &token.token);
+        std::env::set_var("ECO_AGENT_USER", "cli");
+        let mut proxy = proxy::Proxy::new(app_id, &workspace, Some(&session_dir))?;
+        let raw = match arguments.map(String::as_str) {
+            Some("-") | None => {
+                use std::io::Read;
+                let mut buffer = String::new();
+                std::io::stdin().read_to_string(&mut buffer)?;
+                buffer
+            }
+            Some(raw) => raw.to_string(),
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(if raw.trim().is_empty() { "{}" } else { &raw })?;
+        let result = proxy.call_tool(tool, value)?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        Ok(())
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
 /// `--chat-sessions <app-id>`: lists chats and creates one new chat, proving
 /// that starting a new chat does not delete the old ones.
 pub fn cli_chat_sessions(app_id: Option<&String>) -> i32 {

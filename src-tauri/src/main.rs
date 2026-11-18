@@ -50,6 +50,11 @@ fn main() {
         Some("--system-prompt") => {
             std::process::exit(eco_platform_lib::cli_system_prompt(args.get(1)))
         }
+        Some("--artifact-tool") => std::process::exit(eco_platform_lib::cli_artifact_tool(
+            args.get(1),
+            args.get(2),
+            args.get(3),
+        )),
         Some("--mcp-probe") => std::process::exit(eco_platform_lib::cli_mcp_probe(args.get(1))),
         Some("--mcp-call") => std::process::exit(eco_platform_lib::cli_mcp_call(
             args.get(1),

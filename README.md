@@ -314,6 +314,10 @@ powershell -File tools\build-installer.ps1 -Trust   # сборка + dev-под�
 --chat-sessions <app>
 --system-prompt <app>       показать точный системный промпт движка,
                             включая сгенерированный список инструментов платформы
+--artifact-tool <app> <tool> [json|-]
+                            выполнить platform-инструмент тем же путём, что и агент
+                            (`artifact_list`, `artifact_search`, `artifact_read`);
+                            `-` читает JSON-аргументы из stdin
 ```
 
 Пример сквозной проверки:

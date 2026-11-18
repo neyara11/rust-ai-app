@@ -705,6 +705,12 @@ impl Proxy {
         Ok(result)
     }
 
+    /// Diagnostic entry point: runs one tool through the same permission,
+    /// allowlist and routing path the engine uses, without MCP framing.
+    pub fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value> {
+        self.call(name, arguments).map(|(value, _, _)| value)
+    }
+
     /// Read-only access to the app's artifact dumps and saved full tool output.
     fn artifact_call(&self, name: &str, args: &Value) -> Result<Value> {
         let Some(current) = &self.artifact_dir else {
