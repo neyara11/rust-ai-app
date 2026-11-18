@@ -230,6 +230,24 @@ fn insert_tool(map: &mut BTreeMap<String, ToolInfo>, info: ToolInfo) {
 pub fn tool_map(app: &Manifest) -> BTreeMap<String, ToolInfo> {
     let mut map = BTreeMap::new();
 
+    for (name, stream) in [
+        ("artifact_list", "read"),
+        ("artifact_search", "read"),
+        ("artifact_read", "read"),
+    ] {
+        insert_tool(
+            &mut map,
+            ToolInfo {
+                action: format!("platform_{name}"),
+                tool: name.to_string(),
+                stream: stream.to_string(),
+                package_exec: false,
+                bin: None,
+                bin_sha256: None,
+            },
+        );
+    }
+
     if app
         .capabilities
         .file_scopes

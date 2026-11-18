@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DUMP_FILE: &str = "dumps.ndjson";
+/// Full stdout/stderr of oversized tool calls lives next to the NDJSON dump.
+pub const TOOL_OUTPUT_DIR: &str = "tool-output";
+pub const MAX_READ_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
@@ -76,6 +79,44 @@ pub fn now_secs() -> u64 {
 
 pub fn sessions_root(home: &Path, app_id: &str) -> PathBuf {
     home.join("apps").join(app_id).join("sessions")
+}
+
+/// Validates a session directory name (`s<timestamp>` style) and returns its
+/// path under `root`.
+pub fn session_dir(root: &Path, session: &str) -> Result<PathBuf> {
+    let name = session.trim();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains(['/', '\\'])
+        || name.chars().any(char::is_control)
+    {
+        return msg("invalid artifact session");
+    }
+    Ok(root.join(name))
+}
+
+/// Reads a byte range from a dump or a saved tool-output file. Line boundaries
+/// are not required: the caller gets `next_offset` and can continue from there.
+pub fn read_range(path: &Path, offset: u64, limit: usize) -> Result<serde_json::Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    let limit = limit.clamp(1, MAX_READ_BYTES);
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    if offset > size {
+        return msg(format!("offset {offset} is beyond the file size {size}"));
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = Vec::new();
+    file.take(limit as u64).read_to_end(&mut bytes)?;
+    let next = offset + bytes.len() as u64;
+    Ok(serde_json::json!({
+        "offset": offset,
+        "next_offset": next,
+        "size": size,
+        "eof": next >= size,
+        "text": String::from_utf8_lossy(&bytes),
+    }))
 }
 
 fn dir_stats(dir: &Path) -> Result<(u64, usize)> {
@@ -408,5 +449,28 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn ranges_read_in_bounded_chunks() {
+        let dir = std::env::temp_dir().join(format!("eco-range-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tool-output.txt");
+        fs::write(&file, "0123456789").unwrap();
+
+        let first = read_range(&file, 0, 4).unwrap();
+        assert_eq!(first["text"], "0123");
+        assert_eq!(first["next_offset"], 4);
+        assert_eq!(first["eof"], false);
+
+        let rest = read_range(&file, 4, 100).unwrap();
+        assert_eq!(rest["text"], "456789");
+        assert_eq!(rest["eof"], true);
+
+        assert!(read_range(&file, 20, 4).is_err());
+        assert!(session_dir(&dir, "../x").is_err());
+        assert!(session_dir(&dir, "").is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

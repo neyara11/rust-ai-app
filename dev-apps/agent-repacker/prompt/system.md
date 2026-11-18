@@ -60,6 +60,10 @@
    `--input` и `--output`. `io: "json"` для конвертера — ошибка, exe упадёт с
    `usage: ... --input --output`. Режим определяй по `--help`/`argparse`, а не
    по догадке; для длинных операций укажи `timeout_secs` (до 7200).
+   Если инструмент может вернуть больше ~64 КиБ, добавь в `parameters`
+   `limit`/`offset`/`max`, а в промпт агента — правило: при `truncated` в
+   ответе дочитать полный вывод через `platform_artifact_search` /
+   `platform_artifact_read` (`stdout_file`, `offset`, `next_offset`).
 6. MCP: сервер и его инструменты объявляются на двух уровнях.
    - Сервер — только в `connections`: `{"id": "<id>", "type": "http-mcp"}`.
      Сам сервер в `tools[]` не добавляй.

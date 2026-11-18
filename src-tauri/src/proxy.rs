@@ -32,6 +32,10 @@ const MAX_PACKAGE_TOOL_TIMEOUT_SECS: u64 = 7200;
 const DUMP_MIN_BYTES: usize = 8 * 1024;
 
 const FILE_TOOLS: &[&str] = &["list_files", "read_file", "write_file", "append_file"];
+/// Platform-owned, read-only access to the app's own artifact dumps, so the
+/// agent can read a truncated tool result instead of asking the user to grep
+/// the Artifacts panel by hand.
+const ARTIFACT_TOOLS: &[&str] = &["artifact_list", "artifact_search", "artifact_read"];
 
 const INSTRUCTIONS: &str = "Р’СЃРµ РёРЅСЃС‚СЂСѓРјРµРЅС‚С‹ РїСЂРѕС…РѕРґСЏС‚ С‡РµСЂРµР· С€Р»СЋР· РїР»Р°С‚С„РѕСЂРјС‹: РІРЅРµ allow-list \
 РїСЂРёР»РѕР¶РµРЅРёСЏ РІС‹Р·РѕРІ РЅРµРІРѕР·РјРѕР¶РµРЅ. Р¤Р°Р№Р»РѕРІС‹Рµ РёРЅСЃС‚СЂСѓРјРµРЅС‚С‹ СЂР°Р±РѕС‚Р°СЋС‚ С‚РѕР»СЊРєРѕ РІ СЂР°Р±РѕС‡РµР№ РїР°РїРєРµ \
@@ -135,6 +139,11 @@ pub fn gateway_tool_names(app: &Manifest, package_dir: &Path) -> Vec<String> {
         }
     }
 
+    // Dumps are the app's own tool output: available regardless of file scope.
+    for name in ARTIFACT_TOOLS {
+        out.push((*name).to_string());
+    }
+
     for tool in &app.tools {
         if tool.bin.is_some() {
             out.push(normalize_tool_name(&tool.tool));
@@ -149,6 +158,7 @@ pub fn gateway_tool_names(app: &Manifest, package_dir: &Path) -> Vec<String> {
 #[derive(Clone)]
 enum Route {
     Files,
+    Artifacts,
     /// Platform-owned skill loader: reads `skills/<name>/SKILL.md` from the
     /// signed package. Exposed only when the package ships skills.
     Skill,
@@ -290,6 +300,13 @@ impl Proxy {
             }
             tools.extend(file_specs());
         }
+
+        // Artifact dumps are always available: they hold this app's own tool
+        // output, including results too large to inline.
+        for name in ARTIFACT_TOOLS {
+            self.routes.insert((*name).to_string(), Route::Artifacts);
+        }
+        tools.extend(artifact_specs());
 
         // App-provided executables (the package owns them).
         for tool in self.app.tools.clone() {
@@ -466,6 +483,7 @@ impl Proxy {
         io: &str,
         secrets: &std::collections::BTreeMap<String, String>,
         timeout_secs: Option<u64>,
+        request_id: &str,
         arguments: &Value,
     ) -> Result<Value> {
         let files_mode = io != "json";
@@ -574,24 +592,61 @@ impl Proxy {
             .join(&self.app.app_id)
             .join("engine")
             .join("tool.pid");
+        let spool_dir = self
+            .artifact_dir
+            .as_ref()
+            .map(|dir| dir.join(crate::artifacts::TOOL_OUTPUT_DIR));
         let run = run_with_limits(
             &mut command,
             timeout,
             MAX_PACKAGE_OUTPUT,
             stdin_payload.as_deref(),
             Some(&cancel_path),
+            spool_dir
+                .as_deref()
+                .map(|dir| (dir, request_id)),
         )?;
+        let spill = self.record_spill(tool, request_id, &run);
         if run.timed_out {
-            return msg(format!(
+            let mut message = format!(
                 "package tool {tool} timed out after {}s; process killed",
                 timeout.as_secs()
-            ));
+            );
+            if let Some((stdout, _)) = &spill {
+                message.push_str(&format!(
+                    ". Output so far: artifact_read file={stdout}"
+                ));
+            }
+            return msg(message);
         }
         if run.overflowed {
-            return msg(format!(
-                "package tool {tool} output exceeded {} KiB per stream; process killed",
-                MAX_PACKAGE_OUTPUT / 1024
-            ));
+            let spill_hint = spill
+                .as_ref()
+                .map(|(stdout, _)| format!(" Full output: artifact_read file={stdout}"))
+                .unwrap_or_default();
+            if files_mode {
+                // A killed converter may have produced a partial file; never
+                // report success for it.
+                return msg(format!(
+                    "package tool {tool} output exceeded {} KiB per stream; process killed.{spill_hint}",
+                    MAX_PACKAGE_OUTPUT / 1024
+                ));
+            }
+            let preview = String::from_utf8_lossy(&run.stdout)
+                .chars()
+                .take(2000)
+                .collect::<String>();
+            let mut result = json!({
+                "ok": true,
+                "truncated": true,
+                "preview": preview,
+                "hint": "Вывод инструмента усечён. Полный текст доступен через artifact_read (file и offset), поиск — artifact_search."
+            });
+            if let Some((stdout, stderr)) = &spill {
+                result["stdout_file"] = json!(stdout);
+                result["stderr_file"] = json!(stderr);
+            }
+            return Ok(result);
         }
         if !run.status.success() {
             let stderr = String::from_utf8_lossy(&run.stderr);
@@ -607,10 +662,16 @@ impl Proxy {
                 .code()
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "?".to_string());
+            let tail = spill
+                .as_ref()
+                .map(|(stdout, _)| format!(" (full output: artifact_read file={stdout})"))
+                .unwrap_or_default();
             if snippet.is_empty() {
-                return msg(format!("package tool {tool} failed (exit {code})"));
+                return msg(format!("package tool {tool} failed (exit {code}){tail}"));
             }
-            return msg(format!("package tool {tool} failed (exit {code}): {snippet}"));
+            return msg(format!(
+                "package tool {tool} failed (exit {code}): {snippet}{tail}"
+            ));
         }
 
         if !files_mode {
@@ -631,6 +692,90 @@ impl Proxy {
             "output": output.display().to_string(),
             "bytes": fs::metadata(&output).map(|m| m.len()).unwrap_or(0)
         }))
+    }
+
+    /// Read-only access to the app's artifact dumps and saved full tool output.
+    fn artifact_call(&self, name: &str, args: &Value) -> Result<Value> {
+        let Some(current) = &self.artifact_dir else {
+            return msg("artifact dumps are not enabled for this app");
+        };
+        let root = current
+            .parent()
+            .ok_or_else(|| Error::Msg("invalid artifact session path".to_string()))?;
+        let current_session = current
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        match name {
+            "artifact_list" => {
+                let dumps: Vec<Value> = crate::artifacts::list_dumps(root)
+                    .into_iter()
+                    .map(|dump| {
+                        json!({
+                            "session": dump.session,
+                            "bytes": dump.bytes,
+                            "modified": dump.modified
+                        })
+                    })
+                    .collect();
+                Ok(json!({ "dumps": dumps, "current_session": current_session }))
+            }
+            "artifact_search" => {
+                let query = text_arg(args, "query")?;
+                let session = args.get("session").and_then(Value::as_str);
+                if let Some(session) = session {
+                    crate::artifacts::session_dir(root, session)?;
+                }
+                let limit = args
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(20)
+                    .clamp(1, 50) as usize;
+                let hits: Vec<Value> = crate::artifacts::grep(root, query, session, limit)?
+                    .into_iter()
+                    .map(|hit| {
+                        json!({
+                            "session": hit.session,
+                            "line": hit.line,
+                            "text": hit.text
+                        })
+                    })
+                    .collect();
+                Ok(json!({ "query": query, "hits": hits }))
+            }
+            "artifact_read" => {
+                let session = args
+                    .get("session")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&current_session);
+                let session_path = crate::artifacts::session_dir(root, session)?;
+                let file = args
+                    .get("file")
+                    .and_then(Value::as_str)
+                    .unwrap_or(crate::artifacts::DUMP_FILE);
+                if !artifact_file_ok(file) {
+                    return msg("file must be dumps.ndjson or tool-output/<name>");
+                }
+                let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
+                let limit = args
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(32 * 1024)
+                    .clamp(1, crate::artifacts::MAX_READ_BYTES as u64)
+                    as usize;
+                let path = session_path.join(file);
+                if !path.is_file() {
+                    return msg(format!("artifact file not found: {file}"));
+                }
+                let mut value =
+                    crate::artifacts::read_range(&path, offset, limit)?;
+                value["session"] = json!(session);
+                value["file"] = json!(file);
+                Ok(value)
+            }
+            other => msg(format!("unknown artifact tool {other}")),
+        }
     }
 
     /// Returns the MCP `tools/call` result object and the audit metadata.
@@ -703,6 +848,7 @@ impl Proxy {
         let started = Instant::now();
         let raw = match &route {
             Route::Files => file_call(&self.workspace, name, &arguments),
+            Route::Artifacts => self.artifact_call(name, &arguments),
             Route::Skill => skill_call(&self.package_dir, &arguments),
             Route::Remote { server, tool } => {
                 self.remote_call(server, tool, arguments.clone(), &request_id)
@@ -714,7 +860,7 @@ impl Proxy {
                 io,
                 secrets,
                 timeout_secs,
-            } => self.package_call(tool, bin, argv, io, secrets, *timeout_secs, &arguments),
+            } => self.package_call(tool, bin, argv, io, secrets, *timeout_secs, &request_id, &arguments),
         };
 
         let (value, bytes, truncated) = match raw {
@@ -750,6 +896,51 @@ impl Proxy {
 
     /// Keeps large tool results for later grep/query. Quota overflow is not a
     /// tool failure: the model already has the capped response.
+    /// Registers spooled stdout/stderr in the session dump and returns their
+    /// names relative to the session directory, as accepted by `artifact_read`.
+    fn record_spill(
+        &self,
+        tool: &str,
+        request_id: &str,
+        run: &BoundedRun,
+    ) -> Option<(String, String)> {
+        let dir = self.artifact_dir.as_ref()?;
+        let stdout_path = run.stdout_path.as_ref()?;
+        let stderr_path = run.stderr_path.as_ref()?;
+        let rel = |path: &PathBuf| {
+            format!(
+                "{}/{}",
+                crate::artifacts::TOOL_OUTPUT_DIR,
+                path.file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            )
+        };
+        let stdout_file = rel(stdout_path);
+        let stderr_file = rel(stderr_path);
+        let record = json!({
+            "ts": crate::artifacts::now_secs(),
+            "app_id": self.app.app_id,
+            "app_version": self.app.version,
+            "request_id": request_id,
+            "source": "package",
+            "tool": tool,
+            "truncated": run.overflowed,
+            "timed_out": run.timed_out,
+            "exit": run.status.code(),
+            "stdout_file": stdout_file,
+            "stderr_file": stderr_file,
+            "stdout_bytes": fs::metadata(stdout_path).map(|m| m.len()).unwrap_or(0),
+            "stderr_bytes": fs::metadata(stderr_path).map(|m| m.len()).unwrap_or(0),
+            "preview": String::from_utf8_lossy(&run.stdout).chars().take(500).collect::<String>()
+        });
+        let policy = crate::config::policy(&self.home);
+        if let Err(e) = crate::artifacts::append_dump(dir, &record, &policy) {
+            eprintln!("eco-platform mcp proxy: cannot write spill record: {e}");
+        }
+        Some((stdout_file, stderr_file))
+    }
+
     fn dump_result(
         &self,
         route: &Route,
@@ -768,6 +959,7 @@ impl Proxy {
         let (source, tool) = match route {
             Route::Files => ("files".to_string(), name.to_string()),
             Route::Skill => ("skills".to_string(), name.to_string()),
+            Route::Artifacts => ("artifacts".to_string(), name.to_string()),
             Route::Package { tool, .. } => ("package".to_string(), tool.clone()),
             Route::Remote { server, tool } => (server.clone(), tool.clone()),
         };
@@ -807,6 +999,7 @@ impl Proxy {
         let (server, tool) = match route {
             Route::Files => ("files".to_string(), name.to_string()),
             Route::Skill => ("skills".to_string(), name.to_string()),
+            Route::Artifacts => ("artifacts".to_string(), name.to_string()),
             Route::Package { tool, .. } => ("package".to_string(), tool.clone()),
             Route::Remote { server, tool } => (server.clone(), tool.clone()),
         };
@@ -840,6 +1033,10 @@ struct BoundedRun {
     stderr: Vec<u8>,
     timed_out: bool,
     overflowed: bool,
+    /// Kept only when the full output is worth reading later (overflow or a
+    /// failed/timed-out run): the caller exposes them through artifact_read.
+    stdout_path: Option<PathBuf>,
+    stderr_path: Option<PathBuf>,
 }
 
 fn package_timeout() -> Duration {
@@ -922,13 +1119,38 @@ impl Drop for ToolPidFile {
     }
 }
 
+fn read_capped_path(path: &Path, cap: usize) -> (Vec<u8>, u64) {
+    let Ok(file) = fs::File::open(path) else {
+        return (Vec::new(), 0);
+    };
+    let size = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    let mut bytes = Vec::new();
+    let _ = file.take(cap as u64).read_to_end(&mut bytes);
+    (bytes, size)
+}
+
 fn run_with_limits(
     command: &mut Command,
     timeout: Duration,
     cap: usize,
     input: Option<&[u8]>,
     cancel_path: Option<&Path>,
+    spool: Option<(&Path, &str)>,
 ) -> Result<BoundedRun> {
+    // Oversized output is spooled to the artifact session instead of being
+    // discarded: the model can then read the full text through artifact_read.
+    let spool_files = match spool {
+        Some((dir, request_id)) => {
+            fs::create_dir_all(dir)?;
+            let stdout_path = dir.join(format!("{request_id}-stdout.txt"));
+            let stderr_path = dir.join(format!("{request_id}-stderr.txt"));
+            command.stdout(Stdio::from(fs::File::create(&stdout_path)?));
+            command.stderr(Stdio::from(fs::File::create(&stderr_path)?));
+            Some((stdout_path, stderr_path))
+        }
+        None => None,
+    };
+
     let mut child = command
         .spawn()
         .map_err(|e| Error::Msg(format!("cannot start package tool: {e}")))?;
@@ -959,11 +1181,17 @@ fn run_with_limits(
 
     let timeout = timeout.max(Duration::from_millis(100));
     let deadline = Instant::now() + timeout;
-    let (status, timed_out, overflowed) = loop {
+    let (status, timed_out, mut overflowed) = loop {
         match child.try_wait()? {
-            Some(status) => break (status, false, false),
+            Some(status) => break (status, false, overflow.load(Ordering::Relaxed)),
             None => {
-                if overflow.load(Ordering::Relaxed) {
+                let spooled_too_large = spool_files.as_ref().map_or(false, |(out, err)| {
+                    fs::metadata(out).map(|m| m.len() > cap as u64).unwrap_or(false)
+                        || fs::metadata(err)
+                            .map(|m| m.len() > cap as u64)
+                            .unwrap_or(false)
+                });
+                if overflow.load(Ordering::Relaxed) || spooled_too_large {
                     kill_tree(&mut child);
                     let status = child.wait()?;
                     break (status, false, true);
@@ -982,18 +1210,37 @@ fn run_with_limits(
         let _ = handle.join();
     }
 
-    let (stdout, _bytes_out) = stdout_handle
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default();
-    let (stderr, _bytes_err) = stderr_handle
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default();
+    let (stdout, stderr, stdout_path, stderr_path) = if let Some((out_path, err_path)) = spool_files
+    {
+        let (stdout, out_size) = read_capped_path(&out_path, cap);
+        let (stderr, err_size) = read_capped_path(&err_path, cap);
+        overflowed = overflowed || out_size > cap as u64 || err_size > cap as u64;
+        let keep = overflowed || timed_out || !status.success();
+        if keep {
+            (stdout, stderr, Some(out_path), Some(err_path))
+        } else {
+            let _ = fs::remove_file(&out_path);
+            let _ = fs::remove_file(&err_path);
+            (stdout, stderr, None, None)
+        }
+    } else {
+        let (stdout, _) = stdout_handle
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
+        let (stderr, _) = stderr_handle
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
+        (stdout, stderr, None, None)
+    };
+
     Ok(BoundedRun {
         status,
         stdout,
         stderr,
         timed_out,
         overflowed,
+        stdout_path,
+        stderr_path,
     })
 }
 
@@ -1047,6 +1294,48 @@ fn file_specs() -> Vec<Value> {
                     "content": { "type": "string" }
                 },
                 "required": ["path", "content"],
+                "additionalProperties": false
+            }
+        }),
+    ]
+}
+
+fn artifact_specs() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "artifact_list",
+            "description": "Список артефакт-дампов сессий приложения (NDJSON с крупными результатами инструментов и полным выводом).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "artifact_search",
+            "description": "Поиск по содержимому дампов артефактов (без учёта регистра). Возвращает сессию, файл, строку и фрагмент. Используйте, когда результат инструмента был усечён или нужно найти прошлый вывод.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "session": { "type": "string", "description": "Ограничить одной сессией из artifact_list" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "artifact_read",
+            "description": "Чтение дампа или сохранённого полного вывода инструмента по диапазону байт. Возвращает text, next_offset, size, eof — продолжайте с next_offset, пока eof не станет true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string", "description": "Сессия из artifact_list; по умолчанию текущая" },
+                    "file": { "type": "string", "description": "dumps.ndjson или tool-output/<имя>.txt; по умолчанию dumps.ndjson" },
+                    "offset": { "type": "integer", "minimum": 0 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 131072 }
+                },
                 "additionalProperties": false
             }
         }),
@@ -1144,6 +1433,22 @@ fn resolve_path(workspace: &Path, raw: &str, for_write: bool) -> Result<PathBuf>
         }
         Ok(canon)
     }
+}
+
+/// Only the dump itself and flat files under `tool-output/` are readable: a
+/// model must not be able to walk the engine profile through an artifact path.
+fn artifact_file_ok(file: &str) -> bool {
+    if file == crate::artifacts::DUMP_FILE {
+        return true;
+    }
+    let Some(rest) = file.strip_prefix("tool-output/") else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.contains(['/', '\\'])
+        && rest
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "._-".contains(ch))
 }
 
 fn inside(root: &Path, path: &Path) -> bool {
@@ -1595,11 +1900,15 @@ mod tests {
         assert!(!names.contains(&"ctx_dump".to_string()));
         assert!(names.contains(&"read_file".to_string()));
         assert!(names.contains(&"write_file".to_string()));
+        assert!(names.contains(&"artifact_read".to_string()));
+        assert!(names.contains(&"artifact_search".to_string()));
 
         let mut app = test_manifest();
         app.capabilities.file_scopes.clear();
         let names = gateway_tool_names(&app, &empty);
         assert!(!names.contains(&"read_file".to_string()));
+        // Dumps are the app's own output, so they stay available without files.
+        assert!(names.contains(&"artifact_read".to_string()));
         let _ = fs::remove_dir_all(&empty);
     }
 
@@ -1718,6 +2027,7 @@ mod tests {
             4096,
             Some(b"{\"query\":\"hello\"}\n"),
             None,
+            None,
         )
         .unwrap();
         let stdout = String::from_utf8_lossy(&run.stdout);
@@ -1765,11 +2075,41 @@ mod tests {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let run = run_with_limits(&mut command, Duration::from_secs(5), 1024, None, Some(&marker))
+        let run = run_with_limits(&mut command, Duration::from_secs(5), 1024, None, Some(&marker), None)
             .unwrap();
         assert!(run.status.success());
         assert!(!marker.exists(), "cancel marker must not outlive the tool call");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_output_is_spooled_for_later_reading() {
+        let dir = std::env::temp_dir().join(format!("eco-spool-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut command = Command::new("cmd");
+        command
+            .args([
+                "/C",
+                "for /L %i in (1,1,4000) do @echo 0123456789012345678901234567890123456789",
+            ])
+            .stdin(Stdio::null());
+        let run = run_with_limits(
+            &mut command,
+            Duration::from_secs(20),
+            1024,
+            None,
+            None,
+            Some((&dir, "req-1")),
+        )
+        .unwrap();
+        assert!(run.overflowed, "output above the cap must be reported");
+        let stdout_path = run.stdout_path.expect("spooled stdout must be kept");
+        let size = fs::metadata(&stdout_path).unwrap().len();
+        assert!(size > 1024, "full output must stay on disk: {size}");
+        let value = crate::artifacts::read_range(&stdout_path, 0, 64).unwrap();
+        assert_eq!(value["text"].as_str().unwrap().len(), 64);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1778,7 +2118,7 @@ mod tests {
         ok.args(["/C", "echo", "hi"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let run = run_with_limits(&mut ok, Duration::from_secs(5), 1024, None, None).unwrap();
+        let run = run_with_limits(&mut ok, Duration::from_secs(5), 1024, None, None, None).unwrap();
         assert!(run.status.success());
         assert!(String::from_utf8_lossy(&run.stdout).contains("hi"));
 
@@ -1786,7 +2126,7 @@ mod tests {
         slow.args(["/C", "ping -n 20 127.0.0.1 >nul"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let run = run_with_limits(&mut slow, Duration::from_millis(200), 1024, None, None).unwrap();
+        let run = run_with_limits(&mut slow, Duration::from_millis(200), 1024, None, None, None).unwrap();
         assert!(run.timed_out);
     }
 }
