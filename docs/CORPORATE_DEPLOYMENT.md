@@ -430,7 +430,7 @@ deploy/
       "url": "\\\\dfs\\EcoAIOps\\allowlist\\current.json",
       "refresh_secs": 300
     },
-    "min_platform_version": "0.4.1"
+    "min_platform_version": "0.4.2"
   },
   "roles": {
     "author": {

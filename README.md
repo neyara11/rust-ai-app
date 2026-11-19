@@ -298,7 +298,7 @@ powershell -File tools\build-installer.ps1 -Trust   # сборка + dev-под�
 - Для полностью офлайн-сборки нужны кеши Tauri
   `%LOCALAPPDATA%\tauri\{NSIS,WixTools314,x64}` (в `x64` — bootstrapper WebView2);
   вместо `offlineInstaller` можно указать `fixedRuntime` с папкой рантайма.
-- Результат: NSIS-установщик `ECO AIOps_0.4.1_x64-setup.exe` ~280 МБ в
+- Результат: NSIS-установщик `ECO AIOps_0.4.2_x64-setup.exe` ~280 МБ в
   `src-tauri/target/release/bundle/nsis/`. `bundle.targets` — `["nsis"]`;
   MSI в релиз не собирается.
 - Подпись Authenticode для dev-сборки:
@@ -404,6 +404,8 @@ cd tools\ui-smoke; npm install; npm test                        # mock UI
 | `tools/e2e-docx.ps1` | e2e: реальный агент создаёт markdown и конвертирует в `.docx` |
 | `tools/ui-smoke/` | Playwright-прогон UI на встроенном browser-mock |
 | `HANDOFF.md` | состояние, ограничения и backlog для следующего агента |
+| `docs/ROADMAP_CURRENT.md` | актуальный roadmap: что сделано, что осталось, приоритеты |
+| `docs/ROADMAP.md` | исходный план (исторический) |
 | `docs/APP_LIFECYCLE.md` | как разрабатывать, тестировать, подписывать и тиражировать мини-приложения |
 | `docs/LOCAL_AND_CORPORATE.md` | режимы, seal, группа скилов и подготовка пакета |
 | `docs/CORPORATE_DEPLOYMENT.md` | corporate-установщик, deployment-конфиг, AD-роли, репозиторий и allowlist |
