@@ -406,6 +406,7 @@ cd tools\ui-smoke; npm install; npm test                        # mock UI
 | `HANDOFF.md` | состояние, ограничения и backlog для следующего агента |
 | `docs/APP_LIFECYCLE.md` | как разрабатывать, тестировать, подписывать и тиражировать мини-приложения |
 | `docs/LOCAL_AND_CORPORATE.md` | режимы, seal, группа скилов и подготовка пакета |
+| `docs/CORPORATE_DEPLOYMENT.md` | corporate-установщик, deployment-конфиг, AD-роли, репозиторий и allowlist |
 | `docs/REPACK_AGENT.md` | переупаковка внешнего агента в пакет |
 | `docs/MINIAPP_AUTHORING.md` | требования к исходникам и сборке мини-приложения |
 | `PLAN.md` | целевая архитектура и фазы |
