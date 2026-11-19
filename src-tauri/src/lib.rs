@@ -14,6 +14,7 @@ pub mod registry;
 pub mod seal;
 pub mod secrets;
 pub mod state;
+pub mod support;
 pub mod svg_icon;
 pub mod workspace;
 
@@ -33,13 +34,51 @@ fn scrub_launcher_env() {
 
 pub fn run() {
     scrub_launcher_env();
+    let context = tauri::generate_context!();
     let state = AppState::new();
+    // The WebView2 loader error appears before the app can render; check it
+    // first so the user gets instructions instead of the raw loader dialog.
+    // A fixed-runtime bundle is valid even though Tauri exports
+    // WEBVIEW2_BROWSER_EXECUTABLE_FOLDER only later, in `App::build`.
+    #[cfg(windows)]
+    let fixed_runtime_available = {
+        use tauri::utils::config::WebviewInstallMode;
+        match &context.config().bundle.windows.webview_install_mode {
+            WebviewInstallMode::FixedRuntime { path } => std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|dir| dir.join(path)))
+                .map(|dir| dir.join("msedgewebview2.exe").is_file())
+                .unwrap_or(false),
+            _ => false,
+        }
+    };
+    #[cfg(not(windows))]
+    let fixed_runtime_available = false;
+    if !fixed_runtime_available && !support::webview2_available() {
+        support::show_webview2_error();
+        std::process::exit(1);
+    }
+    // Two GUI instances sharing a profile race over `engine.pid` and the
+    // engine home; the second one would try to kill the first one's engine.
+    if !support::single_instance(&state.home) {
+        support::show_error(
+            "ECO AIOps",
+            "ECO AIOps уже запущен для этого профиля.\n\n\
+             Закройте существующее окно и запустите приложение снова.",
+        );
+        std::process::exit(0);
+    }
     // Restore runtime state parked by an interrupted install/rollback.
     registry::recover_runtime(&state.home);
     // Reap engines left by a previous crash before the window is interactive:
     // in a background thread `kill_leftover` could kill a freshly started one.
     for app_id in registry::installed_ids(&state.home) {
-        let _ = engine::kill_leftover(&state.home, &app_id);
+        if let Err(error) = engine::kill_leftover(&state.home, &app_id) {
+            support::log_line(
+                &state.home,
+                &format!("startup: cannot stop leftover engine for {app_id}: {error}"),
+            );
+        }
     }
 
     tauri::Builder::default()
@@ -127,7 +166,7 @@ pub fn run() {
             commands::permission_grants,
             commands::permission_revoke_grant,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("failed to run ECO AIOps platform");
 }
 

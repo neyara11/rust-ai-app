@@ -581,10 +581,20 @@ pub struct ChatInfo {
     pub workdir: String,
 }
 
+/// Owned job handle. Stored as `isize` so `Engine` stays `Send` inside the
+/// shared engine map (raw `HANDLE` pointers are not `Send`).
+#[cfg(windows)]
+type JobHandle = isize;
+#[cfg(not(windows))]
+type JobHandle = ();
+
 /// A running opencode sidecar for one application. One engine per app, started
 /// on demand and stopped when the app is closed.
 pub struct Engine {
     child: Child,
+    /// Job object with `KILL_ON_JOB_CLOSE`: closing it tears down the engine and
+    /// its tool/proxy children without a pid lookup.
+    job: Option<JobHandle>,
     base: String,
     auth: String,
     pub provider_id: String,
@@ -632,6 +642,7 @@ struct ChildGuard {
     child: Option<Child>,
     pid_file: PathBuf,
     pid: u32,
+    job: Option<JobHandle>,
 }
 
 impl Drop for ChildGuard {
@@ -639,6 +650,9 @@ impl Drop for ChildGuard {
         let Some(mut child) = self.child.take() else {
             return;
         };
+        // Closing the job kills the engine and the children it spawned, without
+        // a pid lookup (and without a pid-reuse race).
+        close_job(self.job.take());
         let _ = child.kill();
         let _ = child.wait();
         if recorded_pid(&self.pid_file) == Some(self.pid) {
@@ -649,11 +663,13 @@ impl Drop for ChildGuard {
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        let pid = self.child.id();
+        close_job(self.job.take());
         let _ = self.child.kill();
         let _ = self.child.wait();
         // Only remove the runtime file if it still belongs to this engine: a
         // newer engine (for example started by the CLI) may have replaced it.
-        if recorded_pid(&self.pid_file) == Some(self.child.id()) {
+        if recorded_pid(&self.pid_file) == Some(pid) {
             let _ = std::fs::remove_file(&self.pid_file);
         }
         crate::artifacts::close_session(&self.artifact_dir);
@@ -1021,6 +1037,39 @@ fn write_config(engine_home: &Path, config: &Value) -> Result<()> {
     Ok(())
 }
 
+/// opencode unconditionally installs `@opencode-ai/plugin` into every config
+/// directory at startup (`Config.loadInstanceState` → `Npm.install`). Offline
+/// that background job fails with ENOTFOUND and is logged on every start.
+/// `Npm.install` is a no-op when `node_modules` exists and the lockfile already
+/// lists every dependency, so seed those files. The platform config declares no
+/// plugins, so nothing is imported from the package.
+fn seed_plugin_dependency(engine_home: &Path, version: Option<&str>) -> Result<()> {
+    let dir = engine_home.join("config").join("opencode");
+    std::fs::create_dir_all(dir.join("node_modules"))?;
+    let version = version.unwrap_or("0.0.0");
+    let package = json!({
+        "private": true,
+        "dependencies": { "@opencode-ai/plugin": version }
+    });
+    std::fs::write(
+        dir.join("package.json"),
+        serde_json::to_vec_pretty(&package)?,
+    )?;
+    let lock = json!({
+        "name": "opencode",
+        "lockfileVersion": 3,
+        "requires": true,
+        "packages": {
+            "": { "dependencies": { "@opencode-ai/plugin": version } }
+        }
+    });
+    std::fs::write(
+        dir.join("package-lock.json"),
+        serde_json::to_vec_pretty(&lock)?,
+    )?;
+    Ok(())
+}
+
 fn wait_ready(agent: &ureq::Agent, base: &str, auth: &str, timeout: Duration) -> Result<()> {
     let started = Instant::now();
     loop {
@@ -1240,9 +1289,9 @@ enum ProcessState {
 #[cfg(windows)]
 fn process_state(pid: u32) -> ProcessState {
     use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, STILL_ACTIVE};
     use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
@@ -1255,6 +1304,17 @@ fn process_state(pid: u32) -> ProcessState {
             } else {
                 ProcessState::Unknown
             };
+        }
+
+        // A process that has exited can still be opened by pid while another
+        // handle keeps its process object alive. `taskkill` reports such a pid
+        // as gone, so treat it as Missing here instead of "engine running".
+        let mut exit_code = 0u32;
+        if GetExitCodeProcess(handle, &mut exit_code) == 0
+            || exit_code != STILL_ACTIVE as u32
+        {
+            CloseHandle(handle);
+            return ProcessState::Missing;
         }
 
         let mut buf = vec![0u16; 32 * 1024];
@@ -1327,7 +1387,7 @@ fn runtime_info(pid: u32, image: &Path) -> RuntimeInfo {
 /// orphan `opencode serve`, which locks the app's engine home and makes the
 /// next start fail with "engine did not become ready in time".
 #[cfg(windows)]
-fn keep_engine_with_platform(child: &std::process::Child) {
+fn keep_engine_with_platform(child: &std::process::Child) -> Option<JobHandle> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
@@ -1338,7 +1398,7 @@ fn keep_engine_with_platform(child: &std::process::Child) {
     unsafe {
         let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if job.is_null() {
-            return;
+            return None;
         }
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -1350,21 +1410,36 @@ fn keep_engine_with_platform(child: &std::process::Child) {
         );
         if configured == 0 {
             let _ = CloseHandle(job);
-            return;
+            return None;
         }
         let process = child.as_raw_handle() as HANDLE;
         if AssignProcessToJobObject(job, process) == 0 {
             let _ = CloseHandle(job);
-            return;
+            return None;
         }
-        // The handle is intentionally not closed: closing it would terminate
-        // the engine immediately. Windows closes it when the platform exits,
-        // and KILL_ON_JOB_CLOSE then takes the engine down with us.
+        // The caller owns the handle and closes it on drop; KILL_ON_JOB_CLOSE
+        // then takes the engine (and its children) down with it. If the platform
+        // exits, Windows closes the handle the same way.
+        Some(job as isize)
     }
 }
 
 #[cfg(not(windows))]
-fn keep_engine_with_platform(_child: &std::process::Child) {}
+fn keep_engine_with_platform(_child: &std::process::Child) -> Option<JobHandle> {
+    None
+}
+
+#[cfg(windows)]
+fn close_job(job: Option<JobHandle>) {
+    if let Some(handle) = job {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(handle as windows_sys::Win32::Foundation::HANDLE);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn close_job(_job: Option<JobHandle>) {}
 
 pub fn kill_leftover(home: &Path, app_id: &str) -> Result<()> {
     let pid_file = home
@@ -1399,27 +1474,75 @@ pub fn kill_leftover(home: &Path, app_id: &str) -> Result<()> {
         }
     }
 
-    let mut kill = Command::new("taskkill");
-    kill.args(["/PID", &recorded.pid.to_string(), "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        kill.creation_flags(0x0800_0000);
-    }
-    let status = kill.status().map_err(|e| {
+    let output = taskkill_tree(recorded.pid).map_err(|e| {
         Error::Msg(format!("cannot run taskkill for pid {}: {e}", recorded.pid))
     })?;
-    if !status.success() {
+    if !output.status.success() {
+        // The engine may exit on its own between the identity check and the
+        // kill. Only a live process check can prove that: taskkill also uses
+        // 128 for "access is denied" with `/T`, so the exit code alone must not
+        // be treated as "process gone".
+        let gone = matches!(process_state(recorded.pid), ProcessState::Missing);
+        if gone {
+            let _ = std::fs::remove_file(&pid_file);
+            return Ok(());
+        }
+        let detail = taskkill_detail(&output);
+        let code = output
+            .status
+            .code()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        let reason = if detail.is_empty() {
+            format!("exit code {code}")
+        } else {
+            format!("exit code {code}: {detail}")
+        };
         return msg(format!(
-            "taskkill failed for pid {}; engine may still be running",
+            "taskkill failed for pid {}; engine may still be running ({reason})",
             recorded.pid
         ));
     }
     let _ = std::fs::remove_file(&pid_file);
     Ok(())
+}
+
+/// Stops a process and its children. Kept separate from the direct child handle
+/// so `Drop` can also clean up tool/proxy processes opencode spawned.
+#[cfg(windows)]
+fn taskkill_tree(pid: u32) -> std::io::Result<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    let mut kill = Command::new("taskkill");
+    kill.args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .creation_flags(0x0800_0000);
+    kill.output()
+}
+
+#[cfg(not(windows))]
+fn taskkill_tree(pid: u32) -> std::io::Result<std::process::Output> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("taskkill is not available for pid {pid}"),
+    ))
+}
+
+/// `taskkill` prints the real reason (Access denied, no running instance) to
+/// stdout/stderr. Collapse it into one line for the UI/log instead of hiding it.
+fn taskkill_detail(output: &std::process::Output) -> String {
+    let mut text = String::new();
+    for chunk in [&output.stdout, &output.stderr] {
+        let part = String::from_utf8_lossy(chunk);
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(part);
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl Engine {
@@ -1500,6 +1623,19 @@ impl Engine {
             .parent()
             .map(|dir| dir.join("models.json"))
             .filter(|path| path.is_file());
+        // Keep the engine's background plugin install a no-op in an offline
+        // contour; otherwise it tries registry.npmjs.org on every start.
+        let engine_version = binary
+            .parent()
+            .map(|dir| dir.join("VERSION.txt"))
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|value| {
+                // VERSION.txt is "opencode 1.19.5" followed by build metadata.
+                let first = value.lines().next().unwrap_or("").trim();
+                first.strip_prefix("opencode ").unwrap_or(first).to_string()
+            })
+            .filter(|value| !value.is_empty());
+        seed_plugin_dependency(&engine_home, engine_version.as_deref())?;
         let port = free_port()?;
         let base = format!("http://127.0.0.1:{port}");
         let password = format!(
@@ -1551,12 +1687,13 @@ impl Engine {
         let child = command
             .spawn()
             .map_err(|e| Error::Msg(format!("cannot start opencode: {e}")))?;
-        keep_engine_with_platform(&child);
+        let job = keep_engine_with_platform(&child);
         let runtime = runtime_info(child.id(), &binary);
         let mut child_guard = ChildGuard {
             child: Some(child),
             pid_file: pid_file.clone(),
             pid: runtime.pid,
+            job,
         };
         // Write the pid immediately so a failed start can always be cleaned
         // up by `kill_leftover`, even after an early return.
@@ -1580,6 +1717,7 @@ impl Engine {
             .ok_or_else(|| Error::Msg("engine child disappeared during startup".to_string()))?;
         Ok(Self {
             child,
+            job: child_guard.job.take(),
             base,
             auth,
             provider_id,
@@ -2615,6 +2753,29 @@ mod tests {
         assert_eq!(skills[0].1, "alpha body");
         assert_eq!(skills[1].0, "beta");
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn plugin_dependency_is_seeded_offline() {
+        let dir = std::env::temp_dir().join(format!("eco-engine-plugin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        seed_plugin_dependency(&dir, Some("1.19.5")).unwrap();
+
+        let config = dir.join("config/opencode");
+        assert!(config.join("node_modules").is_dir());
+        let pkg: Value =
+            serde_json::from_str(&std::fs::read_to_string(config.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(pkg["dependencies"]["@opencode-ai/plugin"], "1.19.5");
+        let lock: Value = serde_json::from_str(
+            &std::fs::read_to_string(config.join("package-lock.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(lock["packages"][""]["dependencies"]["@opencode-ai/plugin"], "1.19.5");
+
+        // A second start must keep the same no-op state.
+        seed_plugin_dependency(&dir, Some("1.19.5")).unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 

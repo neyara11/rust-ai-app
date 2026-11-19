@@ -350,6 +350,10 @@ body {
 /* ── Chassis: app shell, sidebar, topbar ───────────────────────────────── */
 
 .app {
+  /* Fallback for WebView2 older than Chromium 108: without a fixed height the
+     grid grows with the chat, body has overflow:hidden, and the composer ends
+     up below the screen. `dvh` overrides it on current runtimes. */
+  height: 100vh;
   height: 100dvh;
   display: grid;
   grid-template-columns: var(--sw) minmax(0, 1fr);

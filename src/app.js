@@ -460,6 +460,7 @@ const ctx = {
   config: null,
   attachments: [],
   pendingPermissions: [],
+  chatStart: null,
 };
 
 const THEME_KEY = "theme";
@@ -714,6 +715,7 @@ async function openApp(appId) {
       $("chat-reasoning").value = "";
     }
     ctx.chat = null;
+    ctx.chatStart = null;
     ctx.chatItems = [];
     ctx.chats = [];
     ctx.chatId = null;
@@ -752,7 +754,11 @@ async function openApp(appId) {
     renderChatList();
     renderChat([]);
     renderChatMeta();
-    ensureChat().catch((e) => chatError(String(e)));
+    ensureChat().catch((e) => {
+      // A start for an app the user already left must not post an error into
+      // the app that replaced it.
+      if (ctx.appId === appId) chatError(String(e));
+    });
 
     $("ws-title").textContent = ctx.appMeta.name || appId;
     $("ws-title").hidden = false;
@@ -778,6 +784,8 @@ async function closeApp() {
     renderPermissionPrompt();
     ctx.appId = null;
     ctx.appMeta = null;
+    ctx.chat = null;
+    ctx.chatStart = null;
     // A closed session must not leave clickable history behind: the list is
     // bound to the app, and `chat_select` cannot run without one.
     ctx.chats = [];
@@ -1947,6 +1955,18 @@ function chatInterrupted(message) {
 function chatError(message) {
   const log = $("chat-log");
   const stick = nearLogBottom(log);
+  // Engine-start failures can be reported by more than one caller (openApp and
+  // dispatchTurn). Do not stack identical banners back to back.
+  const last = log.lastElementChild;
+  if (
+    last &&
+    last.classList.contains("msg") &&
+    last.classList.contains("error") &&
+    last.textContent === message
+  ) {
+    if (stick) log.scrollTop = log.scrollHeight;
+    return;
+  }
   const div = document.createElement("div");
   div.className = "msg error";
   div.textContent = message;
@@ -2273,24 +2293,45 @@ async function loadHistory() {
 
 async function ensureChat() {
   if (ctx.chat && ctx.chat.app === ctx.appId) return ctx.chat;
+  // openApp and dispatchTurn can ask for the engine at the same time; share one
+  // start attempt instead of racing two chat_open calls.
+  if (ctx.chatStart && ctx.chatStart.app === ctx.appId) return ctx.chatStart.promise;
+  const appId = ctx.appId;
   $("chat-model").textContent = "запуск движка…";
-  const info = await invoke("chat_open", { app_id: ctx.appId });
-  ctx.chat = { app: ctx.appId, model: info.model };
-  ctx.chatId = ctx.chatId || info.session;
-  renderChatMeta(info.model);
-  await refreshChats();
-
-  if (!ctx.chatId) {
-    const created = await invoke("chat_new", { app_id: ctx.appId });
-    ctx.chatId = created.session;
+  const promise = (async () => {
+    const info = await invoke("chat_open", { app_id: appId });
+    if (ctx.appId !== appId) return null;
+    ctx.chat = { app: appId, model: info.model };
+    ctx.chatId = ctx.chatId || info.session;
+    renderChatMeta(info.model);
     await refreshChats();
-  } else if (!(ctx.chats || []).some((c) => c.id === ctx.chatId) && (ctx.chats || []).length) {
-    ctx.chatId = ctx.chats[0].id;
-    await invoke("chat_select", { app_id: ctx.appId, session_id: ctx.chatId });
+
+    if (!ctx.chatId) {
+      const created = await invoke("chat_new", { app_id: appId });
+      ctx.chatId = created.session;
+      await refreshChats();
+    } else if (!(ctx.chats || []).some((c) => c.id === ctx.chatId) && (ctx.chats || []).length) {
+      ctx.chatId = ctx.chats[0].id;
+      await invoke("chat_select", { app_id: appId, session_id: ctx.chatId });
+    }
+    await loadHistory();
+    renderPermissionPrompt();
+    return ctx.chat;
+  })();
+  ctx.chatStart = { app: appId, promise };
+  try {
+    return await promise;
+  } catch (e) {
+    // Do not leave "запуск движка…" forever after a failed start.
+    if (ctx.appId === appId) {
+      renderChatMeta();
+      const chip = $("chat-model");
+      if (chip) chip.title = String(e);
+    }
+    throw e;
+  } finally {
+    if (ctx.chatStart && ctx.chatStart.promise === promise) ctx.chatStart = null;
   }
-  await loadHistory();
-  renderPermissionPrompt();
-  return ctx.chat;
 }
 
 async function newChat() {
@@ -2299,9 +2340,12 @@ async function newChat() {
     return;
   }
   await guard(async () => {
+    const appId = ctx.appId;
     showWorkspace();
-    await ensureChat().catch(() => {});
-    const info = await invoke("chat_new", { app_id: ctx.appId });
+    const chat = await ensureChat().catch(() => null);
+    if (!chat || ctx.appId !== appId) return;
+    const info = await invoke("chat_new", { app_id: appId });
+    if (ctx.appId !== appId) return;
     ctx.chatId = info.session;
     ctx.chatItems = [];
     ctx.acceptStream = false;
@@ -2510,8 +2554,15 @@ async function sendChat() {
 /// Sends one turn and renders the optimistic user message. Shared by the
 /// composer and the "Повторить" button on an interrupted turn.
 async function dispatchTurn(text, attachments, variant) {
+  const appId = ctx.appId;
   try {
-    await ensureChat();
+    const chat = await ensureChat();
+    // The start is tied to the app that was open when the turn was queued.
+    // Never send the turn into a different app after a switch.
+    if (!chat || ctx.appId !== appId) {
+      setBusy(false);
+      return;
+    }
     const optimistic = [...(ctx.chatItems || [])];
     if (text) optimistic.push({ role: "user", kind: "text", text });
     for (const attachment of attachments) {
@@ -2529,7 +2580,7 @@ async function dispatchTurn(text, attachments, variant) {
     renderChat(optimistic);
     const log = $("chat-log");
     if (log) log.scrollTop = log.scrollHeight;
-    await invoke("chat_send", { app_id: ctx.appId, text, variant, attachments });
+    await invoke("chat_send", { app_id: appId, text, variant, attachments });
     if (!(window.__TAURI__ && window.__TAURI__.event)) {
       ctx.acceptStream = false;
       await refreshChats();
@@ -3655,6 +3706,7 @@ async function saveAppPermissions(inherit) {
   ctx.config.permissions = permissions;
   await invoke("save_config", { config: ctx.config });
   ctx.chat = null;
+  ctx.chatStart = null;
   ctx.chatId = null;
   ctx.chatItems = [];
   ctx.pendingPermissions = [];
@@ -3721,6 +3773,7 @@ async function saveConfig() {
     };
     await invoke("save_config", { config: ctx.config });
     ctx.chat = null;
+    ctx.chatStart = null;
     ctx.chatItems = [];
     setBusy(false);
     renderChat([]);

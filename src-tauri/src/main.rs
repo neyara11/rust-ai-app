@@ -1,16 +1,33 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// One process per profile home for modes that start, stop, or replace engines.
+/// `--revoke`/`--unrevoke` intentionally bypass it: they are the supported way
+/// to stop a running instance from outside.
+fn locked(run: impl FnOnce() -> i32) -> i32 {
+    let home = eco_platform_lib::registry::home();
+    // A fresh profile has no home yet; create it so the lock file can be made
+    // and a concurrent GUI instance is actually detected.
+    let _ = std::fs::create_dir_all(&home);
+    if eco_platform_lib::support::single_instance(&home) {
+        run()
+    } else {
+        eprintln!("ECO AIOps уже запущен для этого профиля; закройте его и повторите.");
+        1
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--verify") => std::process::exit(eco_platform_lib::cli_verify(args.get(1))),
-        Some("--install") => std::process::exit(eco_platform_lib::cli_install(args.get(1))),
+        Some("--install") => std::process::exit(locked(|| {
+            eco_platform_lib::cli_install(args.get(1))
+        })),
         Some("--list") => std::process::exit(eco_platform_lib::cli_list()),
         Some("--history") => std::process::exit(eco_platform_lib::cli_history(args.get(1))),
-        Some("--rollback") => std::process::exit(eco_platform_lib::cli_rollback(
-            args.get(1),
-            args.get(2),
-        )),
+        Some("--rollback") => std::process::exit(locked(|| {
+            eco_platform_lib::cli_rollback(args.get(1), args.get(2))
+        })),
         Some("--check") => std::process::exit(eco_platform_lib::cli_check(args.get(1))),
         Some("--mode") => {
             std::process::exit(eco_platform_lib::cli_mode(args.get(1), args.get(2)))
@@ -37,7 +54,9 @@ fn main() {
         )),
         Some("--secret-add") => std::process::exit(eco_platform_lib::cli_secret_add(args.get(1), args.get(2))),
         Some("--import-auth") => std::process::exit(eco_platform_lib::cli_import_auth(args.get(1), args.get(2), args.get(3))),
-        Some("--chat-sessions") => std::process::exit(eco_platform_lib::cli_chat_sessions(args.get(1))),
+        Some("--chat-sessions") => std::process::exit(locked(|| {
+            eco_platform_lib::cli_chat_sessions(args.get(1))
+        })),
         Some("--tokens") => std::process::exit(eco_platform_lib::cli_tokens(args.get(1))),
         Some("--issue-token") => std::process::exit(eco_platform_lib::cli_issue_token(
             args.get(1),
@@ -45,8 +64,12 @@ fn main() {
         )),
         Some("--revoke") => std::process::exit(eco_platform_lib::cli_revoke(args.get(1))),
         Some("--unrevoke") => std::process::exit(eco_platform_lib::cli_unrevoke(args.get(1))),
-        Some("--chat-async") => std::process::exit(eco_platform_lib::cli_chat_async(args.get(1), args.get(2))),
-        Some("--chat") => std::process::exit(eco_platform_lib::cli_chat(args.get(1), args.get(2), args.get(3))),
+        Some("--chat-async") => std::process::exit(locked(|| {
+            eco_platform_lib::cli_chat_async(args.get(1), args.get(2))
+        })),
+        Some("--chat") => std::process::exit(locked(|| {
+            eco_platform_lib::cli_chat(args.get(1), args.get(2), args.get(3))
+        })),
         Some("--system-prompt") => {
             std::process::exit(eco_platform_lib::cli_system_prompt(args.get(1)))
         }
