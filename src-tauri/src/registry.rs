@@ -542,11 +542,12 @@ fn versions_dir(home: &Path, app_id: &str) -> PathBuf {
 const KEEP_VERSIONS: usize = 5;
 
 fn is_runtime_entry(name: &std::ffi::OsStr) -> bool {
-    name == "engine" || name == "sessions" || name == "tmp"
+    name == "engine" || name == "sessions" || name == "tmp" || name == "attachments"
 }
 
 /// Copies a package without the per-app runtime state: `engine` and `sessions`
-/// are recreated on start and must never be restored by a rollback.
+/// are recreated on start and must never be restored by a rollback, and
+/// `attachments` is the user's image cache rather than package content.
 fn copy_package_dir(from: &Path, to: &Path) -> Result<()> {
     fs::create_dir_all(to)?;
     for entry in fs::read_dir(from)? {
@@ -620,7 +621,8 @@ struct RuntimeKeep {
 }
 
 /// Moves per-app runtime state out of the package directory before the package
-/// is replaced, so chat history and artifact dumps survive installs/rollbacks.
+/// is replaced, so chat history, artifact dumps and the attachment cache
+/// survive installs/rollbacks.
 fn park_runtime(home: &Path, app_id: &str, dest: &Path) -> Result<RuntimeKeep> {
     let dir = home
         .join("staging")
@@ -630,7 +632,7 @@ fn park_runtime(home: &Path, app_id: &str, dest: &Path) -> Result<RuntimeKeep> {
     }
     fs::create_dir_all(&dir)?;
     let mut moved: Vec<(&'static str, PathBuf)> = Vec::new();
-    for name in ["engine", "sessions"] {
+    for name in ["engine", "sessions", "attachments"] {
         let src = dest.join(name);
         if !src.exists() {
             continue;
@@ -711,7 +713,7 @@ pub fn recover_runtime(home: &Path) {
             continue;
         }
         let mut failed = false;
-        for sub in ["engine", "sessions"] {
+        for sub in ["engine", "sessions", "attachments"] {
             let src = keep.join(sub);
             if !src.exists() {
                 continue;
@@ -1465,6 +1467,43 @@ mod tests {
 
         install(&home, &pkg).unwrap();
         verified_manifest(&home, "demo").unwrap();
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn attachment_cache_is_runtime_state_and_survives_updates() {
+        let home = std::env::temp_dir().join(format!("eco-registry-attach-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        use_local_mode(&home, crate::config::Role::User);
+
+        let pkg = home.join("pkg");
+        write_unsigned_package(&pkg, "1.0.0");
+        install(&home, &pkg).unwrap();
+
+        // Uploading a picture makes the platform write this cache inside the
+        // installed package directory.
+        let cache = home.join("apps/demo/attachments");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("hash.json"), b"{\"mime\":\"image/png\"}").unwrap();
+
+        // Runtime state is not sealed content: the app must stay verifiable.
+        verified_manifest(&home, "demo").unwrap();
+
+        // The cache survives an update and is not baked into the archive.
+        write_unsigned_package(&pkg, "1.1.0");
+        install(&home, &pkg).unwrap();
+        verified_manifest(&home, "demo").unwrap();
+        assert!(cache.join("hash.json").is_file());
+        let archives = history(&home, "demo");
+        assert_eq!(archives.len(), 1, "{archives:?}");
+        assert!(!Path::new(&archives[0].path).join("attachments").exists());
+
+        // ...and a rollback.
+        rollback(&home, "demo", None).unwrap();
+        verified_manifest(&home, "demo").unwrap();
+        assert!(cache.join("hash.json").is_file());
 
         let _ = fs::remove_dir_all(home);
     }

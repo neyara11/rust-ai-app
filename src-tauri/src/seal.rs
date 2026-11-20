@@ -21,9 +21,21 @@ const SEAL_SCHEMA: u32 = 1;
 const MAX_FILES: usize = 10_000;
 
 /// Per-app runtime state lives inside the package directory but is not part of
-/// the package and changes while the app runs.
+/// the package and changes while the app runs. `attachments` is the chat image
+/// cache written by the platform on every uploaded picture; sealing it would
+/// invalidate the package on the first attachment.
 fn is_runtime_entry(name: &std::ffi::OsStr) -> bool {
-    name == "engine" || name == "sessions" || name == "tmp"
+    name == "engine" || name == "sessions" || name == "tmp" || name == "attachments"
+}
+
+/// True for a package-relative path inside a runtime directory. Seals written
+/// by builds that still sealed `attachments/` keep those entries, so they must
+/// be ignored on both sides instead of being reported as removed files.
+fn is_runtime_path(rel: &str) -> bool {
+    rel.split('/')
+        .next()
+        .map(|top| is_runtime_entry(std::ffi::OsStr::new(top)))
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,12 +169,18 @@ pub fn verify(home: &Path, app_id: &str, dir: &Path) -> Result<()> {
             seal.version, actual.version
         )));
     }
-    if actual.files == seal.files {
+    let sealed: BTreeMap<String, String> = seal
+        .files
+        .iter()
+        .filter(|(rel, _)| !is_runtime_path(rel))
+        .map(|(rel, hash)| (rel.clone(), hash.clone()))
+        .collect();
+    if actual.files == sealed {
         return Ok(());
     }
 
     let mut changes: Vec<String> = Vec::new();
-    for (rel, expected) in &seal.files {
+    for (rel, expected) in &sealed {
         match actual.files.get(rel) {
             None => changes.push(format!("removed {rel}")),
             Some(found) if found != expected => changes.push(format!("modified {rel}")),
@@ -170,7 +188,7 @@ pub fn verify(home: &Path, app_id: &str, dir: &Path) -> Result<()> {
         }
     }
     for rel in actual.files.keys() {
-        if !seal.files.contains_key(rel) {
+        if !sealed.contains_key(rel) {
             changes.push(format!("added {rel}"));
         }
     }
@@ -231,6 +249,37 @@ mod tests {
         fs::create_dir_all(pkg.join("engine/config")).unwrap();
         fs::write(pkg.join("engine/config/opencode.json"), b"{}").unwrap();
         fs::create_dir_all(pkg.join("sessions/s1")).unwrap();
+        // The chat image cache is platform state, not package content: writing
+        // it must not invalidate the seal (regression: first image bricked the
+        // app with "added attachments/<hash>.json").
+        fs::create_dir_all(pkg.join("attachments")).unwrap();
+        fs::write(
+            pkg.join("attachments/hash.json"),
+            b"{\"mime\":\"image/png\"}",
+        )
+        .unwrap();
+        verify(&home, "demo", &pkg).unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn seal_written_with_cached_attachments_still_verifies() {
+        let root = tmp("poisoned");
+        let home = root.join("home");
+        let pkg = root.join("pkg");
+        write(&home, "demo", &pkg).unwrap();
+
+        // A seal produced before the cache was treated as runtime state lists
+        // the attachment files; those entries must not read as removed.
+        let mut seal = build(&pkg).unwrap();
+        seal.files.insert(
+            "attachments/hash.json".to_string(),
+            "sha256:deadbeef".to_string(),
+        );
+        fs::write(seal_path(&home, "demo"), serde_json::to_vec(&seal).unwrap()).unwrap();
+        fs::create_dir_all(pkg.join("attachments")).unwrap();
+        fs::write(pkg.join("attachments/hash.json"), b"{}").unwrap();
+
         verify(&home, "demo", &pkg).unwrap();
         let _ = fs::remove_dir_all(root);
     }

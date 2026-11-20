@@ -142,7 +142,7 @@ const browserMock = (() => {
       case "platform_info":
         return {
           home: "D:\\git\\rust-ai-app\\.data",
-          version: "0.4.2",
+          version: "0.4.3",
           schema: 2,
           trusted_anchor: true,
           anchor_fingerprint: "48efcf9d72861a68",

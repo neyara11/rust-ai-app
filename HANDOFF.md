@@ -98,7 +98,7 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 - Локальный режим ставит и подписанные, и неподписанные пакеты; trust anchor и
   allowlist не требуются. Неизменность после установки держит **seal**:
   `<home>/seals/<app_id>.json` (sha256 всех файлов, кроме `engine/`, `sessions/`,
-  `tmp/`), проверяется при каждом запуске и в шлюзе. Правка промта/скила/скрипта/
+  `tmp/`, `attachments/`), проверяется при каждом запуске и в шлюзе. Правка промта/скила/скрипта/
   манифеста или лишний файл → отказ. Подписанный пакет принимается по подписи,
   если anchor активен, и лениво покрывается seal.
 - Корпоративный режим — прежний контур: подпись от активного anchor + allowlist,
@@ -1012,6 +1012,22 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   совпадений.
 - Осталось: подсветка самого совпадения в строке и потоковая выгрузка очень
   больших дампов (сейчас файл копируется целиком).
+
+### P12. Кэш вложений вне пломбы — сделано (2026-11-20)
+
+- Симптом: после первого отправленного изображения приложение падало с
+  `package content changed since install: added attachments/<sha256>.json` и
+  больше не открывалось. Причина: `chat_send` кладёт кэш картинок в
+  `apps/<app_id>/attachments`, а local-пломба (`seal.rs`) считала sha256 всех
+  файлов пакета и исключала только `engine/`, `sessions/`, `tmp/`.
+- `seal.rs`/`registry.rs`: `attachments` добавлен в runtime-исключения, поэтому
+  кэш не входит в пломбу, не копируется в архив версий и теперь переживает
+  install/rollback (`park_runtime`/`recover_runtime`).
+- `seal::verify` игнорирует `attachments/*` и в самом файле пломбы: профили,
+  где пломба успела записать кэш, чинятся без переустановки пакета.
+- Регрессионные тесты: `seal_ignores_runtime_state`,
+  `seal_written_with_cached_attachments_still_verifies`,
+  `attachment_cache_is_runtime_state_and_survives_updates` (всего 120 тестов).
 
 ### С чего начать
 
