@@ -260,7 +260,10 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 ### Дистрибутив и закрытый контур
 - `tools/vendor.ps1` собирает `vendor/engine` (`opencode.exe` + `models.json`),
   Tauri-бандл кладёт его в `engine/` рядом с `eco-platform.exe`.
-- `bundle.active: true`: NSIS `perMachine`, WebView2 `offlineInstaller`.
+- `bundle.active: true`: NSIS `perMachine`, WebView2 `skip` — рантайм ставится
+  на машину отдельным пререквизитом (Evergreen Standalone Installer x64,
+  GPO/Intune/SCCM), поэтому установщик ~150 МБ и не растёт вместе с пакетом
+  Microsoft.
 - Движок запускается с `OPENCODE_DISABLE_MODELS_FETCH`, `..._DEFAULT_PLUGINS`,
   `..._LSP_DOWNLOAD`; провайдер встроен в бинарь, npm в рантайме не нужен.
 - Установщик подписывается dev self-signed сертификатом (`tools/build-installer.ps1`);
@@ -538,12 +541,13 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
 
 ### Блокеры для «настоящего» продукта
 1. **Подпись есть, но dev-сертификатом.** `bundle.active: true`, NSIS `perMachine`,
-   WebView2 `offlineInstaller`; MSI/NSIS собираются. `tools/build-installer.ps1`
-   создаёт self-signed `CN=ECO AIOps Dev` и подписывает exe/MSI/NSIS (SHA-256).
-   Для поставки нужен сертификат УЦ/ИБ (thumbprint или `signCommand` для HSM),
-   CI, SBOM, SAST/SCA; установка на чистой машине не проверялась. Для офлайн-сборки
-   нужны кеши Tauri: `%LOCALAPPDATA%\tauri\{NSIS,WixTools314,x64}` (там bootstrapper
-   WebView2) или `fixedRuntime` с локальной папкой рантайма.
+   WebView2 `skip` (рантайм — отдельный пререквизит машины); MSI/NSIS собираются.
+   `tools/build-installer.ps1` создаёт self-signed `CN=ECO AIOps Dev` и подписывает
+   exe/MSI/NSIS (SHA-256). Для поставки нужен сертификат УЦ/ИБ (thumbprint или
+   `signCommand` для HSM), CI, SBOM, SAST/SCA; установка на чистой машине не
+   проверялась. Для офлайн-сборки нужны кеши Tauri
+   `%LOCALAPPDATA%\tauri\{NSIS,WixTools314}`; вариант `fixedRuntime` с локальной
+   папкой рантайма остаётся альтернативой.
 2. **opencode вендорен скриптом, а не артефактом в git.** `opencode.exe` — 198 МиБ,
    выше жёсткого лимита GitHub в 100 МБ на файл, а LFS в проекте не используется;
    коммитить бинарь в git нельзя. `tools/vendor.ps1` кладёт `opencode.exe` и
@@ -1028,6 +1032,20 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
 - Регрессионные тесты: `seal_ignores_runtime_state`,
   `seal_written_with_cached_attachments_still_verifies`,
   `attachment_cache_is_runtime_state_and_survives_updates` (всего 120 тестов).
+
+### P13. WebView2 вне установщика — сделано (2026-11-20)
+
+- Установщик раздулся до 426 МиБ, потому что `offlineInstaller` вшивал полный
+  офлайн-пакет WebView2 (в 0.4.3 — 294 МБ, прирост +75 МБ против 0.4.2 только
+  из-за обновления пакета Microsoft).
+- `tauri.conf.json`: `webviewInstallMode` переключён на `skip`. WebView2
+  раскатывается один раз отдельным Evergreen Standalone Installer x64
+  (per-machine, GPO/Intune/SCCM), дальше обновляется Edge Update.
+- Размер NSIS-установщика: 148 912 608 байт (~142 МиБ) вместо 446 889 656.
+- Требование к машине — WebView2 с Chromium 108+; preflight
+  (`support.rs`) по-прежнему показывает понятную ошибку, если рантайма нет.
+- Обновлены README, HANDOFF, `docs/APP_LIFECYCLE.md`,
+  `docs/CORPORATE_DEPLOYMENT.md`, `docs/ROADMAP_CURRENT.md`.
 
 ### С чего начать
 

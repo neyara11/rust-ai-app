@@ -31,9 +31,9 @@ P0-блокеров нет: прототип работоспособен. Ни�
   install/update/rollback/история версий, `eco-pack`, `office-writer` (docx/xlsx,
   нативные графики), `agent-repacker`, `doc-lookup`.
 - Идентичность и аудит: короткоживущие токены, отзыв, локальный `audit/<app>.jsonl`.
-- Поставка: NSIS `perMachine`, WebView2 `offlineInstaller`, dev-подпись
-  (production Authenticode — открыто, P1), вендоринг движка по
-  `tools/engine.lock.json`.
+- Поставка: NSIS `perMachine`, WebView2 `skip` (отдельный пререквизит машины,
+  Evergreen x64), dev-подпись (production Authenticode — открыто, P1), вендоринг
+  движка по `tools/engine.lock.json`.
 
 ### Частично / закрыто иначе
 

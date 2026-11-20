@@ -371,6 +371,13 @@ deploy/
 только site-specific override. В любом случае установщик проверяет подпись до
 применения.
 
+WebView2 в setup не входит (`webviewInstallMode: skip`): это отдельный
+пререквизит машины. В контуре один раз раскатывается Evergreen Standalone
+Installer x64 (per-machine, GPO/Intune/SCCM), затем обновляется силами Edge
+Update. Благодаря этому установщик ECO AIOps весит ~150 МБ и не меняет размер
+при каждом релизе Microsoft. Требование — рантайм с Chromium 108+; без него
+приложение показывает сообщение о необходимости установить WebView2.
+
 ### 4.2. Проверки установщика
 
 1. Версия и схема установщика поддерживают формат конфига.
@@ -898,20 +905,22 @@ tools\signer\target\debug\signer.exe sign allowlist.json `
 
 ### 10.5. Установка и раскатка
 
-1. Получить bundle из доверенного канала; сверить sha256 с заявкой/тикетом
+1. Убедиться, что на машине есть WebView2 Runtime (Chromium 108+); при
+   отсутствии — поставить Evergreen Standalone Installer x64 per-machine.
+2. Получить bundle из доверенного канала; сверить sha256 с заявкой/тикетом
    (и Authenticode, если есть).
-2. Установщик проверяет `config.sig` вшитым deployment pubkey, `contour`,
+3. Установщик проверяет `config.sig` вшитым deployment pubkey, `contour`,
    `site_id`, `product`, `min_platform_version`, `policy_version`, `not_after`.
-3. Применить в machine scope в порядке: **policy → anchor → allowlist.sig →
+4. Применить в machine scope в порядке: **policy → anchor → allowlist.sig →
    allowlist.json**. При атомарном каталоге порядок обеспечивается указателем.
-4. Тихая установка (свойства — целевые):
+5. Тихая установка (свойства — целевые):
 
 ```powershell
 & ".\ECO-AIOps-Corporate-Setup.exe" /S /MODE=corporate `
   /CONFIG="\\dfs\EcoAIOps\deploy\config.json"
 ```
 
-5. Проверить после установки:
+6. Проверить после установки:
 
 ```powershell
 & "C:\Program Files\ECO AIOps\eco-platform.exe" --anchor
@@ -919,10 +928,10 @@ tools\signer\target\debug\signer.exe sign allowlist.json `
 & "C:\Program Files\ECO AIOps\eco-platform.exe" --policy   # целевое
 ```
 
-6. Для парка — GPO/Intune/SCCM: установка платформы, доставка anchor/policy/
+7. Для парка — GPO/Intune/SCCM: установка платформы, доставка anchor/policy/
    allowlist, периодическая синхронизация. Пользовательские приложения ставит
    пользователь из repo; платформа проверяет подпись и allowlist.
-7. Раскатка кольцами: пилот → ограниченный круг → парк. Откат — новая версия
+8. Раскатка кольцами: пилот → ограниченный круг → парк. Откат — новая версия
    или `--rollback` по решению администратора, с аудитом.
 
 Важно: установщик per-machine, но пакеты и сессии — per-user (`home/apps`).

@@ -69,7 +69,8 @@ dev-apps/<app_id>/
 ### 4.1. Рабочее место автора мини-приложения
 
 - Windows 10/11 x64, текстовый редактор.
-- Установленная платформа ECO AIOps (WebView2 ставится её установщиком) — для
+- Установленная платформа ECO AIOps (WebView2 — пререквизит машины:
+  Chromium 108+, ставится один раз отдельно от установщика ECO AIOps) — для
   локального теста.
 - Портативная утилита `eco-pack.exe` (без внешних зависимостей), версия которой
   совместима с установленной платформой.
@@ -295,7 +296,10 @@ eco-platform.exe --allowlist-verify allowlist.json   # на машине ИБ/а
 
 1. Подписанный архив и `manifest.sig` публикуются в доверенном хранилище
    (внутренний файловый сервер/репозиторий), публикуется sha256 архива.
-2. На машинах один раз ставится платформа (NSIS per-machine, WebView2 offline).
+2. На машинах один раз ставится WebView2 (Evergreen Standalone Installer x64,
+   per-machine, GPO/Intune/SCCM) и платформа (NSIS per-machine). WebView2 в
+   установщик ECO AIOps не входит (`webviewInstallMode: skip`), поэтому обновления
+   платформы весят ~150 МБ и не тащат рантайм каждый раз.
 3. Trust anchor ИБ раскатывается **в Machine-scope** (HKLM
    `SOFTWARE\EcoAIOps\TrustedPub`, GPO/установщик), не в пользовательский профиль.
    Пользовательский anchor действует только в dev-режиме (`debug`-сборка или
@@ -325,11 +329,12 @@ eco-platform.exe --allowlist-verify allowlist.json   # на машине ИБ/а
 - `tools/vendor.ps1` → `vendor/engine` (opencode + models.json), попадает в
   `engine/` рядом с `eco-platform.exe`. Источник сверяется с `tools/engine.lock.json`
   (точная версия + sha256); обновление движка — только через `-UpdateLock`.
-- `bundle.active: true`, NSIS `perMachine`, WebView2 `offlineInstaller`.
+- `bundle.active: true`, NSIS `perMachine`, WebView2 `skip` (пререквизит машины,
+  ставится отдельным Evergreen-инсталлятором per-machine).
 - Подпись установщика: `tools/build-installer.ps1`. Для dev — self-signed
   (`-Trust`), для поставки — сертификат УЦ/ИБ (`-Thumbprint`), для HSM —
   `signCommand`.
-- Офлайн-сборка: кеши Tauri (`%LOCALAPPDATA%\tauri\{NSIS,WixTools314,x64}`) или
+- Офлайн-сборка: кеши Tauri (`%LOCALAPPDATA%\tauri\{NSIS,WixTools314}`) или
   `fixedRuntime` WebView2.
 
 ## 9. Как не дать разрабатывать/подписывать не-разработчикам

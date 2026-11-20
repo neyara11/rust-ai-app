@@ -295,10 +295,14 @@ powershell -File tools\build-installer.ps1 -Trust   # сборка + dev-под�
   провайдер `@ai-sdk/openai-compatible` встроен в бинарь opencode.
 - Порядок поиска движка: `ECO_OPENCODE_BIN` → `<home>/engine/opencode.exe` →
   `engine/opencode.exe` рядом с платформой → `tools/oc` (dev).
-- Для полностью офлайн-сборки нужны кеши Tauri
-  `%LOCALAPPDATA%\tauri\{NSIS,WixTools314,x64}` (в `x64` — bootstrapper WebView2);
-  вместо `offlineInstaller` можно указать `fixedRuntime` с папкой рантайма.
-- Результат: NSIS-установщик `ECO AIOps_0.4.3_x64-setup.exe` ~280 МБ в
+- WebView2 в установщик не входит (`webviewInstallMode: skip`): он ставится на
+  машину отдельно, один раз и per-machine (Evergreen Standalone Installer x64
+  через GPO/Intune/SCCM). Нужен рантайм с Chromium 108+; при его отсутствии
+  приложение показывает понятную ошибку и не запускается.
+- Для офлайн-сборки нужны кеши Tauri `%LOCALAPPDATA%\tauri\{NSIS,WixTools314}`
+  (WebView2 туда больше не скачивается). Альтернатива для корпоративного
+  контура — `fixedRuntime` с локальной папкой рантайма.
+- Результат: NSIS-установщик `ECO AIOps_0.4.3_x64-setup.exe` ~150 МБ в
   `src-tauri/target/release/bundle/nsis/`. `bundle.targets` — `["nsis"]`;
   MSI в релиз не собирается.
 - Подпись Authenticode для dev-сборки:
