@@ -414,7 +414,7 @@ pub(crate) fn verify_for(
     if !policy.local() {
         return manifest::verify_package(dir, trusted);
     }
-    let mut report = manifest::verify_integrity(dir);
+    let mut report = manifest::verify_integrity_meta(dir);
     if !report.ok {
         return report;
     }
@@ -764,11 +764,11 @@ pub(crate) fn verify_for_readonly(
     if !policy.local() {
         return manifest::verify_package(dir, trusted);
     }
-    let mut report = manifest::verify_integrity(dir);
+    let mut report = manifest::verify_integrity_meta(dir);
     if !report.ok {
         return report;
     }
-    match crate::seal::verify(home, app_id, dir) {
+    match crate::seal::verify_readonly(home, app_id, dir) {
         Ok(()) => report,
         Err(seal_error) => {
             let seal_missing = !crate::seal::seal_path(home, app_id).exists();

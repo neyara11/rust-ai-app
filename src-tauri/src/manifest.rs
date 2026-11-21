@@ -258,13 +258,20 @@ pub fn ensure_not_downgrade(current: &str, next: &str) -> Result<()> {
 /// anchor. Local mode pairs this with a local seal; corporate mode uses
 /// [`verify_package`].
 pub fn verify_integrity(dir: &Path) -> VerifyReport {
-    verify_impl(dir, None, false)
+    verify_impl(dir, None, false, true)
+}
+
+/// Everything `verify_integrity` checks except file hashes. Used in local mode
+/// when the seal (and its verification cache) already vouches for the file
+/// contents, so listing apps does not re-hash every package file.
+pub fn verify_integrity_meta(dir: &Path) -> VerifyReport {
+    verify_impl(dir, None, false, false)
 }
 
 /// Install-time verification: additionally requires the signed hash list to
 /// cover every file the engine will read or execute.
 pub fn verify_integrity_install(dir: &Path) -> VerifyReport {
-    verify_impl(dir, None, true)
+    verify_impl(dir, None, true, true)
 }
 
 /// Verifies the package in `dir`: schema version, detached signature over
@@ -272,17 +279,18 @@ pub fn verify_integrity_install(dir: &Path) -> VerifyReport {
 /// package unusable. The signature may be made by any of the active anchors,
 /// which allows staged key rotation.
 pub fn verify_package(dir: &Path, trusted: &[VerifyingKey]) -> VerifyReport {
-    verify_impl(dir, Some(trusted), false)
+    verify_impl(dir, Some(trusted), false, true)
 }
 
 pub fn verify_package_install(dir: &Path, trusted: &[VerifyingKey]) -> VerifyReport {
-    verify_impl(dir, Some(trusted), true)
+    verify_impl(dir, Some(trusted), true, true)
 }
 
 fn verify_impl(
     dir: &Path,
     trusted: Option<&[VerifyingKey]>,
     require_coverage: bool,
+    hash_files: bool,
 ) -> VerifyReport {
     let manifest_bytes = match fs::read(dir.join("manifest.json")) {
         Ok(b) => b,
@@ -370,17 +378,19 @@ fn verify_impl(
         }
     }
 
-    for (rel, expected) in &manifest.hashes {
-        let Some(expected_hex) = expected.strip_prefix("sha256:") else {
-            problems.push(format!("hash for {rel} is not sha256:..."));
-            continue;
-        };
-        match fs::read(dir.join(rel)) {
-            Err(e) => problems.push(format!("hashed file {rel} unreadable: {e}")),
-            Ok(bytes) => {
-                let actual = sha256_hex(&bytes);
-                if actual != expected_hex {
-                    problems.push(format!("hash mismatch for {rel}"));
+    if hash_files {
+        for (rel, expected) in &manifest.hashes {
+            let Some(expected_hex) = expected.strip_prefix("sha256:") else {
+                problems.push(format!("hash for {rel} is not sha256:..."));
+                continue;
+            };
+            match fs::read(dir.join(rel)) {
+                Err(e) => problems.push(format!("hashed file {rel} unreadable: {e}")),
+                Ok(bytes) => {
+                    let actual = sha256_hex(&bytes);
+                    if actual != expected_hex {
+                        problems.push(format!("hash mismatch for {rel}"));
+                    }
                 }
             }
         }
@@ -616,6 +626,26 @@ mod tests {
             "{:?}",
             report.problems
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn meta_integrity_skips_file_hash_checks() {
+        let dir = tmp("meta");
+        std::fs::create_dir_all(dir.join("prompt")).unwrap();
+        std::fs::write(dir.join("prompt/system.md"), b"p").unwrap();
+        let body = format!(
+            r#"{{"schema_version":2,"app_id":"a","name":"A","version":"1.0.0","profile":{{"system_prompt":"prompt/system.md"}},"hashes":{{"prompt/system.md":"sha256:{}"}}}}"#,
+            sha256_hex(b"p")
+        );
+        std::fs::write(dir.join("manifest.json"), &body).unwrap();
+
+        // A changed file is caught by the hash pass...
+        std::fs::write(dir.join("prompt/system.md"), b"tampered").unwrap();
+        assert!(!verify_integrity(&dir).ok);
+        // ...but the metadata-only pass leaves content to the seal.
+        assert!(verify_integrity_meta(&dir).ok);
+
         let _ = std::fs::remove_dir_all(dir);
     }
 

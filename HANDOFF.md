@@ -122,7 +122,9 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 - Манифест `schema_version: 2`: `app_id`, `profile.system_prompt`, `tools[]`,
   `connections[]`, `capabilities`, `docs[]`, `artifacts`, `hashes`.
 - Проверка при установке и при каждом запуске: подпись manifest.json, sha256 файлов,
-  версия схемы. Любая проблема — отказ (fail-closed).
+  версия схемы. Любая проблема — отказ (fail-closed). В local-режиме запуск сверяет
+  seal через кэш по снимку метаданных (путь/размер/mtime) и digest seal: неизменённый
+  пакет не перехешируется, любое изменение метаданных форсирует полную проверку.
 - Установка из папки и zip (защита от zip-slip), удаление, компактный переключатель
   приложений в шапке.
 - Trust anchor: Machine-scope в `HKLM\SOFTWARE\EcoAIOps\TrustedPub` (пишет только

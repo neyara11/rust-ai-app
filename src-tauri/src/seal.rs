@@ -18,7 +18,30 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const SEAL_SCHEMA: u32 = 1;
+const CACHE_SCHEMA: u32 = 1;
 const MAX_FILES: usize = 10_000;
+
+#[cfg(test)]
+thread_local! {
+    /// Counts full (hashing) verifications so a test can assert the cache hit.
+    static FULL_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Verification cache. The seal is immutable, so a successful full check can
+/// be reused while the seal bytes and every package file's size/mtime stay the
+/// same. Editing a file changes its mtime, which forces a full re-hash.
+///
+/// This is a performance cache, not additional protection: the seal already
+/// only guards against casual modification, and the same OS user owns both.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VerifyCache {
+    schema: u32,
+    seal_sha256: String,
+    app_id: String,
+    version: String,
+    file_count: usize,
+    tree_sha256: String,
+}
 
 /// Per-app runtime state lives inside the package directory but is not part of
 /// the package and changes while the app runs. `attachments` is the chat image
@@ -112,6 +135,74 @@ pub fn build(dir: &Path) -> Result<Seal> {
     })
 }
 
+fn cache_path(home: &Path, app_id: &str) -> PathBuf {
+    home.join("seals").join(format!("{app_id}.verify.json"))
+}
+
+fn collect_meta(
+    dir: &Path,
+    root: &Path,
+    top: bool,
+    out: &mut Vec<(String, u64, u128)>,
+) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if top && is_runtime_entry(&name) {
+            continue;
+        }
+        let path = entry.path();
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            return Err(Error::Msg(format!(
+                "package contains a symlink, refusing to verify: {}",
+                path.display()
+            )));
+        }
+        if kind.is_dir() {
+            collect_meta(&path, root, false, out)?;
+        } else if kind.is_file() {
+            if out.len() >= MAX_FILES {
+                return Err(Error::Msg(format!(
+                    "package has more than {MAX_FILES} files, refusing to verify"
+                )));
+            }
+            let meta = entry.metadata()?;
+            let rel = path
+                .strip_prefix(root)
+                .map_err(|_| Error::Msg("cannot compute package-relative path".to_string()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|age| age.as_nanos())
+                .unwrap_or(0);
+            out.push((rel, meta.len(), modified));
+        }
+    }
+    Ok(())
+}
+
+/// Hashes paths, sizes and mtimes without reading file contents. Traversal
+/// order differs between filesystems, so entries are sorted first.
+fn tree_fingerprint(dir: &Path) -> Result<(String, usize)> {
+    let mut entries = Vec::new();
+    collect_meta(dir, dir, true, &mut entries)?;
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut hasher = Sha256::new();
+    for (rel, size, mtime) in &entries {
+        hasher.update(rel.as_bytes());
+        hasher.update([0]);
+        hasher.update(size.to_le_bytes());
+        hasher.update([0]);
+        hasher.update(mtime.to_le_bytes());
+        hasher.update(b"\n");
+    }
+    Ok((hex::encode(hasher.finalize()), entries.len()))
+}
+
 /// Writes (or replaces) the seal for an installed package.
 pub fn write(home: &Path, app_id: &str, dir: &Path) -> Result<Seal> {
     let manifest = crate::manifest::load(dir)?;
@@ -129,20 +220,83 @@ pub fn write(home: &Path, app_id: &str, dir: &Path) -> Result<Seal> {
     let tmp = dest.with_extension("tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(&seal)?)?;
     fs::rename(&tmp, &dest)?;
+    // The seal changed; any previous verification snapshot is stale.
+    let _ = fs::remove_file(cache_path(home, app_id));
     Ok(seal)
+}
+
+fn verify_cache_hit(
+    home: &Path,
+    app_id: &str,
+    seal: &Seal,
+    seal_digest: &str,
+    dir: &Path,
+) -> bool {
+    let Ok(raw) = fs::read(cache_path(home, app_id)) else {
+        return false;
+    };
+    let Ok(cache) = serde_json::from_slice::<VerifyCache>(&raw) else {
+        return false;
+    };
+    if cache.schema != CACHE_SCHEMA
+        || cache.seal_sha256 != seal_digest
+        || cache.app_id != app_id
+        || cache.version != seal.version
+    {
+        return false;
+    }
+    match tree_fingerprint(dir) {
+        Ok((tree, count)) => tree == cache.tree_sha256 && count == cache.file_count,
+        Err(_) => false,
+    }
+}
+
+fn write_verify_cache(home: &Path, app_id: &str, seal: &Seal, seal_digest: &str, dir: &Path) {
+    let Ok((tree, count)) = tree_fingerprint(dir) else {
+        return;
+    };
+    let cache = VerifyCache {
+        schema: CACHE_SCHEMA,
+        seal_sha256: seal_digest.to_string(),
+        app_id: app_id.to_string(),
+        version: seal.version.clone(),
+        file_count: count,
+        tree_sha256: tree,
+    };
+    let Ok(bytes) = serde_json::to_vec(&cache) else {
+        return;
+    };
+    let dest = cache_path(home, app_id);
+    if let Some(parent) = dest.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp = dest.with_extension("tmp");
+    if fs::write(&tmp, bytes).is_ok() {
+        let _ = fs::rename(&tmp, &dest);
+    }
 }
 
 /// Verifies that every package file still matches the seal and that no files
 /// were added or removed.
 pub fn verify(home: &Path, app_id: &str, dir: &Path) -> Result<()> {
+    verify_inner(home, app_id, dir, true)
+}
+
+/// Read-only variant: uses an existing verification cache but never writes a
+/// new one. Used by CLI checks that must not mutate the installed profile.
+pub fn verify_readonly(home: &Path, app_id: &str, dir: &Path) -> Result<()> {
+    verify_inner(home, app_id, dir, false)
+}
+
+fn verify_inner(home: &Path, app_id: &str, dir: &Path, persist_cache: bool) -> Result<()> {
     let path = seal_path(home, app_id);
-    let raw = fs::read_to_string(&path).map_err(|e| {
+    let raw = fs::read(&path).map_err(|e| {
         Error::Msg(format!(
             "package seal is missing ({}); reinstall the app: {e}",
             path.display()
         ))
     })?;
-    let seal: Seal = serde_json::from_str(&raw)
+    let seal: Seal = serde_json::from_slice(&raw)
         .map_err(|e| Error::Msg(format!("package seal is unreadable: {e}")))?;
     if seal.schema != SEAL_SCHEMA {
         return Err(Error::Msg(format!(
@@ -156,6 +310,14 @@ pub fn verify(home: &Path, app_id: &str, dir: &Path) -> Result<()> {
             seal.app_id
         )));
     }
+
+    let seal_digest = sha256_hex(&raw);
+    if verify_cache_hit(home, app_id, &seal, &seal_digest, dir) {
+        return Ok(());
+    }
+
+    #[cfg(test)]
+    FULL_VERIFICATIONS.with(|count| count.set(count.get() + 1));
     let actual = build(dir)?;
     if actual.app_id != seal.app_id {
         return Err(Error::Msg(format!(
@@ -176,6 +338,9 @@ pub fn verify(home: &Path, app_id: &str, dir: &Path) -> Result<()> {
         .map(|(rel, hash)| (rel.clone(), hash.clone()))
         .collect();
     if actual.files == sealed {
+        if persist_cache {
+            write_verify_cache(home, app_id, &seal, &seal_digest, dir);
+        }
         return Ok(());
     }
 
@@ -201,6 +366,7 @@ pub fn verify(home: &Path, app_id: &str, dir: &Path) -> Result<()> {
 
 pub fn remove(home: &Path, app_id: &str) {
     let _ = fs::remove_file(seal_path(home, app_id));
+    let _ = fs::remove_file(cache_path(home, app_id));
 }
 
 #[cfg(test)]
@@ -281,6 +447,54 @@ mod tests {
         fs::write(pkg.join("attachments/hash.json"), b"{}").unwrap();
 
         verify(&home, "demo", &pkg).unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verification_cache_skips_unchanged_packages() {
+        let root = tmp("cache");
+        let home = root.join("home");
+        let pkg = root.join("pkg");
+        write(&home, "demo", &pkg).unwrap();
+        let checks = || FULL_VERIFICATIONS.with(|count| count.get());
+
+        let before = checks();
+        verify(&home, "demo", &pkg).unwrap();
+        assert_eq!(checks(), before + 1);
+        assert!(cache_path(&home, "demo").exists());
+
+        // Second run over an unchanged tree must not hash the files again.
+        verify(&home, "demo", &pkg).unwrap();
+        assert_eq!(checks(), before + 1, "unchanged tree must hit the cache");
+
+        // Runtime state is not sealed and must not invalidate the cache.
+        fs::create_dir_all(pkg.join("sessions/s1")).unwrap();
+        fs::write(pkg.join("sessions/s1/meta.json"), b"{}").unwrap();
+        verify(&home, "demo", &pkg).unwrap();
+        assert_eq!(checks(), before + 1);
+
+        // Same size, different content: the mtime change forces a full check.
+        fs::write(pkg.join("prompt/system.md"), b"HELLO").unwrap();
+        assert!(verify(&home, "demo", &pkg).is_err());
+        assert_eq!(checks(), before + 2);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resealing_invalidates_the_verification_cache() {
+        let root = tmp("resel");
+        let home = root.join("home");
+        let pkg = root.join("pkg");
+        write(&home, "demo", &pkg).unwrap();
+        verify(&home, "demo", &pkg).unwrap();
+        assert!(cache_path(&home, "demo").exists());
+
+        fs::write(pkg.join("prompt/system.md"), b"new prompt").unwrap();
+        write(&home, "demo", &pkg).unwrap();
+        assert!(!cache_path(&home, "demo").exists());
+        verify(&home, "demo", &pkg).unwrap();
+
         let _ = fs::remove_dir_all(root);
     }
 }
