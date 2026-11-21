@@ -1616,10 +1616,36 @@ function chatItemKey(item) {
     item.ms ?? "",
     item.tok_s ?? "",
     item.model || "",
+    item.message_id || "",
   ].join("\u0001");
 }
 
-function buildChatNode(item, streaming) {
+const ICON_EDIT =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+const ICON_COPY =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+const ICON_REGENERATE =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
+
+function iconButton(html, label) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost small icon-btn";
+  button.innerHTML = html;
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  return button;
+}
+
+function previousUserMessage(items, index) {
+  for (let i = index - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item.role === "user" && item.kind === "text" && item.message_id) return item;
+  }
+  return null;
+}
+
+function buildChatNode(item, streaming, items, index) {
   if (item.role === "tool") {
     const div = document.createElement("div");
     div.className = "msg tool";
@@ -1694,6 +1720,21 @@ function buildChatNode(item, streaming) {
   }
   div.appendChild(body);
 
+  if (item.role === "user" && item.kind === "text") {
+    const footer = document.createElement("div");
+    footer.className = "msg-foot user-actions";
+    if (item.message_id) {
+      const edit = iconButton(ICON_EDIT, "Изменить сообщение");
+      edit.dataset.editMessage = String(index);
+      footer.appendChild(edit);
+    }
+    const copy = iconButton(ICON_COPY, "Копировать сообщение");
+    copy.dataset.copy = "1";
+    copy.dataset.text = item.text;
+    footer.appendChild(copy);
+    div.appendChild(footer);
+  }
+
   if (item.role === "assistant") {
     const footer = document.createElement("div");
     footer.className = "msg-foot";
@@ -1707,13 +1748,16 @@ function buildChatNode(item, streaming) {
     const meta = document.createElement("span");
     meta.className = "muted small mono";
     meta.textContent = stats.join(" · ");
-    const copy = document.createElement("button");
-    copy.className = "ghost small";
-    copy.textContent = "Копировать";
+    const copy = iconButton(ICON_COPY, "Копировать ответ");
     copy.dataset.copy = "1";
     copy.dataset.text = item.text;
     footer.appendChild(meta);
     footer.appendChild(copy);
+    if (previousUserMessage(items, index)) {
+      const regen = iconButton(ICON_REGENERATE, "Перегенерировать ответ");
+      regen.dataset.regenerate = String(index);
+      footer.appendChild(regen);
+    }
     div.appendChild(footer);
   }
 
@@ -1773,7 +1817,7 @@ function renderChat(items) {
     // Live snapshots arrive every 80 ms: skip highlighting the growing message
     // and let the final `chat://update` render it once.
     const streaming = !!ctx.busy && !!ctx.acceptStream && i === items.length - 1;
-    const node = buildChatNode(items[i], streaming);
+    const node = buildChatNode(items[i], streaming, items, i);
     if (entry && entry.node && entry.node.tagName === "DETAILS" && entry.node.open) {
       node.open = true;
     }
@@ -2110,6 +2154,68 @@ function startChatRename(button, chat) {
   input.addEventListener("blur", () => finish(true));
 }
 
+function pinnedChatsKey() {
+  return `eco.pinned.${ctx.appId || ""}`;
+}
+
+function pinnedChatIds() {
+  try {
+    const list = JSON.parse(localStorage.getItem(pinnedChatsKey()) || "[]");
+    return Array.isArray(list) ? list.filter((id) => typeof id === "string") : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function togglePinnedChat(id) {
+  const set = new Set(pinnedChatIds());
+  if (set.has(id)) set.delete(id);
+  else set.add(id);
+  try {
+    localStorage.setItem(pinnedChatsKey(), JSON.stringify([...set]));
+  } catch (_) {}
+  renderChatList();
+}
+
+function chatRow(chat, pinned) {
+  const row = document.createElement("div");
+  row.className = "chat-row";
+
+  const btn = document.createElement("button");
+  btn.className = "chat-item" + (chat.id === ctx.chatId ? " active" : "");
+  btn.textContent = chat.title;
+  btn.title = `${chat.title}\nДвойной щелчок — переименовать`;
+  btn.dataset.chat = chat.id;
+  btn.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    startChatRename(btn, chat);
+  });
+
+  const pin = document.createElement("button");
+  pin.type = "button";
+  pin.className = "chat-pin" + (pinned ? " active" : "");
+  pin.title = pinned ? "Открепить чат" : "Закрепить чат";
+  pin.setAttribute("aria-label", pin.title);
+  pin.dataset.pin = chat.id;
+  pin.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.8V6a3 3 0 0 1 6 0v4.8l2 2.2v1.5H7V13z"/></svg>';
+  pin.addEventListener("click", (event) => {
+    event.stopPropagation();
+    togglePinnedChat(chat.id);
+  });
+
+  const del = document.createElement("button");
+  del.className = "chat-del";
+  del.textContent = "×";
+  del.title = "Удалить чат";
+  del.dataset.del = chat.id;
+
+  row.appendChild(btn);
+  row.appendChild(pin);
+  row.appendChild(del);
+  return row;
+}
+
 function renderChatList() {
   const box = $("chat-list");
   box.innerHTML = "";
@@ -2117,8 +2223,20 @@ function renderChatList() {
   const chats = (ctx.chats || []).filter(
     (chat) => !query || String(chat.title || "").toLowerCase().includes(query),
   );
+  const pinned = new Set(pinnedChatIds());
+  const pinnedChats = chats.filter((chat) => pinned.has(chat.id));
+  const otherChats = chats.filter((chat) => !pinned.has(chat.id));
+  const addGroup = (label, list) => {
+    if (!list.length) return;
+    const head = document.createElement("div");
+    head.className = "hist-group";
+    head.textContent = label;
+    box.appendChild(head);
+    for (const chat of list) box.appendChild(chatRow(chat, pinned.has(chat.id)));
+  };
+  addGroup("Закреплённые", pinnedChats);
   let group = "";
-  for (const chat of chats) {
+  for (const chat of otherChats) {
     const label = chatGroup(chat.updated);
     if (label !== group) {
       group = label;
@@ -2127,28 +2245,7 @@ function renderChatList() {
       head.textContent = label;
       box.appendChild(head);
     }
-    const row = document.createElement("div");
-    row.className = "chat-row";
-
-    const btn = document.createElement("button");
-    btn.className = "chat-item" + (chat.id === ctx.chatId ? " active" : "");
-    btn.textContent = chat.title;
-    btn.title = `${chat.title}\nДвойной щелчок — переименовать`;
-    btn.dataset.chat = chat.id;
-    btn.addEventListener("dblclick", (event) => {
-      event.preventDefault();
-      startChatRename(btn, chat);
-    });
-
-    const del = document.createElement("button");
-    del.className = "chat-del";
-    del.textContent = "×";
-    del.title = "Удалить чат";
-    del.dataset.del = chat.id;
-
-    row.appendChild(btn);
-    row.appendChild(del);
-    box.appendChild(row);
+    box.appendChild(chatRow(chat, false));
   }
   if (!chats.length && query) {
     const empty = document.createElement("p");
@@ -2383,6 +2480,10 @@ async function deleteChat(sessionId) {
   await guard(async () => {
     const info = await invoke("chat_delete", { app_id: ctx.appId, session_id: sessionId });
     ctx.chatId = info.session;
+    const pins = pinnedChatIds().filter((id) => id !== sessionId);
+    try {
+      localStorage.setItem(pinnedChatsKey(), JSON.stringify(pins));
+    } catch (_) {}
     await refreshChats();
     await loadHistory();
     ctx.pendingPermissions = (ctx.pendingPermissions || []).filter(
@@ -2396,7 +2497,7 @@ const MAX_ATTACHMENTS = 3;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 // Must match the backend magic check: anything else is rejected on send.
 const ATTACHMENT_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-const MAX_TEXT_BYTES = 64 * 1024;
+const MAX_TEXT_BYTES = 256 * 1024;
 const ATTACHMENT_TEXT_MIMES = new Set([
   "application/json",
   "application/xml",
@@ -2535,6 +2636,70 @@ function autosizeComposer() {
   textarea.style.overflowY = textarea.scrollHeight > max ? "auto" : "hidden";
 }
 
+function showEditBanner(show) {
+  const banner = $("chat-edit-banner");
+  if (banner) banner.hidden = !show;
+}
+
+function beginEdit(item) {
+  if (!item || !item.message_id) {
+    toast("Это сообщение нельзя изменить", true);
+    return;
+  }
+  ctx.editTarget = { id: item.message_id };
+  const text = $("chat-text");
+  text.value = item.text || "";
+  autosizeComposer();
+  showEditBanner(true);
+  text.focus();
+  text.setSelectionRange(text.value.length, text.value.length);
+}
+
+function cancelEdit() {
+  ctx.editTarget = null;
+  showEditBanner(false);
+}
+
+/// Reverts the message and everything after it, then reloads history so the
+/// optimistic turn does not stack on top of the reverted one.
+/// Hides the edited message and everything after it immediately. Opencode
+/// keeps reverted messages in `GET /message` until the next prompt is sent, so
+/// reloading history there would show the old turn next to the new one.
+function truncateAtMessage(messageId) {
+  const items = ctx.chatItems || [];
+  const index = items.findIndex((item) => item.message_id === messageId);
+  if (index < 0) return false;
+  ctx.chatItems = items.slice(0, index);
+  ctx.streamingItems = [];
+  ctx.acceptStream = false;
+  renderChat(ctx.chatItems);
+  return true;
+}
+
+async function revertForResend(messageId) {
+  await invoke("chat_revert", { app_id: ctx.appId, message_id: messageId });
+  // Fall back to the engine's view only if the id is not in the local list.
+  if (!truncateAtMessage(messageId)) await loadHistory();
+}
+
+async function regenerateFrom(userItem) {
+  if (!ctx.appId || ctx.busy || !userItem || !userItem.message_id) return;
+  const text = userItem.text || "";
+  if (!text.trim()) {
+    toast("Нечего перегенерировать", true);
+    return;
+  }
+  setBusy(true);
+  try {
+    await revertForResend(userItem.message_id);
+  } catch (e) {
+    chatError(String(e));
+    setBusy(false);
+    return;
+  }
+  await dispatchTurn(text, [], $("chat-reasoning").value || null);
+}
+
 async function sendChat() {
   if (!ctx.appId) return;
   const text = $("chat-text").value.trim();
@@ -2544,10 +2709,22 @@ async function sendChat() {
     data: attachment.data,
   }));
   if ((!text && !attachments.length) || ctx.busy) return;
+  const edit = ctx.editTarget;
+  setBusy(true);
+  if (edit) {
+    ctx.editTarget = null;
+    showEditBanner(false);
+    try {
+      await revertForResend(edit.id);
+    } catch (e) {
+      chatError(String(e));
+      setBusy(false);
+      return;
+    }
+  }
   $("chat-text").value = "";
   autosizeComposer();
   clearAttachments();
-  setBusy(true);
   await dispatchTurn(text, attachments, $("chat-reasoning").value || null);
 }
 
@@ -4084,6 +4261,7 @@ function bind() {
   }
 
   $("chat-send").addEventListener("click", sendChat);
+  $("chat-edit-cancel").addEventListener("click", cancelEdit);
   $("chat-new").addEventListener("click", newChat);
   $("chat-stop").addEventListener("click", stopChat);
   $("chat-list").addEventListener("click", (e) => {
@@ -4103,6 +4281,20 @@ function bind() {
   $("chat-log").addEventListener("click", (e) => {
     if (e.target.closest("[data-retry-turn]")) {
       guard(retryLastTurn);
+      return;
+    }
+    const editBtn = e.target.closest("[data-edit-message]");
+    if (editBtn) {
+      const item = (ctx.chatItems || [])[Number(editBtn.dataset.editMessage)];
+      beginEdit(item);
+      return;
+    }
+    const regenBtn = e.target.closest("[data-regenerate]");
+    if (regenBtn) {
+      const index = Number(regenBtn.dataset.regenerate);
+      const target = previousUserMessage(ctx.chatItems || [], index);
+      if (target) guard(() => regenerateFrom(target));
+      else toast("Не найдено сообщение для перегенерации", true);
       return;
     }
     const starter = e.target.closest("[data-starter]");

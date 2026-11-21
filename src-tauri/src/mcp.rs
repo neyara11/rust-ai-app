@@ -335,19 +335,29 @@ fn parse_rpc_body(text: &str, id: u64) -> Result<Value> {
 /// Caps a tool result so it can never blow up the model context or the audit
 /// log. The full response stays on the server side.
 pub fn capped(value: &Value) -> (String, bool, usize) {
+    capped_with(value, MAX_RESPONSE_BYTES)
+}
+
+/// Same as `capped`, with an explicit limit. File and artifact results use a
+/// higher limit than remote MCP responses: they are already bounded by the
+/// read cap, and the JSON envelope must not cut them a second time.
+pub fn capped_with(value: &Value, limit: usize) -> (String, bool, usize) {
     let pretty = serde_json::to_string_pretty(value).unwrap_or_default();
     let bytes = pretty.len();
-    if bytes <= MAX_RESPONSE_BYTES {
+    if bytes <= limit {
         return (pretty, false, bytes);
     }
     let mut cut = String::new();
     for ch in pretty.chars() {
-        if cut.len() + ch.len_utf8() > MAX_RESPONSE_BYTES {
+        if cut.len() + ch.len_utf8() > limit {
             break;
         }
         cut.push(ch);
     }
-    cut.push_str("\n… truncated by platform (64 KiB limit)");
+    cut.push_str(&format!(
+        "\n… truncated by platform ({} KiB limit)",
+        limit / 1024
+    ));
     (cut, true, bytes)
 }
 

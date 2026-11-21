@@ -3,6 +3,7 @@ use crate::manifest::{self, Manifest, ToolDef};
 use crate::mcp::{self, McpSession};
 use crate::registry;
 use crate::secrets::SecretStore;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -17,7 +18,14 @@ use std::time::{Duration, Instant};
 /// model can call is exposed by the platform gateway under this name.
 pub const SERVER_NAME: &str = "platform";
 
-const MAX_READ_BYTES: usize = 64 * 1024;
+/// Inline cap for text read into the model context (`read_file`, skill read).
+/// 256 KiB is roughly 64k tokens, a sensible single-tool share of a 256k-token
+/// context window. Larger files are reported as `truncated`.
+const MAX_READ_BYTES: usize = 256 * 1024;
+/// File and artifact results are already bounded by `MAX_READ_BYTES`; this
+/// margin covers the JSON envelope (pretty printing, escaping) so the gateway
+/// wrapper does not cut them a second time.
+const RESULT_ENVELOPE_MARGIN: usize = 16 * 1024;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 200;
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -64,6 +72,20 @@ fn read_capped_file(path: &Path) -> Result<(Vec<u8>, u64)> {
     let mut bytes = Vec::new();
     file.take(MAX_READ_BYTES as u64 + 1).read_to_end(&mut bytes)?;
     Ok((bytes, total))
+}
+
+/// Decodes at most `cap` bytes of UTF-8 text. A cut inside a multi-byte
+/// character shortens the text to the last full character instead of failing;
+/// genuinely invalid UTF-8 is still an error.
+fn utf8_prefix(bytes: &[u8], cap: usize) -> Result<String> {
+    let end = cap.min(bytes.len());
+    match std::str::from_utf8(&bytes[..end]) {
+        Ok(text) => Ok(text.to_string()),
+        Err(e) if e.error_len().is_none() => {
+            Ok(String::from_utf8_lossy(&bytes[..e.valid_up_to()]).into_owned())
+        }
+        Err(_) => msg("file is not UTF-8 text"),
+    }
 }
 
 fn secret_name_ok(value: &str) -> bool {
@@ -180,6 +202,62 @@ struct ProxyIdentity {
     token_id: String,
     /// Raw token, kept only in memory to re-check revocation on every call.
     raw: String,
+}
+
+/// Shared per-app tool-call counters. The platform writes a new turn id before
+/// each prompt; the gateway resets the turn counter when the id changes.
+const LIMITS_FILE: &str = "tool-limits.json";
+const TURN_MARKER_FILE: &str = "engine.turn";
+const RATE_WINDOW_SECS: u64 = 60;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ToolLimitState {
+    #[serde(default)]
+    turn: String,
+    #[serde(default)]
+    calls: u32,
+    #[serde(default)]
+    window: u64,
+    #[serde(default)]
+    window_calls: u32,
+}
+
+/// Applies per-turn and per-minute limits to `state`. Counting the attempt
+/// happens only when the call is allowed; the caller persists the state.
+fn enforce_tool_limits(
+    state: &mut ToolLimitState,
+    turn: Option<&str>,
+    max_calls: Option<u32>,
+    rate_per_min: Option<u32>,
+    now: u64,
+) -> Result<()> {
+    if let Some(turn) = turn {
+        if state.turn != turn {
+            state.turn = turn.to_string();
+            state.calls = 0;
+        }
+    }
+    if now.saturating_sub(state.window) >= RATE_WINDOW_SECS {
+        state.window = now;
+        state.window_calls = 0;
+    }
+    if let (Some(limit), Some(_)) = (max_calls, turn) {
+        if state.calls >= limit {
+            return Err(Error::Msg(format!(
+                "tool-call limit for this turn reached ({limit}); start a new turn or raise profile.max_tool_calls"
+            )));
+        }
+    }
+    if let Some(limit) = rate_per_min {
+        if state.window_calls >= limit {
+            return Err(Error::Msg(format!(
+                "tool-call rate limit reached ({limit} per minute); retry later"
+            )));
+        }
+    }
+    state.calls = state.calls.saturating_add(1);
+    state.window_calls = state.window_calls.saturating_add(1);
+    Ok(())
 }
 
 pub struct Proxy {
@@ -795,6 +873,45 @@ impl Proxy {
         }
     }
 
+    /// Enforces manifest tool limits. State lives in the engine directory so
+    /// every proxy process serving the app shares the same counters.
+    fn check_call_limits(&self) -> Result<()> {
+        let profile = &self.app.profile;
+        let max_calls = profile.max_tool_calls;
+        let rate = profile.rate_limit_per_min;
+        if max_calls.is_none() && rate.is_none() {
+            return Ok(());
+        }
+        let dir = registry::apps_dir(&self.home)
+            .join(&self.app.app_id)
+            .join("engine");
+        fs::create_dir_all(&dir)?;
+        let _guard = crate::sync::named_lock("tool-limits", &dir);
+        let path = dir.join(LIMITS_FILE);
+        let turn = fs::read_to_string(dir.join(TURN_MARKER_FILE))
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty());
+        let mut state = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<ToolLimitState>(&text).ok())
+            .unwrap_or_default();
+        enforce_tool_limits(
+            &mut state,
+            turn.as_deref(),
+            max_calls,
+            rate,
+            crate::artifacts::now_secs(),
+        )?;
+        let tmp = path.with_extension("tmp");
+        if let Ok(bytes) = serde_json::to_vec(&state) {
+            if fs::write(&tmp, bytes).is_ok() {
+                let _ = fs::rename(&tmp, &path);
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the MCP `tools/call` result object and the audit metadata.
     fn call(&mut self, name: &str, arguments: Value) -> Result<(Value, usize, bool)> {
         // Long-lived gateway: a token revoked or expired after start must not
@@ -862,7 +979,31 @@ impl Proxy {
 
         self.call_seq = self.call_seq.saturating_add(1);
         let request_id = format!("{}-{}", self.identity.token_id, self.call_seq);
+        if let Err(e) = self.check_call_limits() {
+            crate::commands::audit(
+                &self.home,
+                &self.app.app_id,
+                json!({
+                    "ts": crate::artifacts::now_secs(),
+                    "app_id": self.app.app_id,
+                    "app_version": self.app.version,
+                    "source": "agent",
+                    "action": "tool_denied",
+                    "request_id": request_id,
+                    "token_id": self.identity.token_id,
+                    "tool": name,
+                    "reason": e.to_string()
+                }),
+            );
+            return Err(e);
+        }
         let started = Instant::now();
+        let result_limit = match &route {
+            Route::Files | Route::Skill | Route::Artifacts => {
+                MAX_READ_BYTES + RESULT_ENVELOPE_MARGIN
+            }
+            _ => mcp::MAX_RESPONSE_BYTES,
+        };
         let raw = match &route {
             Route::Files => file_call(&self.workspace, name, &arguments),
             Route::Artifacts => self.artifact_call(name, &arguments),
@@ -881,7 +1022,7 @@ impl Proxy {
         };
 
         let (value, bytes, truncated) = match raw {
-            Ok(value) => wrap_result(value),
+            Ok(value) => wrap_result(value, result_limit),
             Err(e) => {
                 let problem = e.to_string();
                 self.audit(
@@ -1598,13 +1739,7 @@ fn skill_call(package_dir: &Path, args: &Value) -> Result<Value> {
             }
             let (bytes, total) = read_capped_file(&path)?;
             let truncated = bytes.len() > MAX_READ_BYTES;
-            let bytes = if truncated {
-                &bytes[..MAX_READ_BYTES]
-            } else {
-                &bytes[..]
-            };
-            let text = String::from_utf8(bytes.to_vec())
-                .map_err(|_| Error::Msg("skill is not UTF-8 text".to_string()))?;
+            let text = utf8_prefix(&bytes, MAX_READ_BYTES)?;
             Ok(json!({
                 "name": name,
                 "text": text,
@@ -1659,13 +1794,7 @@ fn file_call(workspace: &Path, name: &str, args: &Value) -> Result<Value> {
             }
             let (bytes, total) = read_capped_file(&path)?;
             let truncated = bytes.len() > MAX_READ_BYTES;
-            let bytes = if truncated {
-                &bytes[..MAX_READ_BYTES]
-            } else {
-                &bytes[..]
-            };
-            let text = String::from_utf8(bytes.to_vec())
-                .map_err(|_| Error::Msg("file is not UTF-8 text".to_string()))?;
+            let text = utf8_prefix(&bytes, MAX_READ_BYTES)?;
             Ok(json!({
                 "path": raw,
                 "text": text,
@@ -1712,19 +1841,19 @@ fn file_call(workspace: &Path, name: &str, args: &Value) -> Result<Value> {
 
 /// Passes a well-formed remote MCP result through unchanged, otherwise wraps
 /// the capped JSON in a single text content item.
-fn wrap_result(value: Value) -> (Value, usize, bool) {
+fn wrap_result(value: Value, limit: usize) -> (Value, usize, bool) {
     let compact_len = serde_json::to_string(&value)
         .map(|s| s.len())
         .unwrap_or(usize::MAX);
     let has_content = value.get("content").and_then(Value::as_array).is_some();
-    if has_content && compact_len <= mcp::MAX_RESPONSE_BYTES {
+    if has_content && compact_len <= limit {
         return (value, compact_len, false);
     }
     let is_error = value
         .get("isError")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let (text, truncated, bytes) = mcp::capped(&value);
+    let (text, truncated, bytes) = mcp::capped_with(&value, limit);
     (
         json!({ "content": [{ "type": "text", "text": text }], "isError": is_error }),
         bytes,
@@ -2009,6 +2138,61 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn read_file_inlines_up_to_256_kib_and_cuts_on_a_char_boundary() {
+        let root = temp_workspace("read-cap");
+        // Files below the cap are returned whole.
+        fs::write(root.join("big.txt"), "a".repeat(200 * 1024)).unwrap();
+        let read = file_call(&root, "read_file", &json!({ "path": "big.txt" })).unwrap();
+        assert_eq!(read["truncated"], false);
+        assert_eq!(read["text"].as_str().unwrap().len(), 200 * 1024);
+
+        // Above the cap the text stops at the cap and reports the real size.
+        fs::write(root.join("huge.txt"), "a".repeat(MAX_READ_BYTES + 5)).unwrap();
+        let read = file_call(&root, "read_file", &json!({ "path": "huge.txt" })).unwrap();
+        assert_eq!(read["truncated"], true);
+        assert_eq!(read["text"].as_str().unwrap().len(), MAX_READ_BYTES);
+        assert_eq!(read["bytes"], (MAX_READ_BYTES + 5) as u64);
+
+        // A cut inside a multi-byte character must not turn into an error.
+        let body = "€".repeat(MAX_READ_BYTES / 3 + 4);
+        fs::write(root.join("utf8.txt"), &body).unwrap();
+        let read = file_call(&root, "read_file", &json!({ "path": "utf8.txt" })).unwrap();
+        assert_eq!(read["truncated"], true);
+        let text = read["text"].as_str().unwrap();
+        assert!(text.len() <= MAX_READ_BYTES);
+        assert!(text.ends_with('€'));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn gateway_does_not_cut_file_results_below_the_read_cap() {
+        let root = temp_workspace("gateway-read");
+        fs::write(root.join("big.txt"), "a".repeat(200 * 1024)).unwrap();
+        let value = file_call(&root, "read_file", &json!({ "path": "big.txt" })).unwrap();
+        let (wrapped, _bytes, truncated) =
+            wrap_result(value, MAX_READ_BYTES + RESULT_ENVELOPE_MARGIN);
+        assert!(!truncated);
+        let text = wrapped["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["truncated"], false);
+        assert_eq!(parsed["text"].as_str().unwrap().len(), 200 * 1024);
+
+        fs::write(root.join("huge.txt"), "a".repeat(300 * 1024)).unwrap();
+        let value = file_call(&root, "read_file", &json!({ "path": "huge.txt" })).unwrap();
+        let (wrapped, _bytes, truncated) =
+            wrap_result(value, MAX_READ_BYTES + RESULT_ENVELOPE_MARGIN);
+        assert!(!truncated, "the read cap already reports truncation itself");
+        let text = wrapped["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["truncated"], true);
+        assert_eq!(parsed["text"].as_str().unwrap().len(), MAX_READ_BYTES);
+        assert_eq!(parsed["bytes"], (300 * 1024) as u64);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[cfg(windows)]
     #[test]
     fn secret_env_mapping_rules() {
@@ -2138,5 +2322,31 @@ mod tests {
             .stderr(Stdio::piped());
         let run = run_with_limits(&mut slow, Duration::from_millis(200), 1024, None, None, None).unwrap();
         assert!(run.timed_out);
+    }
+
+    #[test]
+    fn tool_limits_reset_per_turn_and_enforce_the_rate_window() {
+        let mut state = ToolLimitState::default();
+        enforce_tool_limits(&mut state, Some("t1"), Some(2), None, 100).unwrap();
+        enforce_tool_limits(&mut state, Some("t1"), Some(2), None, 101).unwrap();
+        assert!(enforce_tool_limits(&mut state, Some("t1"), Some(2), None, 102).is_err());
+        // A new turn id resets the per-turn allowance.
+        enforce_tool_limits(&mut state, Some("t2"), Some(2), None, 103).unwrap();
+        assert_eq!(state.calls, 1);
+
+        // The rate window spans turns and resets after a minute.
+        let mut state = ToolLimitState::default();
+        enforce_tool_limits(&mut state, Some("t1"), None, Some(2), 1000).unwrap();
+        enforce_tool_limits(&mut state, Some("t2"), None, Some(2), 1001).unwrap();
+        assert!(enforce_tool_limits(&mut state, Some("t3"), None, Some(2), 1002).is_err());
+        enforce_tool_limits(&mut state, Some("t3"), None, Some(2), 1061).unwrap();
+        assert_eq!(state.window_calls, 1);
+
+        // Without a turn marker the per-turn limit cannot be evaluated, so
+        // only the rate limit applies.
+        let mut state = ToolLimitState::default();
+        for now in 0..5 {
+            enforce_tool_limits(&mut state, None, Some(1), None, now).unwrap();
+        }
     }
 }

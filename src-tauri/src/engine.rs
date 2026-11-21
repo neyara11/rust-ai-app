@@ -61,6 +61,10 @@ pub struct ChatItem {
     pub tok_s: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Engine message id, used by `chat_revert` to replace an edited prompt and
+    /// everything after it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 /// Uploaded prompt content. `data` is standard base64 without a `data:` prefix;
@@ -75,7 +79,9 @@ pub struct AttachmentInput {
 
 pub const MAX_ATTACHMENTS: usize = 3;
 pub const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_TEXT_BYTES: usize = 64 * 1024;
+/// Inline text attachments follow the file-read cap: 256 KiB is a sensible
+/// single-message share of a 256k-token context window.
+pub const MAX_TEXT_BYTES: usize = 256 * 1024;
 
 fn normalized_mime(raw: &str) -> String {
     let mime = raw.trim().to_lowercase();
@@ -229,6 +235,7 @@ impl ChatItem {
             ms: None,
             tok_s: None,
             model: None,
+            message_id: None,
         }
     }
 }
@@ -1025,6 +1032,15 @@ fn build_config(
     }
     root.insert("permission".to_string(), Value::Object(permissions));
     root.insert("tools".to_string(), Value::Object(tools));
+    // `steps` is the engine's own per-turn model-step budget: on the final
+    // step it drops tools and asks for a summary. Zero would mean "no tool
+    // use at all", so treat it as unset.
+    if let Some(steps) = app.profile.max_steps.filter(|steps| *steps > 0) {
+        root.insert(
+            "agent".to_string(),
+            json!({ "build": { "steps": steps } }),
+        );
+    }
 
     Ok((Value::Object(root), provider_id, model_id, envs))
 }
@@ -1863,6 +1879,23 @@ impl ChatSession {
         Ok(())
     }
 
+    /// Reverts a message and everything after it, so the UI can replace an
+    /// edited prompt or regenerate an answer. Hidden messages stay available
+    /// to the engine until `unrevert`.
+    pub fn revert(&self, message_id: &str) -> Result<()> {
+        crate::manifest::parse_id(message_id, "message")?;
+        let agent = agent();
+        http(
+            &agent,
+            &self.base,
+            &self.auth,
+            "POST",
+            &format!("/session/{}/revert", self.session_id),
+            Some(&json!({ "messageID": message_id })),
+        )?;
+        Ok(())
+    }
+
     /// Synchronous prompt: returns when the agent finishes the turn. Callers
     /// run it on a worker thread so the UI stays responsive.
     pub fn prompt(&self, text: &str, variant: Option<&str>) -> Result<()> {
@@ -1879,6 +1912,7 @@ impl ChatSession {
     ) -> Result<()> {
         let started = Instant::now();
         let request_id = identity::new_request_id();
+        self.begin_turn();
         let result = self.prompt_raw(text, variant, attachments);
         let took_ms = started.elapsed().as_millis() as u64;
         match &result {
@@ -1892,6 +1926,21 @@ impl ChatSession {
             ),
         }
         result.map(|_| ())
+    }
+
+    /// Marks a new turn for the tool gateway, which enforces
+    /// `profile.max_tool_calls` per turn. The write is best-effort: without a
+    /// marker the gateway keeps rate limiting but skips the per-turn counter.
+    fn begin_turn(&self) {
+        let dir = self.home.join("apps").join(&self.app_id).join("engine");
+        let path = dir.join("engine.turn");
+        let tmp = dir.join("engine.turn.tmp");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        if std::fs::write(&tmp, identity::new_request_id()).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
     }
 
     fn prompt_raw(
@@ -2611,6 +2660,10 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
             .and_then(|i| i.get("modelID"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        let message_id = info
+            .and_then(|i| i.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
 
         let time = info.and_then(|i| i.get("time"));
         let created = time.and_then(|t| t.get("created")).and_then(Value::as_u64);
@@ -2643,6 +2696,7 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
             item.ms = ms;
             item.tok_s = tok_s;
             item.model = model;
+            item.message_id = message_id;
             items.push(item);
         }
         for tool in tools {
@@ -3182,6 +3236,19 @@ mod tests {
     }
 
     #[test]
+    fn text_attachments_accept_up_to_256_kib() {
+        use base64::Engine as _;
+        let make = |len: usize| AttachmentInput {
+            mime: "text/plain".to_string(),
+            filename: "notes.txt".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(vec![b'a'; len]),
+        };
+        assert!(validate_attachments(&[make(200 * 1024)], false).is_ok());
+        assert!(validate_attachments(&[make(MAX_TEXT_BYTES)], false).is_ok());
+        assert!(validate_attachments(&[make(MAX_TEXT_BYTES + 1)], false).is_err());
+    }
+
+    #[test]
     fn event_stream_reconnects_after_eof() {
         use std::io::{Read, Write};
         use std::sync::atomic::AtomicUsize;
@@ -3317,6 +3384,23 @@ mod tests {
         assert_eq!(file.image_ref.as_deref(), Some(expected.as_str()));
         let serialized = serde_json::to_value(file).unwrap();
         assert!(serialized.get("data").is_none());
+    }
+
+    #[test]
+    fn history_exposes_message_ids_for_edit_and_regenerate() {
+        let raw = json!([
+            {
+                "info": { "id": "msg_user", "role": "user" },
+                "parts": [{ "type": "text", "text": "вопрос" }]
+            },
+            {
+                "info": { "id": "msg_assistant", "role": "assistant" },
+                "parts": [{ "type": "text", "text": "ответ" }]
+            }
+        ]);
+        let items = parse_history(&raw);
+        assert_eq!(items[0].message_id.as_deref(), Some("msg_user"));
+        assert_eq!(items[1].message_id.as_deref(), Some("msg_assistant"));
     }
 
     #[test]

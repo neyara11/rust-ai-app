@@ -1140,7 +1140,10 @@ pub fn cleanup_artifacts(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_host_port, read_tail, safe_diagram_name};
+    use super::{
+        audit, audit_rotate_if_needed, audit_rotated_path, parse_host_port, read_tail,
+        safe_diagram_name, AUDIT_KEEP_FILES,
+    };
 
     #[test]
     fn diagram_names_cannot_escape_or_keep_a_foreign_extension() {
@@ -1180,6 +1183,72 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audit_rotation_keeps_a_bounded_number_of_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "eco-audit-rotate-{}-{}",
+            std::process::id(),
+            crate::artifacts::now_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.jsonl");
+
+        let rounds = AUDIT_KEEP_FILES + 2;
+        for round in 0..rounds {
+            std::fs::write(&path, format!("round {round} {}", "x".repeat(64))).unwrap();
+            assert!(audit_rotate_if_needed(&path, 32).unwrap());
+        }
+
+        assert!(!path.exists());
+        for index in 1..=AUDIT_KEEP_FILES {
+            assert!(audit_rotated_path(&path, index).exists());
+        }
+        assert!(!audit_rotated_path(&path, AUDIT_KEEP_FILES + 1).exists());
+        let newest = std::fs::read_to_string(audit_rotated_path(&path, 1)).unwrap();
+        assert!(newest.contains(&format!("round {}", rounds - 1)));
+
+        // A small recent journal is left alone.
+        std::fs::write(&path, "small\n").unwrap();
+        assert!(!audit_rotate_if_needed(&path, 4096).unwrap());
+        assert!(path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn audit_appends_from_threads_are_not_lost() {
+        let home = std::env::temp_dir().join(format!(
+            "eco-audit-concurrent-{}-{}",
+            std::process::id(),
+            crate::artifacts::now_secs()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+
+        std::thread::scope(|scope| {
+            for thread in 0..6 {
+                let home = home.clone();
+                scope.spawn(move || {
+                    for item in 0..50 {
+                        audit(
+                            &home,
+                            "app",
+                            serde_json::json!({ "ts": item, "thread": thread }),
+                        );
+                    }
+                });
+            }
+        });
+
+        let text = std::fs::read_to_string(home.join("audit/app.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 300);
+        for line in text.lines() {
+            serde_json::from_str::<serde_json::Value>(line).unwrap();
+        }
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -1226,17 +1295,88 @@ pub struct McpCallResult {
     pub result: String,
 }
 
+/// Journals rotate before they become slow to read or copy. Ten megabytes is
+/// roughly a month of normal use; three older files are kept.
+const AUDIT_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+const AUDIT_KEEP_FILES: u32 = 3;
+const AUDIT_MAX_AGE_SECS: u64 = 24 * 60 * 60;
+
+/// Test hook: `ECO_AUDIT_ROTATE_BYTES` lowers the threshold without exposing
+/// rotation settings in the UI config.
+fn audit_rotate_bytes() -> u64 {
+    std::env::var("ECO_AUDIT_ROTATE_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(AUDIT_ROTATE_BYTES)
+}
+
+/// Serializes journal appends between the platform process and every
+/// `--mcp-proxy` child: both write the same `audit/<app>.jsonl`.
+fn audit_lock(home: &std::path::Path) -> Option<crate::sync::NamedLock> {
+    crate::sync::named_lock("audit", home)
+}
+
+fn audit_rotated_path(path: &std::path::Path, index: u32) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".{index}"));
+    PathBuf::from(name)
+}
+
+/// Rotates `path` to `.1` when it is too large or older than a day, shifting
+/// older journals to `.2`, `.3` and dropping the fourth. Returns whether a
+/// rotation happened.
+fn audit_rotate_if_needed(path: &std::path::Path, bytes: u64) -> std::io::Result<bool> {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if meta.len() == 0 {
+        return Ok(false);
+    }
+    let too_big = meta.len() >= bytes;
+    let too_old = meta
+        .modified()
+        .ok()
+        .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+        .map(|age| age.as_secs() >= AUDIT_MAX_AGE_SECS)
+        .unwrap_or(false);
+    if !too_big && !too_old {
+        return Ok(false);
+    }
+    let _ = std::fs::remove_file(audit_rotated_path(path, AUDIT_KEEP_FILES));
+    for index in (1..AUDIT_KEEP_FILES).rev() {
+        let from = audit_rotated_path(path, index);
+        if from.exists() {
+            std::fs::rename(&from, audit_rotated_path(path, index + 1))?;
+        }
+    }
+    std::fs::rename(path, audit_rotated_path(path, 1))?;
+    Ok(true)
+}
+
 pub fn audit(home: &std::path::Path, app_id: &str, entry: serde_json::Value) {
     use std::io::Write;
     let dir = home.join("audit");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
+    // Hold the cross-process lock across rotation and append, so the rename
+    // cannot race a write from the proxy.
+    let _guard = audit_lock(home);
+    let path = dir.join(format!("{app_id}.jsonl"));
+    if let Err(e) = audit_rotate_if_needed(&path, audit_rotate_bytes()) {
+        eprintln!(
+            "eco-platform audit: rotation failed for {}: {e}",
+            path.display()
+        );
+    }
     let line = format!("{entry}\n");
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join(format!("{app_id}.jsonl")))
+        .open(&path)
     {
         let _ = file.write_all(line.as_bytes());
     }
@@ -2224,6 +2364,29 @@ pub async fn chat_history(
     })
     .await
     .map_err(|e| Error::Msg(format!("chat history task failed: {e}")))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn chat_revert(
+    app: tauri::AppHandle,
+    app_id: String,
+    message_id: String,
+) -> Result<()> {
+    manifest::parse_id(&app_id, "app")?;
+    manifest::parse_id(&message_id, "message")?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<()> {
+        let state = app.state::<AppState>();
+        let session = {
+            let engines = engines_lock(&state)?;
+            engines
+                .get(&app_id)
+                .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?
+                .snapshot()
+        };
+        session.revert(&message_id)
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("chat revert task failed: {e}")))?
 }
 
 #[tauri::command(rename_all = "snake_case")]

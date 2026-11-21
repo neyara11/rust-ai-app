@@ -13,8 +13,17 @@ pub struct Profile {
     pub system_prompt: String,
     #[serde(default)]
     pub model_hint: Option<String>,
+    /// Maximum model steps in one turn. Enforced by the engine (`agent.steps`),
+    /// which removes tools and asks for a summary on the final step.
     #[serde(default)]
     pub max_steps: Option<u32>,
+    /// Maximum tool calls the gateway accepts in one turn. The gateway is the
+    /// only path to tools, so this also bounds tool-call storms.
+    #[serde(default)]
+    pub max_tool_calls: Option<u32>,
+    /// Maximum tool calls per rolling minute for this app.
+    #[serde(default)]
+    pub rate_limit_per_min: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

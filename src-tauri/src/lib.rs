@@ -15,6 +15,7 @@ pub mod seal;
 pub mod secrets;
 pub mod state;
 pub mod support;
+pub mod sync;
 pub mod svg_icon;
 pub mod workspace;
 
@@ -159,6 +160,7 @@ pub fn run() {
             commands::chat_status,
             commands::chat_delete,
             commands::chat_history,
+            commands::chat_revert,
             commands::chat_image,
             commands::chat_reset,
             commands::chat_stop,

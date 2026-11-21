@@ -1849,6 +1849,43 @@ button:focus-visible,
   box-shadow: none;
 }
 
+.chat-pin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  box-shadow: none;
+  color: var(--muted);
+  opacity: 0;
+}
+
+.chat-pin svg {
+  width: 14px;
+  height: 14px;
+}
+
+.chat-pin.active {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.chat-row:hover .chat-pin {
+  opacity: 0.9;
+}
+
+.chat-pin:hover:not(:disabled) {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--text);
+  transform: none;
+  box-shadow: none;
+}
+
 .chat-sidebar-foot {
   padding: 10px 12px;
   border-top: 1px solid var(--line);
@@ -2517,6 +2554,24 @@ button:focus-visible,
   font-size: 11px;
 }
 
+.msg-foot.user-actions {
+  justify-content: flex-start;
+  gap: 6px;
+}
+
+.msg-foot .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+  line-height: 0;
+}
+
+.msg-foot .icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
 .chat-empty {
   display: flex;
   flex-direction: column;
@@ -2744,6 +2799,29 @@ button:focus-visible,
 
 .chat-attachments[hidden] {
   display: none;
+}
+
+.chat-edit-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 840px;
+  margin: 0 auto 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.chat-edit-banner[hidden] {
+  display: none;
+}
+
+.chat-edit-banner span {
+  flex: 1;
+  min-width: 0;
 }
 
 .chat-attachment-chip {
