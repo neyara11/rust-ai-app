@@ -5349,3 +5349,12 @@ html[data-theme="light"] {
   background: var(--surface);
   color: var(--text);
 }
+
+#chat-compact:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#chat-compact:disabled:hover {
+  background: transparent;
+}

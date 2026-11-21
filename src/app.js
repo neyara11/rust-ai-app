@@ -462,6 +462,7 @@ const ctx = {
   pendingPermissions: [],
   chatStart: null,
   reasoning: "",
+  compacting: false,
 };
 
 const THEME_KEY = "theme";
@@ -1887,6 +1888,52 @@ function updateContextMeter(items) {
     text.textContent = `контекст ${percent}%`;
   }
   renderContextPopover();
+  const compact = $("chat-compact");
+  if (compact) compact.disabled = !ctx.chatId || ctx.busy || ctx.compacting;
+}
+
+function compactionPercent() {
+  const limit = Number(ctx.contextLimit) || 0;
+  const used = Number(ctx.contextUsage && ctx.contextUsage.used) || 0;
+  if (!limit || !used) return 0;
+  return (used / limit) * 100;
+}
+
+async function compactContext() {
+  if (!ctx.appId || !ctx.chatId || ctx.busy || ctx.compacting) return;
+  ctx.compacting = true;
+  setBusy(true);
+  try {
+    await invoke("chat_compact", { app_id: ctx.appId });
+    await loadHistory();
+    updateContextMeter(ctx.chatItems || []);
+    toast("Контекст сжат");
+  } catch (e) {
+    chatError(String(e));
+  } finally {
+    ctx.compacting = false;
+    setBusy(false);
+  }
+}
+
+/// Auto-compaction is off by default and runs only after a finished turn.
+/// The threshold is a percentage of the selected model's context window.
+async function maybeAutoCompact() {
+  if (!ctx.appId || !ctx.chatId || ctx.busy || ctx.compacting) return;
+  if (!(ctx.config && ctx.config.compaction_auto)) return;
+  const threshold = Number(ctx.config.compaction_threshold_percent) || 80;
+  const untilKey = `eco.compactUntil.${ctx.chatId}`;
+  let until = 0;
+  try {
+    until = Number(sessionStorage.getItem(untilKey) || 0);
+  } catch (_) {}
+  if (Date.now() < until) return;
+  await loadHistory();
+  if (compactionPercent() < threshold) return;
+  try {
+    sessionStorage.setItem(untilKey, String(Date.now() + 120000));
+  } catch (_) {}
+  await compactContext();
 }
 
 function contextRows(usage, cap) {
@@ -2037,6 +2084,8 @@ function setBusy(on) {
     busyTimer = null;
     renderThinking();
   }
+  const compact = $("chat-compact");
+  if (compact) compact.disabled = on || !ctx.chatId || ctx.compacting;
 }
 
 function renderThinking() {
@@ -2961,6 +3010,7 @@ function bindChatEvents() {
       );
       renderPermissionPrompt();
       refreshChats();
+      guard(maybeAutoCompact);
     }
   });
   listen("chat://permission", (event) => {
@@ -4103,6 +4153,8 @@ async function saveAppPermissions(inherit) {
 async function loadConfig() {
   ctx.config = await invoke("get_config");
   renderLlmSettings();
+  $("compact-auto").checked = !!ctx.config.compaction_auto;
+  $("compact-threshold").value = ctx.config.compaction_threshold_percent || 80;
   $("q-session").value = ctx.config.session_quota_mb;
   $("q-global").value = ctx.config.global_quota_mb;
   $("q-ttl").value = ctx.config.ttl_hours;
@@ -4121,6 +4173,8 @@ async function saveConfig() {
       llm_providers: providers,
       llm_default: $("llm-default-model").value || null,
       llm_models: (ctx.config && ctx.config.llm_models) || {},
+      compaction_auto: $("compact-auto").checked,
+      compaction_threshold_percent: Number($("compact-threshold").value) || 80,
       session_quota_mb: Number($("q-session").value) || 500,
       global_quota_mb: Number($("q-global").value) || 5120,
       ttl_hours: Number($("q-ttl").value) || 168,
@@ -4835,6 +4889,11 @@ function bind() {
   $("chat-text").addEventListener("input", autosizeComposer);
 
   $("chat-context").addEventListener("click", toggleContextPopover);
+  $("chat-compact").addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeContextPopover();
+    guard(compactContext);
+  });
   $("chat-context").addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();

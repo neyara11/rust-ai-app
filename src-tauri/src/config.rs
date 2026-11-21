@@ -176,6 +176,12 @@ pub struct UserConfig {
     /// Per-app `provider/model` override; missing means "use the default".
     #[serde(default)]
     pub llm_models: BTreeMap<String, String>,
+    /// Auto-compact the chat when the context window is this full. Off by
+    /// default; manual compaction is always available.
+    #[serde(default)]
+    pub compaction_auto: bool,
+    #[serde(default = "default_compaction_threshold")]
+    pub compaction_threshold_percent: u8,
     #[serde(default)]
     pub enabled_apps: Vec<String>,
     /// User-chosen working folder per app. The agent's file tools are confined
@@ -333,6 +339,10 @@ fn default_ttl_hours() -> u64 {
     168
 }
 
+fn default_compaction_threshold() -> u8 {
+    80
+}
+
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
@@ -351,6 +361,8 @@ impl Default for UserConfig {
             session_quota_mb: default_session_mb(),
             global_quota_mb: default_global_mb(),
             ttl_hours: default_ttl_hours(),
+            compaction_auto: false,
+            compaction_threshold_percent: default_compaction_threshold(),
             permissions: crate::permissions::PermissionsConfig::default(),
         }
     }
@@ -424,6 +436,7 @@ pub fn save(home: &Path, cfg: &UserConfig) -> Result<()> {
     // turns the legacy single gateway into a normal provider entry.
     let mut cfg = cfg.clone();
     cfg.normalize_llm();
+    cfg.compaction_threshold_percent = cfg.compaction_threshold_percent.clamp(10, 100);
     let raw = serde_json::to_string_pretty(&cfg)?;
     let target = path(home);
     let tmp = home.join(format!("config.json.tmp-{}", std::process::id()));
@@ -640,6 +653,13 @@ mod tests {
         assert_eq!(cfg.permissions.defaults.write.as_str(), "ask");
         assert_eq!(cfg.permissions.defaults.exec.as_str(), "ask");
         assert!(cfg.permissions.grants.is_empty());
+    }
+
+    #[test]
+    fn compaction_defaults_are_manual_with_80_percent() {
+        let cfg: UserConfig = serde_json::from_str("{}").unwrap();
+        assert!(!cfg.compaction_auto);
+        assert_eq!(cfg.compaction_threshold_percent, 80);
     }
 
     #[test]

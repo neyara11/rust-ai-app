@@ -2407,6 +2407,24 @@ pub async fn chat_history(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn chat_compact(app: tauri::AppHandle, app_id: String) -> Result<()> {
+    manifest::parse_id(&app_id, "app")?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<()> {
+        let state = app.state::<AppState>();
+        let session = {
+            let engines = engines_lock(&state)?;
+            engines
+                .get(&app_id)
+                .ok_or_else(|| Error::Msg("chat is not open for this app".to_string()))?
+                .snapshot()
+        };
+        session.compact()
+    })
+    .await
+    .map_err(|e| Error::Msg(format!("chat compact task failed: {e}")))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn chat_revert(
     app: tauri::AppHandle,
     app_id: String,

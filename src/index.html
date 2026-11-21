@@ -237,6 +237,11 @@
               <div class="context-popover chat-pop" id="chat-context-popover" role="dialog" aria-label="Контекст модели" hidden>
                 <div class="chat-pop-head">Контекст модели</div>
                 <div class="chat-pop-body" id="chat-context-body"></div>
+                <div class="chat-pop-sep"></div>
+                <button class="chat-pop-item" id="chat-compact" type="button" disabled>
+                  <span class="chat-pop-title">Сжать контекст</span>
+                  <em>сохранить выжимку и освободить место</em>
+                </button>
               </div>
             </div>
           </div>
@@ -574,7 +579,10 @@
 
           <div class="grid">
             <label>Модель по умолчанию<select id="llm-default-model"></select></label>
+            <label class="check-row"><input id="compact-auto" type="checkbox" /><span>Автосжатие контекста</span></label>
+            <label>Порог заполнения окна, %<input id="compact-threshold" type="number" min="10" max="100" value="80" /></label>
           </div>
+          <p class="muted small">Автосжатие выключено по умолчанию. Вручную — кнопкой в чипе контекста.</p>
           <p class="muted small">Каждое приложение может переопределить модель в шапке чата. Смена модели не перезапускает движок: выбор передаётся в каждом ходе.</p>
         </div>
 

@@ -161,6 +161,7 @@ pub fn run() {
             commands::chat_status,
             commands::chat_delete,
             commands::chat_history,
+            commands::chat_compact,
             commands::chat_revert,
             commands::chat_image,
             commands::chat_reset,

@@ -792,14 +792,14 @@ fn health_agent() -> ureq::Agent {
         .build()
 }
 
-fn http(
+fn http_request(
     agent: &ureq::Agent,
     base: &str,
     auth: &str,
     method: &str,
     path: &str,
     body: Option<&Value>,
-) -> Result<Value> {
+) -> Result<ureq::Response> {
     let url = format!("{base}{path}");
     let mut request = match method {
         "GET" => agent.get(&url),
@@ -818,22 +818,50 @@ fn http(
     };
 
     match response {
-        Ok(resp) => {
-            let text = resp
-                .into_string()
-                .map_err(|e| Error::Msg(format!("engine read failed: {e}")))?;
-            if text.trim().is_empty() {
-                Ok(Value::Null)
-            } else {
-                Ok(serde_json::from_str(&text)?)
-            }
-        }
+        Ok(resp) => Ok(resp),
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
-            msg(format!("engine HTTP {code}: {}", body.chars().take(400).collect::<String>()))
+            msg(format!(
+                "engine HTTP {code}: {}",
+                body.chars().take(400).collect::<String>()
+            ))
         }
         Err(e) => msg(format!("engine transport error: {e}")),
     }
+}
+
+fn http(
+    agent: &ureq::Agent,
+    base: &str,
+    auth: &str,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Value> {
+    let resp = http_request(agent, base, auth, method, path, body)?;
+    let text = resp
+        .into_string()
+        .map_err(|e| Error::Msg(format!("engine read failed: {e}")))?;
+    if text.trim().is_empty() {
+        Ok(Value::Null)
+    } else {
+        Ok(serde_json::from_str(&text)?)
+    }
+}
+
+/// For endpoints that answer with an event stream or plain text (compaction):
+/// success is the status code, the body is not JSON.
+fn http_ignore_body(
+    agent: &ureq::Agent,
+    base: &str,
+    auth: &str,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<()> {
+    let resp = http_request(agent, base, auth, method, path, body)?;
+    let _ = resp.into_string();
+    Ok(())
 }
 
 /// Model metadata for the generated provider config. Opencode does not know
@@ -1906,6 +1934,36 @@ impl ChatSession {
             Some(&json!({ "title": title })),
         )?;
         Ok(())
+    }
+
+    /// Compacts the session history: the engine summarizes earlier messages to
+    /// free context. The hidden messages stay on disk for `unrevert`.
+    ///
+    /// V1 exposes this as `/session/{id}/summarize` and requires the model to
+    /// use, so it follows the current per-app selection.
+    pub fn compact(&self) -> Result<()> {
+        let selection = crate::config::load(&self.home).selected_model(&self.app_id);
+        let provider_id = selection
+            .as_ref()
+            .map(|selection| selection.provider_id.clone())
+            .unwrap_or_else(|| self.provider_id.clone());
+        let model_id = selection
+            .as_ref()
+            .map(|selection| selection.model_id.clone())
+            .unwrap_or_else(|| self.model_id.clone());
+        let agent = agent();
+        http_ignore_body(
+            &agent,
+            &self.base,
+            &self.auth,
+            "POST",
+            &format!("/session/{}/summarize", self.session_id),
+            Some(&json!({
+                "providerID": provider_id,
+                "modelID": model_id,
+                "auto": false
+            })),
+        )
     }
 
     /// Reverts a message and everything after it, so the UI can replace an
