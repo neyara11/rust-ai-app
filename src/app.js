@@ -461,6 +461,7 @@ const ctx = {
   attachments: [],
   pendingPermissions: [],
   chatStart: null,
+  reasoning: "",
 };
 
 const THEME_KEY = "theme";
@@ -708,12 +709,11 @@ async function openApp(appId) {
     const toolsTab = document.querySelector('.ws-tab[data-ws="tools"]');
     if (toolsTab) toolsTab.hidden = !hasMcp;
     try {
-      const saved = localStorage.getItem(`reasoning:${appId}`) || "";
-      const efforts = [...$("chat-reasoning").options].map((option) => option.value);
-      $("chat-reasoning").value = efforts.includes(saved) ? saved : "";
+      ctx.reasoning = localStorage.getItem(`reasoning:${appId}`) || "";
     } catch (_) {
-      $("chat-reasoning").value = "";
+      ctx.reasoning = "";
     }
+    renderReasoningOptions();
     ctx.chat = null;
     ctx.chatStart = null;
     ctx.chatItems = [];
@@ -1871,7 +1871,8 @@ function updateContextMeter(items) {
     closeContextPopover();
     return;
   }
-  const cap = Number((ctx.config && ctx.config.llm_capabilities && ctx.config.llm_capabilities.context_tokens) || 0);
+  const info = selectedModelInfo();
+  const cap = Number((info && info.model.capabilities.context_tokens) || 0);
   ctx.contextUsage = usage;
   ctx.contextLimit = cap;
   chip.hidden = false;
@@ -1942,16 +1943,9 @@ function toggleContextPopover() {
   }
   if (!ctx.contextUsage) return;
   renderContextPopover();
-  pop.hidden = false;
+  closeChatPops("chat-context-popover");
+  placeChatPop(pop, chip, true);
   chip.setAttribute("aria-expanded", "true");
-  const rect = chip.getBoundingClientRect();
-  const box = pop.getBoundingClientRect();
-  let left = rect.right - box.width;
-  left = Math.max(8, Math.min(left, window.innerWidth - box.width - 8));
-  let top = rect.top - box.height - 8;
-  if (top < 8) top = rect.bottom + 8;
-  pop.style.left = `${Math.round(left)}px`;
-  pop.style.top = `${Math.round(top)}px`;
 }
 
 /// Providers disagree about cached prompt tokens: OpenAI-compatible ones count
@@ -2068,9 +2062,12 @@ function renderThinking() {
 }
 
 function renderChatMeta(model) {
-  const endpoint = (ctx.config && ctx.config.llm_endpoint) || "";
-  const modelText = model || (ctx.chat && ctx.chat.model) || "движок не запущен";
-  $("chat-model").textContent = modelText;
+  const info = selectedModelInfo();
+  const endpoint =
+    (info && info.provider.endpoint) ||
+    (ctx.config && ctx.config.llm_endpoint) ||
+    "";
+  renderModelChip(model);
   const local = /127\.0\.0\.1|localhost/i.test(endpoint);
   $("chat-warning").hidden = !local;
 }
@@ -2394,7 +2391,7 @@ async function ensureChat() {
   // start attempt instead of racing two chat_open calls.
   if (ctx.chatStart && ctx.chatStart.app === ctx.appId) return ctx.chatStart.promise;
   const appId = ctx.appId;
-  $("chat-model").textContent = "запуск движка…";
+  renderModelChip("запуск движка…");
   const promise = (async () => {
     const info = await invoke("chat_open", { app_id: appId });
     if (ctx.appId !== appId) return null;
@@ -2422,7 +2419,7 @@ async function ensureChat() {
     // Do not leave "запуск движка…" forever after a failed start.
     if (ctx.appId === appId) {
       renderChatMeta();
-      const chip = $("chat-model");
+      const chip = $("chat-model-btn");
       if (chip) chip.title = String(e);
     }
     throw e;
@@ -2581,7 +2578,8 @@ function renderAttachments() {
 async function addAttachments(fileList) {
   const files = [...(fileList || [])];
   if (!files.length) return;
-  const caps = (ctx.config && ctx.config.llm_capabilities) || {};
+  const selected = selectedModelInfo();
+  const caps = (selected && selected.model.capabilities) || {};
   for (const file of files) {
     if (ctx.attachments.length >= MAX_ATTACHMENTS) {
       toast(`Не больше ${MAX_ATTACHMENTS} вложений в сообщении`, true);
@@ -2697,7 +2695,7 @@ async function regenerateFrom(userItem) {
     setBusy(false);
     return;
   }
-  await dispatchTurn(text, [], $("chat-reasoning").value || null);
+  await dispatchTurn(text, [], ctx.reasoning || null);
 }
 
 async function sendChat() {
@@ -2725,7 +2723,7 @@ async function sendChat() {
   $("chat-text").value = "";
   autosizeComposer();
   clearAttachments();
-  await dispatchTurn(text, attachments, $("chat-reasoning").value || null);
+  await dispatchTurn(text, attachments, ctx.reasoning || null);
 }
 
 /// Sends one turn and renders the optimistic user message. Shared by the
@@ -2815,7 +2813,7 @@ async function retryLastTurn() {
     return;
   }
   setBusy(true);
-  await dispatchTurn(text, attachments.slice(0, MAX_ATTACHMENTS), $("chat-reasoning").value || null);
+  await dispatchTurn(text, attachments.slice(0, MAX_ATTACHMENTS), ctx.reasoning || null);
 }
 
 async function stopChat() {
@@ -3017,21 +3015,6 @@ function bindChatEvents() {
 
 async function refreshMcpServers() {
   ctx.mcp = await invoke("mcp_servers");
-  const box = $("mcp-servers");
-  box.innerHTML = ctx.mcp.length ? "" : '<span class="muted small">зарегистрированных MCP-серверов нет</span>';
-  for (const id of ctx.mcp) {
-    let info = null;
-    try {
-      info = await invoke("mcp_server_get", { id });
-    } catch (_) {}
-    const row = document.createElement("div");
-    row.className = "secret-row";
-    const tls = info && info.allow_invalid_certs ? '<span class="badge bad">TLS off</span>' : "";
-    row.innerHTML = `<span>${esc(id)} ${tls}</span><div class="row-actions">
-      <button class="ghost small" data-mcp-probe="${esc(id)}">Проверить tools</button>
-      <button class="ghost small danger-hover" data-mcp-del="${esc(id)}">Удалить</button></div>`;
-    box.appendChild(row);
-  }
   renderToolSelectors();
 }
 
@@ -3079,34 +3062,6 @@ function renderToolSelectors() {
 
   const ready = tools.length > 0 && servers.length > 0;
   $("tool-call").disabled = !ready;
-}
-
-async function saveMcpServer() {
-  const id = $("mcp-id").value.trim();
-  const url = $("mcp-url").value.trim();
-  if (!id || !url) return toast("ID и URL обязательны", true);
-  await guard(async () => {
-    await invoke("mcp_server_save", {
-      id,
-      url,
-      token: $("mcp-token").value || null,
-      allow_invalid_certs: $("mcp-insecure").checked,
-    });
-    $("mcp-id").value = "";
-    $("mcp-url").value = "";
-    $("mcp-token").value = "";
-    $("mcp-insecure").checked = false;
-    toast("MCP-сервер сохранён в DPAPI");
-    await refreshMcpServers();
-  });
-}
-
-async function probeMcp(id) {
-  await guard(async () => {
-    const r = await invoke("mcp_probe", { id });
-    const tools = (r.tools || []).join(", ");
-    toast(`${(r.server && r.server.name) || id}: ${tools || "инструменты не найдены"}`);
-  });
 }
 
 /* ---------- per-app settings ---------- */
@@ -3496,7 +3451,7 @@ async function renderPackMcp() {
   const writes = (manifest.capabilities && manifest.capabilities.external_writes) || [];
   if (!connections.length) {
     box.innerHTML =
-      '<span class="muted small">MCP не объявлены; endpoint и токен задаются в Настройках</span>';
+      '<span class="muted small">MCP не объявлены; endpoint и токен задаются в настройках приложения</span>';
     return;
   }
   for (const connection of connections) {
@@ -3741,6 +3696,202 @@ async function applyPackTemplate() {
   });
 }
 
+/* ---------- LLM providers ---------- */
+
+function capabilitiesOrDefault(caps) {
+  return {
+    vision: !!(caps && caps.vision),
+    reasoning: !caps || caps.reasoning !== false,
+    reasoning_efforts:
+      caps && Array.isArray(caps.reasoning_efforts) && caps.reasoning_efforts.length
+        ? [...caps.reasoning_efforts]
+        : ["low", "medium", "high"],
+    context_tokens: (caps && caps.context_tokens) || null,
+    output_tokens: (caps && caps.output_tokens) || null,
+  };
+}
+
+function providersFromConfig(cfg) {
+  const config = cfg || {};
+  if (Array.isArray(config.llm_providers) && config.llm_providers.length) {
+    return config.llm_providers.map((provider) => ({
+      id: String(provider.id || ""),
+      name: String(provider.name || ""),
+      endpoint: String(provider.endpoint || ""),
+      allow_invalid_certs: !!provider.allow_invalid_certs,
+      models: (provider.models || []).map((model) => ({
+        id: String(model.id || ""),
+        name: String(model.name || ""),
+        capabilities: capabilitiesOrDefault(model.capabilities),
+      })),
+    }));
+  }
+  if (!String(config.llm_endpoint || "").trim()) return [];
+  return [
+    {
+      id: "gw",
+      name: "LLM Gateway",
+      endpoint: String(config.llm_endpoint),
+      allow_invalid_certs: !!config.llm_allow_invalid_certs,
+      models: [
+        {
+          id: String(config.llm_model || "stub-model"),
+          name: "",
+          capabilities: capabilitiesOrDefault(config.llm_capabilities),
+        },
+      ],
+    },
+  ];
+}
+
+function effectiveProviders() {
+  return providersFromConfig(ctx.config);
+}
+
+function cloneProviders(providers) {
+  return JSON.parse(JSON.stringify(providers || []));
+}
+
+function resolveModelInfo(providers, raw) {
+  if (!providers.length) return null;
+  const slash = String(raw || "").indexOf("/");
+  const providerId = slash > 0 ? raw.slice(0, slash) : "";
+  const modelId = slash > 0 ? raw.slice(slash + 1) : "";
+  let provider = providers.find((item) => item.id === providerId);
+  let model = provider && provider.models.find((item) => item.id === modelId);
+  if (!provider || !model) {
+    provider = providers[0];
+    model = provider && provider.models[0];
+  }
+  if (!model) return null;
+  return {
+    provider,
+    model,
+    value: `${provider.id}/${model.id}`,
+  };
+}
+
+function selectedModelInfo() {
+  const providers = effectiveProviders();
+  const override =
+    (ctx.config && ctx.config.llm_models && ctx.config.llm_models[ctx.appId]) || "";
+  const fallback = (ctx.config && ctx.config.llm_default) || "";
+  return resolveModelInfo(providers, override || fallback);
+}
+
+function contextLabel(caps) {
+  const tokens = Number(caps && caps.context_tokens);
+  return tokens > 0 ? `${Math.round(tokens / 1000)}k` : "контекст не задан";
+}
+
+function renderModelChip(placeholder) {
+  const label = $("chat-model-label");
+  const button = $("chat-model-btn");
+  const info = selectedModelInfo();
+  if (label) {
+    label.textContent = info
+      ? info.model.name || info.model.id
+      : placeholder || "движок не запущен";
+  }
+  if (button) {
+    button.title = info
+      ? `${info.provider.name || info.provider.id} · ${info.model.id}`
+      : "Модель и шлюз";
+  }
+  renderModelMenu();
+}
+
+function renderModelMenu() {
+  const list = $("chat-model-list");
+  if (!list) return;
+  const selected = selectedModelInfo();
+  list.innerHTML = "";
+  const providers = effectiveProviders();
+  if (!providers.length) {
+    const empty = document.createElement("div");
+    empty.className = "chat-pop-empty";
+    empty.textContent = "Модели не настроены";
+    list.appendChild(empty);
+    return;
+  }
+  for (const provider of providers) {
+    if (!provider.models.length) continue;
+    const head = document.createElement("div");
+    head.className = "chat-pop-provider";
+    head.textContent = provider.name || provider.id;
+    list.appendChild(head);
+    for (const model of provider.models) {
+      const value = `${provider.id}/${model.id}`;
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "chat-pop-item" + (selected && selected.value === value ? " sel" : "");
+      item.dataset.model = value;
+      item.setAttribute("role", "menuitem");
+      item.innerHTML =
+        `<span class="chat-pop-title">${esc(model.name || model.id)}</span>` +
+        `<em>${esc(provider.id)} · ${esc(contextLabel(model.capabilities))}</em>`;
+      list.appendChild(item);
+    }
+  }
+}
+
+function closeChatPops(except) {
+  for (const id of ["chat-context-popover", "chat-model-pop", "chat-reasoning-pop"]) {
+    if (id === except) continue;
+    const pop = $(id);
+    if (pop) pop.hidden = true;
+  }
+  for (const id of ["chat-context", "chat-model-btn", "chat-reasoning-btn"]) {
+    if (id === except) continue;
+    const chip = $(id);
+    if (chip) chip.setAttribute("aria-expanded", "false");
+  }
+}
+
+function placeChatPop(pop, trigger, alignRight) {
+  pop.hidden = false;
+  pop.style.left = "0px";
+  pop.style.top = "0px";
+  const rect = trigger.getBoundingClientRect();
+  const width = pop.offsetWidth;
+  const height = pop.offsetHeight;
+  let left = alignRight ? rect.right - width : rect.left;
+  left = Math.max(12, Math.min(left, window.innerWidth - width - 12));
+  let top = rect.top - height - 6;
+  if (top < 12) top = rect.bottom + 6;
+  top = Math.max(12, Math.min(top, window.innerHeight - height - 12));
+  pop.style.left = `${Math.round(left)}px`;
+  pop.style.top = `${Math.round(top)}px`;
+}
+
+function openModelMenu() {
+  const pop = $("chat-model-pop");
+  const button = $("chat-model-btn");
+  if (!pop || !button) return;
+  renderModelMenu();
+  closeChatPops("chat-model-pop");
+  placeChatPop(pop, button, true);
+  button.setAttribute("aria-expanded", "true");
+}
+
+function closeModelMenu() {
+  const pop = $("chat-model-pop");
+  const button = $("chat-model-btn");
+  if (pop) pop.hidden = true;
+  if (button) button.setAttribute("aria-expanded", "false");
+}
+
+async function selectModel(value) {
+  closeModelMenu();
+  await invoke("llm_select", { app_id: ctx.appId || null, model: value });
+  ctx.config = await invoke("get_config");
+  renderModelChip();
+  renderReasoningOptions();
+  updateContextMeter(ctx.chatItems || []);
+  const info = selectedModelInfo();
+  toast(`Модель: ${info ? info.model.name || info.model.id : "сброшена"}`);
+}
+
 /* ---------- settings & secrets ---------- */
 
 const EFFORT_LABELS = {
@@ -3750,28 +3901,83 @@ const EFFORT_LABELS = {
   max: "Максимальный (max)",
 };
 
-function renderReasoningOptions() {
-  const select = $("chat-reasoning");
-  const wrap = $("chat-reasoning-wrap");
-  if (!select) return;
-  const caps = (ctx.config && ctx.config.llm_capabilities) || {};
-  const efforts =
-    Array.isArray(caps.reasoning_efforts) && caps.reasoning_efforts.length
-      ? caps.reasoning_efforts
-      : ["low", "medium", "high"];
-  const enabled = caps.reasoning !== false;
-  if (wrap) wrap.hidden = !enabled;
-  select.disabled = !enabled;
-  select.innerHTML = '<option value="">Авто</option>';
-  if (enabled) {
-    for (const effort of efforts) {
-      const option = document.createElement("option");
-      option.value = effort;
-      option.textContent = EFFORT_LABELS[effort] || effort;
-      select.appendChild(option);
-    }
+function reasoningCapabilities() {
+  const selected = selectedModelInfo();
+  const caps = (selected && selected.model.capabilities) || {};
+  return {
+    enabled: caps.reasoning !== false,
+    efforts:
+      Array.isArray(caps.reasoning_efforts) && caps.reasoning_efforts.length
+        ? caps.reasoning_efforts
+        : ["low", "medium", "high"],
+  };
+}
+
+function renderReasoningMenu(efforts) {
+  const list = $("chat-reasoning-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const options = [
+    ["", "Авто"],
+    ...efforts.map((effort) => [effort, EFFORT_LABELS[effort] || effort]),
+  ];
+  for (const [value, text] of options) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "chat-pop-item" + ((ctx.reasoning || "") === value ? " sel" : "");
+    item.dataset.effort = value;
+    item.setAttribute("role", "menuitem");
+    item.textContent = text;
+    list.appendChild(item);
   }
-  select.value = "";
+}
+
+function renderReasoningOptions() {
+  const button = $("chat-reasoning-btn");
+  const label = $("chat-reasoning-label");
+  if (!button) return;
+  const { enabled, efforts } = reasoningCapabilities();
+  if (ctx.reasoning && (!enabled || !efforts.includes(ctx.reasoning))) {
+    ctx.reasoning = "";
+  }
+  button.hidden = !enabled;
+  if (label) {
+    label.textContent = ctx.reasoning
+      ? EFFORT_LABELS[ctx.reasoning] || ctx.reasoning
+      : "Авто";
+  }
+  renderReasoningMenu(enabled ? efforts : []);
+}
+
+function openReasoningMenu() {
+  const pop = $("chat-reasoning-pop");
+  const button = $("chat-reasoning-btn");
+  if (!pop || !button || button.hidden) return;
+  renderReasoningOptions();
+  closeChatPops("chat-reasoning-pop");
+  placeChatPop(pop, button, false);
+  button.setAttribute("aria-expanded", "true");
+}
+
+function closeReasoningMenu() {
+  const pop = $("chat-reasoning-pop");
+  const button = $("chat-reasoning-btn");
+  if (pop) pop.hidden = true;
+  if (button) button.setAttribute("aria-expanded", "false");
+}
+
+function chooseReasoning(value) {
+  ctx.reasoning = value || "";
+  try {
+    localStorage.setItem(`reasoning:${ctx.appId}`, ctx.reasoning);
+  } catch (_) {}
+  renderReasoningOptions();
+  closeReasoningMenu();
+  toast(
+    ctx.reasoning
+      ? `Уровень размышлений: ${EFFORT_LABELS[ctx.reasoning] || ctx.reasoning}`
+      : "Уровень размышлений: авто",
+  );
 }
 
 function renderPermissionGrants(boxId, grants, emptyText) {
@@ -3896,19 +4102,7 @@ async function saveAppPermissions(inherit) {
 
 async function loadConfig() {
   ctx.config = await invoke("get_config");
-  $("llm-endpoint").value = ctx.config.llm_endpoint || "";
-  $("llm-model").value = ctx.config.llm_model || "";
-  $("llm-insecure").checked = !!ctx.config.llm_allow_invalid_certs;
-  const caps = ctx.config.llm_capabilities || {};
-  $("llm-vision").checked = !!caps.vision;
-  $("llm-reasoning").checked = caps.reasoning !== false;
-  $("llm-efforts").value = (
-    Array.isArray(caps.reasoning_efforts) && caps.reasoning_efforts.length
-      ? caps.reasoning_efforts
-      : ["low", "medium", "high"]
-  ).join(",");
-  $("llm-context").value = caps.context_tokens || "";
-  $("llm-output").value = caps.output_tokens || "";
+  renderLlmSettings();
   $("q-session").value = ctx.config.session_quota_mb;
   $("q-global").value = ctx.config.global_quota_mb;
   $("q-ttl").value = ctx.config.ttl_hours;
@@ -3921,22 +4115,12 @@ async function loadConfig() {
 
 async function saveConfig() {
   await guard(async () => {
-    const efforts = $("llm-efforts")
-      .value.split(",")
-      .map((effort) => effort.trim().toLowerCase())
-      .filter(Boolean);
+    const providers = collectLlmProviders();
     ctx.config = {
       ...(ctx.config || {}),
-      llm_endpoint: $("llm-endpoint").value.trim() || null,
-      llm_model: $("llm-model").value.trim() || null,
-      llm_allow_invalid_certs: $("llm-insecure").checked,
-      llm_capabilities: {
-        vision: $("llm-vision").checked,
-        reasoning: $("llm-reasoning").checked,
-        reasoning_efforts: efforts.length ? [...new Set(efforts)] : ["low", "medium", "high"],
-        context_tokens: Number($("llm-context").value) || null,
-        output_tokens: Number($("llm-output").value) || null,
-      },
+      llm_providers: providers,
+      llm_default: $("llm-default-model").value || null,
+      llm_models: (ctx.config && ctx.config.llm_models) || {},
       session_quota_mb: Number($("q-session").value) || 500,
       global_quota_mb: Number($("q-global").value) || 5120,
       ttl_hours: Number($("q-ttl").value) || 168,
@@ -3949,12 +4133,16 @@ async function saveConfig() {
       },
     };
     await invoke("save_config", { config: ctx.config });
+    // Reload the normalized config: invalid providers/selections are dropped
+    // server-side before the file is written.
+    ctx.config = await invoke("get_config");
     ctx.chat = null;
     ctx.chatStart = null;
     ctx.chatItems = [];
     setBusy(false);
     renderChat([]);
     renderChatMeta();
+    renderLlmSettings();
     renderReasoningOptions();
     ctx.pendingPermissions = [];
     renderPermissionPrompt();
@@ -3963,45 +4151,233 @@ async function saveConfig() {
   });
 }
 
-const LLM_KEY_NAME = "llm_api_key";
-
-async function refreshLlmKeyStatus() {
-  const names = await invoke("secrets_list");
-  const has = names.includes(LLM_KEY_NAME);
-  const statusEl = $("llm-key-status");
-  statusEl.textContent = has ? "ключ в DPAPI" : "ключ не задан";
-  statusEl.className = "badge mono " + (has ? "ok" : "bad");
-  $("llm-key").placeholder = has ? "•••••••• (сохранён в DPAPI)" : "ключ не задан";
+function renderLlmSettings() {
+  ctx.llmDraft = cloneProviders(providersFromConfig(ctx.config));
+  renderLlmProviderCards();
+  renderLlmDefaultOptions();
+  refreshLlmKeyStatuses();
 }
 
-async function saveLlmKey() {
-  const value = $("llm-key").value;
-  if (!value) return toast("Введите ключ", true);
-  await guard(async () => {
-    await invoke("secret_store", { name: LLM_KEY_NAME, value });
-    $("llm-key").value = "";
-    toast("Ключ модели сохранён в DPAPI");
-    await refreshLlmKeyStatus();
-    await refreshSecrets();
+function renderLlmProviderCards() {
+  const box = $("llm-providers");
+  if (!box) return;
+  box.innerHTML = "";
+  const providers = ctx.llmDraft || [];
+  if (!providers.length) {
+    box.innerHTML =
+      '<p class="muted small">Провайдеры не настроены: движок запустится с демо-моделью.</p>';
+    return;
+  }
+  providers.forEach((provider, index) => {
+    const card = document.createElement("div");
+    card.className = "llm-provider";
+    card.dataset.providerIndex = String(index);
+    card.innerHTML = `
+      <div class="llm-provider-head">
+        <label>Название<input data-llm="name" value="${esc(provider.name)}" placeholder="Корпоративный шлюз" /></label>
+        <label>Id<input data-llm="id" class="mono" value="${esc(provider.id)}" placeholder="gw" /></label>
+        <button class="ghost small danger-hover" data-llm-remove-provider type="button">Удалить</button>
+      </div>
+      <div class="grid">
+        <label>Endpoint (OpenAI-compatible)<input data-llm="endpoint" value="${esc(provider.endpoint)}" placeholder="https://llm-gateway.internal/v1" /></label>
+        <label>Ключ (DPAPI)<input data-llm="key" type="password" placeholder="ключ не задан" /></label>
+        <div class="row-actions form-actions">
+          <button class="ghost small" data-llm-key-save type="button">Сохранить ключ</button>
+          <button class="ghost small danger-hover" data-llm-key-delete type="button">Удалить ключ</button>
+          <span class="badge mono" data-llm-key-status>проверка…</span>
+          <button class="ghost small" data-llm-probe type="button">Проверить TCP</button>
+          <span class="muted small mono" data-llm-probe-out></span>
+        </div>
+      </div>
+      <label class="check-row"><input data-llm="insecure" type="checkbox" ${provider.allow_invalid_certs ? "checked" : ""}/><span>Не проверять TLS-сертификат (закрытый контур, private CA)</span></label>
+      <div class="llm-models"></div>
+      <button class="ghost small" data-llm-add-model type="button">Добавить модель</button>`;
+    const models = card.querySelector(".llm-models");
+    provider.models.forEach((model, modelIndex) => {
+      models.appendChild(renderLlmModelRow(model, modelIndex));
+    });
+    box.appendChild(card);
   });
 }
 
-async function deleteLlmKey() {
-  await guard(async () => {
-    await invoke("secret_delete", { name: LLM_KEY_NAME });
-    toast("Ключ модели удалён");
-    await refreshLlmKeyStatus();
-    await refreshSecrets();
+function renderLlmModelRow(model, index) {
+  const row = document.createElement("div");
+  row.className = "llm-model";
+  row.dataset.modelIndex = String(index);
+  const caps = model.capabilities || capabilitiesOrDefault({});
+  row.innerHTML = `
+    <input data-llm-model="id" class="mono" value="${esc(model.id)}" placeholder="model id" />
+    <input data-llm-model="name" value="${esc(model.name)}" placeholder="отображаемое имя" />
+    <label class="check-row"><input data-llm-model="vision" type="checkbox" ${caps.vision ? "checked" : ""}/><span>vision</span></label>
+    <label class="check-row"><input data-llm-model="reasoning" type="checkbox" ${caps.reasoning !== false ? "checked" : ""}/><span>reasoning</span></label>
+    <input data-llm-model="efforts" value="${esc((caps.reasoning_efforts || []).join(","))}" placeholder="low,medium,high" />
+    <input data-llm-model="context" type="number" min="0" value="${caps.context_tokens || ""}" placeholder="контекст" />
+    <input data-llm-model="output" type="number" min="0" value="${caps.output_tokens || ""}" placeholder="вывод" />
+    <button class="ghost small danger-hover" data-llm-remove-model type="button" title="Удалить модель" aria-label="Удалить модель">×</button>`;
+  return row;
+}
+
+function syncLlmDraft() {
+  const providers = [];
+  document.querySelectorAll("#llm-providers .llm-provider").forEach((card) => {
+    const field = (name) => card.querySelector(`[data-llm="${name}"]`);
+    const provider = {
+      id: field("id").value.trim(),
+      name: field("name").value.trim(),
+      endpoint: field("endpoint").value.trim(),
+      allow_invalid_certs: field("insecure").checked,
+      models: [],
+    };
+    card.querySelectorAll(".llm-model").forEach((row) => {
+      const read = (name) => row.querySelector(`[data-llm-model="${name}"]`);
+      provider.models.push({
+        id: read("id").value.trim(),
+        name: read("name").value.trim(),
+        capabilities: {
+          vision: read("vision").checked,
+          reasoning: read("reasoning").checked,
+          reasoning_efforts: read("efforts")
+            .value.split(",")
+            .map((effort) => effort.trim().toLowerCase())
+            .filter(Boolean),
+          context_tokens: Number(read("context").value) || null,
+          output_tokens: Number(read("output").value) || null,
+        },
+      });
+    });
+    providers.push(provider);
+  });
+  ctx.llmDraft = providers;
+  return providers;
+}
+
+function collectLlmProviders() {
+  const providers = syncLlmDraft()
+    .map((provider) => ({
+      id: provider.id,
+      name: provider.name || null,
+      endpoint: provider.endpoint,
+      allow_invalid_certs: !!provider.allow_invalid_certs,
+      models: provider.models
+        .filter((model) => model.id)
+        .map((model) => ({
+          id: model.id,
+          name: model.name || null,
+          capabilities: {
+            vision: !!model.capabilities.vision,
+            reasoning: model.capabilities.reasoning !== false,
+            reasoning_efforts: model.capabilities.reasoning_efforts.length
+              ? [...new Set(model.capabilities.reasoning_efforts)]
+              : ["low", "medium", "high"],
+            context_tokens: model.capabilities.context_tokens || null,
+            output_tokens: model.capabilities.output_tokens || null,
+          },
+        })),
+    }))
+    .filter((provider) => provider.id || provider.endpoint || provider.models.length);
+
+  const seen = new Set();
+  for (const provider of providers) {
+    if (!/^[a-z0-9_-]{1,32}$/.test(provider.id)) {
+      throw new Error(
+        `id провайдера «${provider.id}»: только строчные латинские буквы, цифры, - и _`,
+      );
+    }
+    if (seen.has(provider.id)) {
+      throw new Error(`провайдер «${provider.id}» указан дважды`);
+    }
+    seen.add(provider.id);
+    if (!provider.endpoint) throw new Error(`у провайдера «${provider.id}» нет endpoint`);
+    if (!provider.models.length) throw new Error(`у провайдера «${provider.id}» нет моделей`);
+  }
+  return providers;
+}
+
+function renderLlmDefaultOptions() {
+  const select = $("llm-default-model");
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = "";
+  let count = 0;
+  for (const provider of ctx.llmDraft || []) {
+    for (const model of provider.models) {
+      if (!provider.id || !model.id) continue;
+      const option = document.createElement("option");
+      option.value = `${provider.id}/${model.id}`;
+      option.textContent = `${provider.name || provider.id} · ${model.name || model.id}`;
+      select.appendChild(option);
+      count += 1;
+    }
+  }
+  if (!count) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "нет моделей";
+    select.appendChild(option);
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  const wanted =
+    (ctx.config && ctx.config.llm_default) || previous || (select.options[0] && select.options[0].value);
+  const exists = [...select.options].some((option) => option.value === wanted);
+  select.value = exists ? wanted : select.options[0].value;
+}
+
+async function refreshLlmKeyStatuses() {
+  let names = [];
+  try {
+    names = await invoke("secrets_list");
+  } catch (_) {
+    names = [];
+  }
+  const has = (id) => names.includes(`llm.${id}`) || (id === "gw" && names.includes("llm_api_key"));
+  document.querySelectorAll("#llm-providers .llm-provider").forEach((card) => {
+    const id = card.querySelector('[data-llm="id"]').value.trim();
+    const status = card.querySelector("[data-llm-key-status]");
+    const input = card.querySelector('[data-llm="key"]');
+    const present = has(id);
+    if (status) {
+      status.textContent = present ? "ключ в DPAPI" : "ключ не задан";
+      status.className = "badge mono " + (present ? "ok" : "bad");
+    }
+    if (input) {
+      input.placeholder = present ? "•••••••• (сохранён в DPAPI)" : "ключ не задан";
+    }
   });
 }
 
-async function probe() {
-  const url = $("llm-endpoint").value.trim();
+async function saveProviderKey(card) {
+  const id = card.querySelector('[data-llm="id"]').value.trim();
+  const input = card.querySelector('[data-llm="key"]');
+  if (!/^[a-z0-9_-]{1,32}$/.test(id)) {
+    return toast("Сначала укажите корректный id провайдера", true);
+  }
+  if (!input.value) return toast("Введите ключ", true);
+  await invoke("secret_store", { name: `llm.${id}`, value: input.value });
+  input.value = "";
+  toast(`Ключ llm.${id} сохранён в DPAPI`);
+  await refreshLlmKeyStatuses();
+  await refreshSecrets();
+}
+
+async function deleteProviderKey(card) {
+  const id = card.querySelector('[data-llm="id"]').value.trim();
+  if (!/^[a-z0-9_-]{1,32}$/.test(id)) return;
+  await invoke("secret_delete", { name: `llm.${id}` });
+  toast(`Ключ llm.${id} удалён`);
+  await refreshLlmKeyStatuses();
+  await refreshSecrets();
+}
+
+async function probeProvider(card) {
+  const url = card.querySelector('[data-llm="endpoint"]').value.trim();
   if (!url) return toast("Укажите endpoint", true);
-  await guard(async () => {
-    const r = await invoke("probe_endpoint", { url });
-    $("probe-out").textContent = `${r.ok ? "✓ OK" : "✕ FAIL"} · ${r.millis} мс · ${r.detail}`;
-  });
+  const out = card.querySelector("[data-llm-probe-out]");
+  const result = await invoke("probe_endpoint", { url });
+  if (out) {
+    out.textContent = `${result.ok ? "✓ OK" : "✕ FAIL"} · ${result.millis} мс · ${result.detail}`;
+  }
 }
 
 async function refreshSecrets() {
@@ -4035,7 +4411,7 @@ async function deleteSecret(name) {
   await guard(async () => {
     await invoke("secret_delete", { name });
     await refreshSecrets();
-    await refreshLlmKeyStatus();
+    await refreshLlmKeyStatuses();
   });
 }
 
@@ -4147,6 +4523,16 @@ function bind() {
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      const modelPop = $("chat-model-pop");
+      if (modelPop && !modelPop.hidden) {
+        closeModelMenu();
+        return;
+      }
+      const reasoningPop = $("chat-reasoning-pop");
+      if (reasoningPop && !reasoningPop.hidden) {
+        closeReasoningMenu();
+        return;
+      }
       if (!$("confirm-overlay").hidden) {
         settleConfirm(false);
         return;
@@ -4229,13 +4615,118 @@ function bind() {
       searchArtifacts();
     }
   });
-  $("probe-btn").addEventListener("click", probe);
+  const llmBox = $("llm-providers");
+  if (llmBox) {
+    llmBox.addEventListener("click", (event) => {
+      const card = event.target.closest(".llm-provider");
+      if (!card) return;
+      const index = Number(card.dataset.providerIndex);
+      if (event.target.closest("[data-llm-remove-provider]")) {
+        syncLlmDraft();
+        ctx.llmDraft.splice(index, 1);
+        renderLlmProviderCards();
+        renderLlmDefaultOptions();
+        refreshLlmKeyStatuses();
+        return;
+      }
+      if (event.target.closest("[data-llm-add-model]")) {
+        syncLlmDraft();
+        ctx.llmDraft[index].models.push({
+          id: "",
+          name: "",
+          capabilities: capabilitiesOrDefault({}),
+        });
+        renderLlmProviderCards();
+        renderLlmDefaultOptions();
+        refreshLlmKeyStatuses();
+        return;
+      }
+      if (event.target.closest("[data-llm-remove-model]")) {
+        syncLlmDraft();
+        const row = event.target.closest(".llm-model");
+        ctx.llmDraft[index].models.splice(Number(row.dataset.modelIndex), 1);
+        renderLlmProviderCards();
+        renderLlmDefaultOptions();
+        refreshLlmKeyStatuses();
+        return;
+      }
+      if (event.target.closest("[data-llm-key-save]")) {
+        guard(() => saveProviderKey(card));
+        return;
+      }
+      if (event.target.closest("[data-llm-key-delete]")) {
+        guard(() => deleteProviderKey(card));
+        return;
+      }
+      if (event.target.closest("[data-llm-probe]")) {
+        guard(() => probeProvider(card));
+      }
+    });
+    llmBox.addEventListener("input", (event) => {
+      if (!event.target.matches('[data-llm="id"], [data-llm-model="id"]')) return;
+      syncLlmDraft();
+      renderLlmDefaultOptions();
+    });
+  }
+  $("llm-provider-add").addEventListener("click", () => {
+    syncLlmDraft();
+    ctx.llmDraft.push({
+      id: `provider${ctx.llmDraft.length + 1}`,
+      name: "",
+      endpoint: "",
+      allow_invalid_certs: false,
+      models: [{ id: "", name: "", capabilities: capabilitiesOrDefault({}) }],
+    });
+    renderLlmProviderCards();
+    renderLlmDefaultOptions();
+    refreshLlmKeyStatuses();
+  });
+  $("chat-model-btn").addEventListener("click", (event) => {
+    event.stopPropagation();
+    const pop = $("chat-model-pop");
+    if (pop && pop.hidden) openModelMenu();
+    else closeModelMenu();
+  });
+  $("chat-model-pop").addEventListener("click", (event) => {
+    const item = event.target.closest("[data-model]");
+    if (item) {
+      event.stopPropagation();
+      guard(() => selectModel(item.dataset.model));
+      return;
+    }
+    if (event.target.closest("#chat-model-settings")) {
+      event.stopPropagation();
+      closeModelMenu();
+      const tab = document.querySelector('.tab[data-tab="settings"]');
+      if (tab) tab.click();
+    }
+  });
+  $("chat-reasoning-btn").addEventListener("click", (event) => {
+    event.stopPropagation();
+    const pop = $("chat-reasoning-pop");
+    if (pop && pop.hidden) openReasoningMenu();
+    else closeReasoningMenu();
+  });
+  $("chat-reasoning-pop").addEventListener("click", (event) => {
+    const item = event.target.closest("[data-effort]");
+    if (!item) return;
+    event.stopPropagation();
+    chooseReasoning(item.dataset.effort);
+  });
+  document.addEventListener("click", (event) => {
+    if (
+      event.target.closest("#chat-model-pop") ||
+      event.target.closest("#chat-model-btn") ||
+      event.target.closest("#chat-reasoning-pop") ||
+      event.target.closest("#chat-reasoning-btn")
+    ) {
+      return;
+    }
+    closeModelMenu();
+    closeReasoningMenu();
+  });
   $("secret-save").addEventListener("click", saveSecret);
   $("secret-refresh").addEventListener("click", refreshSecrets);
-  $("llm-key-save").addEventListener("click", saveLlmKey);
-  $("llm-key-delete").addEventListener("click", deleteLlmKey);
-  $("mcp-save").addEventListener("click", saveMcpServer);
-  $("mcp-refresh").addEventListener("click", () => guard(refreshMcpServers));
   $("tool-call").addEventListener("click", callTool);
 
   const sampleBtn = $("tool-sample-btn");
@@ -4335,16 +4826,6 @@ function bind() {
       () => toast("Не удалось скопировать", true)
     );
   });
-  $("chat-reasoning").addEventListener("change", (e) => {
-    try {
-      localStorage.setItem(`reasoning:${ctx.appId}`, e.target.value);
-    } catch (_) {}
-    toast(
-      e.target.value
-        ? `Уровень размышлений: ${e.target.selectedOptions[0].textContent}`
-        : "Уровень размышлений: авто"
-    );
-  });
   $("chat-text").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -4437,18 +4918,6 @@ function bind() {
     tab.addEventListener("click", () => {
       showWorkspaceTab(tab.dataset.ws);
     });
-  });
-
-  $("mcp-servers").addEventListener("click", (e) => {
-    const probeBtn = e.target.closest("[data-mcp-probe]");
-    if (probeBtn) return probeMcp(probeBtn.dataset.mcpProbe);
-    const del = e.target.closest("[data-mcp-del]");
-    if (del) {
-      return guard(async () => {
-        await invoke("mcp_server_delete", { id: del.dataset.mcpDel });
-        await refreshMcpServers();
-      });
-    }
   });
 
   $("secrets").addEventListener("click", (e) => {
@@ -4620,7 +5089,7 @@ async function init() {
     renderPlatformInfo(info);
     if (!info.mode_chosen) showModeOverlay();
     await loadConfig();
-    await refreshLlmKeyStatus();
+    await refreshLlmKeyStatuses();
     await refreshApps();
     await refreshArtifacts();
     await refreshPackTool(true);

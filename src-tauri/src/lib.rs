@@ -104,6 +104,7 @@ pub fn run() {
             commands::rollback_app,
             commands::get_config,
             commands::save_config,
+            commands::llm_select,
             commands::probe_endpoint,
             commands::secrets_list,
             commands::secret_store,
@@ -938,7 +939,11 @@ pub fn cli_chat(
     };
     let home = registry::home();
     if let Some(level) = level {
-        let caps = config::load(&home).llm_capabilities;
+        let cfg = config::load(&home);
+        let caps = cfg
+            .selected_model(app_id)
+            .map(|selection| selection.capabilities)
+            .unwrap_or_else(|| cfg.llm_capabilities.clone());
         if !caps.allows_variant(level) {
             eprintln!("reasoning variant '{level}' is not enabled for the configured model");
             return 2;

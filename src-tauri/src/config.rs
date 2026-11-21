@@ -166,6 +166,16 @@ pub struct UserConfig {
     /// CA or a self-signed certificate. Off by default.
     #[serde(default)]
     pub llm_allow_invalid_certs: bool,
+    /// Named gateways (endpoint + key + models). When empty, the legacy
+    /// `llm_*` fields above are used as one implicit provider named `gw`.
+    #[serde(default)]
+    pub llm_providers: Vec<LlmProvider>,
+    /// Default `provider/model` selection.
+    #[serde(default)]
+    pub llm_default: Option<String>,
+    /// Per-app `provider/model` override; missing means "use the default".
+    #[serde(default)]
+    pub llm_models: BTreeMap<String, String>,
     #[serde(default)]
     pub enabled_apps: Vec<String>,
     /// User-chosen working folder per app. The agent's file tools are confined
@@ -182,6 +192,59 @@ pub struct UserConfig {
     /// defaulted to ask-on-write/exec.
     #[serde(default)]
     pub permissions: crate::permissions::PermissionsConfig,
+}
+
+/// One gateway: endpoint and key are shared by all of its models.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmProvider {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub allow_invalid_certs: bool,
+    #[serde(default)]
+    pub models: Vec<LlmModel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmModel {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub capabilities: ModelCapabilities,
+}
+
+/// Fully resolved model choice for one turn.
+#[derive(Debug, Clone)]
+pub struct ModelSelection {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub endpoint: String,
+    pub allow_invalid_certs: bool,
+    pub model_id: String,
+    pub capabilities: ModelCapabilities,
+}
+
+/// Provider ids end up in secret names and env vars, so keep them simple.
+pub fn provider_id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 32
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// Splits `provider/model`. Model ids may contain `/`, so only the first slash
+/// separates the provider.
+pub fn parse_selection(raw: &str) -> Option<(&str, &str)> {
+    let (provider, model) = raw.trim().split_once('/')?;
+    if !provider_id_ok(provider) || model.trim().is_empty() {
+        return None;
+    }
+    Some((provider, model))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +343,9 @@ impl Default for UserConfig {
             llm_model: None,
             llm_capabilities: ModelCapabilities::default(),
             llm_allow_invalid_certs: false,
+            llm_providers: Vec::new(),
+            llm_default: None,
+            llm_models: BTreeMap::new(),
             enabled_apps: Vec::new(),
             workspaces: BTreeMap::new(),
             session_quota_mb: default_session_mb(),
@@ -354,7 +420,11 @@ static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub fn save(home: &Path, cfg: &UserConfig) -> Result<()> {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     fs::create_dir_all(home)?;
-    let raw = serde_json::to_string_pretty(cfg)?;
+    // Persist the effective provider list, so the first save after an upgrade
+    // turns the legacy single gateway into a normal provider entry.
+    let mut cfg = cfg.clone();
+    cfg.normalize_llm();
+    let raw = serde_json::to_string_pretty(&cfg)?;
     let target = path(home);
     let tmp = home.join(format!("config.json.tmp-{}", std::process::id()));
     {
@@ -371,12 +441,147 @@ pub fn save(home: &Path, cfg: &UserConfig) -> Result<()> {
 }
 
 impl UserConfig {
+    /// Explicit providers, or one implicit provider built from the legacy
+    /// `llm_endpoint`/`llm_model`/`llm_capabilities` fields. Providers without
+    /// an endpoint are ignored; a missing key is allowed for local gateways.
+    pub fn llm_providers_effective(&self) -> Vec<LlmProvider> {
+        if !self.llm_providers.is_empty() {
+            let mut providers = Vec::new();
+            for provider in &self.llm_providers {
+                let endpoint = provider.endpoint.trim();
+                if !provider_id_ok(&provider.id) || endpoint.is_empty() {
+                    continue;
+                }
+                let models: Vec<LlmModel> = provider
+                    .models
+                    .iter()
+                    .filter(|model| !model.id.trim().is_empty())
+                    .cloned()
+                    .collect();
+                if models.is_empty() {
+                    continue;
+                }
+                providers.push(LlmProvider {
+                    id: provider.id.clone(),
+                    name: provider.name.clone(),
+                    endpoint: endpoint.to_string(),
+                    allow_invalid_certs: provider.allow_invalid_certs,
+                    models,
+                });
+            }
+            return providers;
+        }
+        let endpoint = self.llm_endpoint.clone().unwrap_or_default();
+        if endpoint.trim().is_empty() {
+            return Vec::new();
+        }
+        let model_id = self
+            .llm_model
+            .clone()
+            .filter(|model| !model.trim().is_empty())
+            .unwrap_or_else(|| "stub-model".to_string());
+        vec![LlmProvider {
+            id: "gw".to_string(),
+            name: Some("LLM Gateway".to_string()),
+            endpoint: endpoint.trim().to_string(),
+            allow_invalid_certs: self.llm_allow_invalid_certs,
+            models: vec![LlmModel {
+                id: model_id,
+                name: None,
+                capabilities: self.llm_capabilities.clone(),
+            }],
+        }]
+    }
+
+    /// Global default: the explicit choice, else the first model of the first
+    /// provider.
+    pub fn llm_default_selection(&self) -> Option<(String, String)> {
+        let providers = self.llm_providers_effective();
+        if let Some(selection) = self
+            .llm_default
+            .as_deref()
+            .and_then(|raw| resolve_selection(&providers, raw))
+        {
+            return Some((selection.provider_id, selection.model_id));
+        }
+        providers.first().and_then(|provider| {
+            provider
+                .models
+                .first()
+                .map(|model| (provider.id.clone(), model.id.clone()))
+        })
+    }
+
+    /// Per-app override, then the global default, then the first available
+    /// model. Returns `None` only when no provider is configured.
+    pub fn selected_model(&self, app_id: &str) -> Option<ModelSelection> {
+        let providers = self.llm_providers_effective();
+        if let Some(selection) = self
+            .llm_models
+            .get(app_id)
+            .and_then(|raw| resolve_selection(&providers, raw))
+        {
+            return Some(selection);
+        }
+        if let Some(selection) = self
+            .llm_default
+            .as_deref()
+            .and_then(|raw| resolve_selection(&providers, raw))
+        {
+            return Some(selection);
+        }
+        providers.first().and_then(|provider| {
+            provider.models.first().map(|model| ModelSelection {
+                provider_id: provider.id.clone(),
+                provider_name: provider_display_name(provider),
+                endpoint: provider.endpoint.clone(),
+                allow_invalid_certs: provider.allow_invalid_certs,
+                model_id: model.id.clone(),
+                capabilities: model.capabilities.clone(),
+            })
+        })
+    }
+
+    /// Fills `llm_providers` from the legacy fields and drops selections that
+    /// point to a missing provider/model. Called before writing config.
+    pub fn normalize_llm(&mut self) {
+        self.llm_providers = self.llm_providers_effective();
+        self.llm_default = self
+            .llm_default
+            .take()
+            .filter(|raw| resolve_selection(&self.llm_providers, raw).is_some());
+        self.llm_models
+            .retain(|_, raw| resolve_selection(&self.llm_providers, raw).is_some());
+    }
+
     pub fn policy(&self) -> Policy {
         Policy {
             environment: self.environment,
             role: self.role,
         }
     }
+}
+
+fn provider_display_name(provider: &LlmProvider) -> String {
+    provider
+        .name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| provider.id.clone())
+}
+
+fn resolve_selection(providers: &[LlmProvider], raw: &str) -> Option<ModelSelection> {
+    let (provider_id, model_id) = parse_selection(raw)?;
+    let provider = providers.iter().find(|item| item.id == provider_id)?;
+    let model = provider.models.iter().find(|item| item.id == model_id)?;
+    Some(ModelSelection {
+        provider_id: provider.id.clone(),
+        provider_name: provider_display_name(provider),
+        endpoint: provider.endpoint.clone(),
+        allow_invalid_certs: provider.allow_invalid_certs,
+        model_id: model.id.clone(),
+        capabilities: model.capabilities.clone(),
+    })
 }
 
 pub fn policy_for(home: &Path) -> Policy {
@@ -521,5 +726,108 @@ mod tests {
             ..ModelCapabilities::default()
         };
         assert!(!no_reasoning.allows_variant("high"));
+    }
+
+    fn two_providers() -> UserConfig {
+        UserConfig {
+            llm_providers: vec![
+                LlmProvider {
+                    id: "gw".to_string(),
+                    name: Some("Gateway".to_string()),
+                    endpoint: "https://gw/v1".to_string(),
+                    allow_invalid_certs: false,
+                    models: vec![
+                        LlmModel {
+                            id: "~vendor/fast".to_string(),
+                            name: None,
+                            capabilities: ModelCapabilities::default(),
+                        },
+                        LlmModel {
+                            id: "~vendor/smart".to_string(),
+                            name: None,
+                            capabilities: ModelCapabilities {
+                                vision: true,
+                                ..ModelCapabilities::default()
+                            },
+                        },
+                    ],
+                },
+                LlmProvider {
+                    id: "local".to_string(),
+                    name: None,
+                    endpoint: "http://127.0.0.1:11434/v1".to_string(),
+                    allow_invalid_certs: true,
+                    models: vec![LlmModel {
+                        id: "llama".to_string(),
+                        name: None,
+                        capabilities: ModelCapabilities::default(),
+                    }],
+                },
+            ],
+            ..UserConfig::default()
+        }
+    }
+
+    #[test]
+    fn legacy_fields_become_one_implicit_provider() {
+        let cfg: UserConfig = serde_json::from_str(
+            r#"{
+              "llm_endpoint": "https://gw/v1",
+              "llm_model": "~vendor/fast",
+              "llm_capabilities": { "vision": true, "context_tokens": 256000 }
+            }"#,
+        )
+        .unwrap();
+        let providers = cfg.llm_providers_effective();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "gw");
+        assert_eq!(providers[0].models[0].id, "~vendor/fast");
+        assert!(providers[0].models[0].capabilities.vision);
+        let selection = cfg.selected_model("doc-writer").unwrap();
+        assert_eq!(selection.provider_id, "gw");
+        assert_eq!(selection.model_id, "~vendor/fast");
+        assert_eq!(selection.capabilities.context_tokens, Some(256000));
+    }
+
+    #[test]
+    fn selection_prefers_app_override_then_default() {
+        let mut cfg = two_providers();
+        assert_eq!(
+            cfg.selected_model("doc-writer").map(|s| (s.provider_id, s.model_id)),
+            Some(("gw".to_string(), "~vendor/fast".to_string()))
+        );
+
+        cfg.llm_default = Some("gw/~vendor/smart".to_string());
+        assert_eq!(
+            cfg.selected_model("doc-writer").map(|s| s.model_id),
+            Some("~vendor/smart".to_string())
+        );
+
+        // Model ids contain slashes; only the first slash is the separator.
+        cfg.llm_models
+            .insert("doc-writer".to_string(), "local/llama".to_string());
+        assert_eq!(
+            cfg.selected_model("doc-writer")
+                .map(|s| (s.provider_id, s.model_id)),
+            Some(("local".to_string(), "llama".to_string()))
+        );
+        assert!(cfg.selected_model("doc-writer").unwrap().allow_invalid_certs);
+    }
+
+    #[test]
+    fn normalize_materializes_legacy_and_drops_bad_selections() {
+        let mut cfg = UserConfig {
+            llm_endpoint: Some("https://gw/v1".to_string()),
+            llm_model: Some("m".to_string()),
+            llm_default: Some("missing/model".to_string()),
+            ..UserConfig::default()
+        };
+        cfg.llm_models
+            .insert("app".to_string(), "gw/missing".to_string());
+        cfg.normalize_llm();
+        assert_eq!(cfg.llm_providers.len(), 1);
+        assert_eq!(cfg.llm_providers[0].id, "gw");
+        assert!(cfg.llm_default.is_none());
+        assert!(cfg.llm_models.is_empty());
     }
 }

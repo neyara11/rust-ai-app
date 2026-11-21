@@ -169,7 +169,8 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
   и добавляет id как `http-mcp` (URL/токены не переносятся); в разделе
   «MCP-подключения» видно «сервер настроен / нет в настройках» и переключатель
   записи (`pack_set_mcp` → `capabilities.external_writes`). Endpoint и токен
-  задаются в «Настройках → Реестр MCP-серверов» (DPAPI).
+  задаются в «Настройках приложения → MCP для приложения» (DPAPI); глобальный
+  реестр из UI убран, уже сохранённые общие определения работают как fallback.
 - Утилита ищется в `ECO_PACK_BIN`, `<home>\pack\eco-pack.exe`, рядом с платформой
   (`pack\`), затем dev-пути `tools\pack\target\{release,debug}` и `vendor\pack`.
   Статус и версия видны бейджем; если бинаря нет — подсказка про `build-pack.ps1`.
@@ -313,8 +314,8 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
   `permission: {"*":"deny"}` + точечные allow на `platform_*`, все встроенные tools
   выключены, автообновление и sharing off.
 - Подменённые `HOME`/`USERPROFILE`/`XDG_*`, случайный пароль сервера + Basic auth.
-- Секреты передаются через env: в конфиге `{env:ECO_LLM_KEY}`, значение в DPAPI
-  (проверено по заголовку, который видит заглушка).
+- Секреты передаются через env: в конфиге `{env:ECO_LLM_KEY_<PROVIDER>}`, значения
+  в DPAPI (`llm.<provider>`; для `gw` поддерживается legacy `llm_api_key`).
 - Запуск движка — в `spawn_blocking`, UI не блокируется. Осиротевший движок после
   жёсткого падения прибирается при старте платформы по `engine.pid` (pid/образ/время
   создания), а также перед повторным запуском того же приложения.
@@ -322,21 +323,23 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
   при возврате подтягивается финальная история + busy. Возврат в каталог
   (`close_all_apps`) останавливает все движки; смена рабочей папки — только движок
   этого приложения.
-- Модель и endpoint — из настроек; ключ — из DPAPI. Возможности модели задаются
-  явно в `config.json` → `llm_capabilities` (`vision`, `reasoning`,
+- Провайдеры и модели — из настроек: `llm_providers` (endpoint + ключ + набор
+  моделей), глобальный `llm_default`, per-app `llm_models`. Возможности каждой
+  модели задаются явно в её `capabilities` (`vision`, `reasoning`,
   `reasoning_efforts`, `context_tokens`, `output_tokens`) и попадают в
   model-блок провайдера (`attachment`, `reasoning`, `tool_call`, `modalities`,
-  `limit`, `variants`). Селектор Reasoning строится из `reasoning_efforts` и
-  скрывается для модели без рассуждений; неизвестный/выключенный вариант
-  отклоняется до вызова движка (и в CLI `--chat`). Проверено на шлюзе:
-  длина reasoning меняется.
+  `limit`, `variants`). Legacy `llm_endpoint/llm_model/llm_capabilities` при
+  сохранении мигрируют в провайдера `gw`. Селектор Reasoning строится из
+  capabilities выбранной модели и скрывается для модели без рассуждений;
+  неизвестный/выключенный вариант отклоняется до вызова движка (и в CLI
+  `--chat`).
 - Если у пакета нет ни `file_scopes`, ни `bin`-tools, ни `http-mcp`, движок
   добавляет в системный промпт явное ограничение «инструменты недоступны». Сырая
   разметка вызова инструмента (DSML) в ответе модели заменяется предупреждением,
   а не отображается как текст.
 - Вложения в промпт: до 3 файлов. Изображения (`png/jpeg/webp/gif`, ≤4 МиБ,
   проверка магических байтов) уходят `file`-part'ом с data URL и требуют
-  `llm_capabilities.vision`; текстовые файлы (`text/*`, json/yaml/toml/xml/js,
+  `vision` у выбранной модели; текстовые файлы (`text/*`, json/yaml/toml/xml/js,
   ≤256 КиБ, UTF-8) вставляются text-part'ом с маркером `[attachment: name]` и
   работают с любой моделью. UI: кнопка выбора файла, drag&drop, чипы с удалением;
   история показывает вложения чипами, тело текстового файла в чат не выводится.
@@ -562,14 +565,8 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
    Поставка самого бинаря — через CI/артефакт-хранилище (часть отложенного P2), а не
    через git: в git лежат только lock, версия npm-пакета и скрипт вендоринга.
 
-### Функциональные пробелы (актуально на 2026-11-19)
+### Функциональные пробелы (актуально на 2026-11-21)
 
-- **Провайдеры и модели.** Один глобальный endpoint/model/ключ; нет списка
-  провайдеров с моделями, per-app выбора и переключения на ход. Переключение не
-  требует рестарта: движок принимает `providerID/modelID` в каждом ходе; рестарт —
-  только при изменении определения провайдера (endpoint/ключ/список моделей) и
-  только у затронутого приложения. Ключ один на провайдера; изоляция ключей между
-  провайдерами не требуется.
 - **Чат.** Нет виртуализации истории/«загрузить раньше», цитирования, цитат и
   чекбоксов в markdown, агрегации стоимости по сессии и сжатия контекста.
   Regenerate/edit-and-resend и закрепление сессий уже есть. Live-usage во время
@@ -667,9 +664,9 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
 
 - `trusted.pub` — dev-anchor, отпечаток `48efcf9d72861a68`; действует только в
   debug-сборке или при `ECO_PLATFORM_DEV=1`. Release-сборка его игнорирует.
-- `config.json` — endpoint `https://routerai.ru/api/v1`, модель
-  `~deepseek/deepseek-v4-flash-latest`, `llm_capabilities` (vision/reasoning/
-  efforts/limits), `workspaces` (рабочие папки приложений).
+- `config.json` — `llm_providers` (routerai endpoint + модели с capabilities),
+  глобальный `llm_default` и per-app `llm_models`; legacy-поля сохранены для
+  миграции, `workspaces` (рабочие папки приложений).
 - `secrets/llm_api_key.bin` — ключ шлюза, импортирован из `auth.json` Kilo,
   значение в репозиторий и логи не попадало.
 - `apps/doc-writer`, `apps/doc-lookup` — установленные пакеты; у каждого свой

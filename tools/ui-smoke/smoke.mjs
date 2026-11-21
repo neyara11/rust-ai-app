@@ -354,8 +354,11 @@ try {
   );
   await page.evaluate(() => document.querySelector("#link-probe")?.remove());
 
-  const reasoningOptions = await page.locator("#chat-reasoning option").count();
+  await page.click("#chat-reasoning-btn");
+  await page.waitForSelector("#chat-reasoning-pop:not([hidden])");
+  const reasoningOptions = await page.locator("#chat-reasoning-list [data-effort]").count();
   assert(reasoningOptions === 4, `expected 4 reasoning options, got ${reasoningOptions}`);
+  await page.click("#chat-reasoning-btn");
 
   await page.evaluate(() => {
     if (document.querySelectorAll(".chat-item").length < 2) document.querySelector("#chat-new").click();
@@ -379,7 +382,7 @@ try {
     chatItemStyles.active.some((value, index) => value !== chatItemStyles.inactive[index]),
     `active chat item is not visually distinct: ${JSON.stringify(chatItemStyles)}`,
   );
-  assert(await page.locator("#chat-reasoning-wrap").isVisible(), "reasoning selector is hidden");
+  assert(await page.locator("#chat-reasoning-btn").isVisible(), "reasoning selector is hidden");
 
   await page.setInputFiles("#chat-file-input", {
     name: "notes.txt",
@@ -1195,7 +1198,7 @@ try {
   await page.click('.tab[data-tab="settings"]');
   await page.waitForSelector("#tab-settings.active");
   await page.waitForFunction(
-    () => (document.querySelector("#llm-endpoint")?.value || "").length > 0,
+    () => document.querySelectorAll("#llm-providers .llm-provider").length > 0,
   );
   assert(await page.locator("#sheet-scrim").isVisible(), "settings sheet has no scrim");
   assert(await page.locator("#settings-close").isVisible(), "settings sheet has no close button");
@@ -1274,9 +1277,9 @@ try {
     await page.waitForTimeout(260);
     const report = await tabOverflow("#tab-settings", [
       "#perm-write",
-      "#llm-endpoint",
+      "#llm-default-model",
+      "#llm-provider-add",
       "#artifact-query",
-      "#mcp-servers",
     ]);
     assert(report, "#tab-settings was not found");
     assert(

@@ -611,6 +611,42 @@ pub fn save_config(state: tauri::State<'_, AppState>, mut config: UserConfig) ->
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub fn llm_select(
+    state: tauri::State<'_, AppState>,
+    app_id: Option<String>,
+    model: Option<String>,
+) -> Result<()> {
+    let mut cfg = config::load(&state.home);
+    let requested = model
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    match app_id.as_deref() {
+        Some(app_id) => {
+            manifest::parse_id(app_id, "app")?;
+            match &requested {
+                Some(selection) => {
+                    cfg.llm_models.insert(app_id.to_string(), selection.clone());
+                }
+                None => {
+                    cfg.llm_models.remove(app_id);
+                }
+            }
+        }
+        None => cfg.llm_default = requested.clone(),
+    }
+    // Drop selections that point to a provider/model that no longer exists.
+    cfg.normalize_llm();
+    let stored = match app_id.as_deref() {
+        Some(app_id) => cfg.llm_models.contains_key(app_id),
+        None => cfg.llm_default.is_some(),
+    };
+    if requested.is_some() && !stored {
+        return msg("unknown provider/model selection");
+    }
+    config::save(&state.home, &cfg)
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn probe_endpoint(url: String) -> Probe {
     tauri::async_runtime::spawn_blocking(move || probe_endpoint_blocking(url))
         .await
@@ -1791,7 +1827,11 @@ pub fn chat_send(
     };
 
     let attachments = attachments.unwrap_or_default();
-    let caps = config::load(&state.home).llm_capabilities;
+    let cfg = config::load(&state.home);
+    let caps = cfg
+        .selected_model(&app_id)
+        .map(|selection| selection.capabilities)
+        .unwrap_or_else(|| cfg.llm_capabilities.clone());
     if text.trim().is_empty() && attachments.is_empty() {
         return msg("message is empty");
     }

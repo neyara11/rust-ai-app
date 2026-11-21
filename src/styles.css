@@ -4648,25 +4648,12 @@ html[data-theme="light"] .mode-overlay {
 }
 
 .context-popover {
-  position: fixed;
-  z-index: 90;
   min-width: 230px;
   max-width: 300px;
   padding: 10px 12px;
-  background: var(--surface-2);
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  box-shadow: var(--panel-shadow);
 }
 
-.context-popover-title {
-  margin-bottom: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.context-popover-body {
+.chat-pop-body {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -5163,4 +5150,202 @@ html[data-theme="light"] {
 .md-table-wrap,
 .diagram-block {
   white-space: normal;
+}
+
+.llm-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.llm-provider {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.llm-provider-head {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.llm-provider-head label {
+  flex: 1;
+  min-width: 0;
+}
+
+.llm-models {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.llm-model {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border: 1px dashed var(--line);
+  border-radius: 9px;
+}
+
+.llm-model input {
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+
+.llm-provider input {
+  text-overflow: ellipsis;
+}
+
+.llm-model input[data-llm-model="id"] {
+  flex: 1 1 180px;
+}
+
+.llm-model input[data-llm-model="name"] {
+  flex: 1 1 130px;
+}
+
+.llm-model input[data-llm-model="efforts"] {
+  flex: 1 1 120px;
+}
+
+.llm-model input[type="number"] {
+  flex: 0 1 110px;
+  width: 110px;
+}
+
+.llm-model .check-row,
+.llm-model button {
+  flex: 0 0 auto;
+}
+
+.chip.model-chip {
+  overflow: hidden;
+}
+
+.model-chip .clamp {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Global settings use the whole workspace area, like the per-app settings
+   tab, instead of a narrow right-side drawer. */
+#tab-settings.tab-body.active {
+  left: var(--sw);
+  width: auto;
+}
+
+.app.collapsed #tab-settings.tab-body.active {
+  left: 62px;
+}
+
+/* The provider editor needs the full sheet width: model rows carry id, name,
+   two capability toggles and three numeric fields. */
+#tab-settings .settings-grid > .panel:has(#llm-providers) {
+  grid-column: 1 / -1;
+}
+
+/* Model switcher popover, anchored above the composer chip. */
+.chat-pop {
+  position: fixed;
+  z-index: 90;
+  min-width: 260px;
+  max-width: min(360px, calc(100vw - 24px));
+  padding: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.55);
+}
+
+.chat-pop[hidden] {
+  display: none;
+}
+
+.chat-pop-head {
+  padding: 7px 9px 4px;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.chat-pop-provider {
+  padding: 8px 9px 3px;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.chat-pop-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.chat-pop-item:hover,
+.chat-pop-item.sel {
+  background: var(--surface);
+  transform: none;
+  box-shadow: none;
+}
+
+.chat-pop-item .chat-pop-title {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-pop-item em {
+  max-width: 100%;
+  overflow: hidden;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-pop-sep {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--line);
+}
+
+.chat-pop-empty {
+  padding: 8px 9px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#chat-model-settings {
+  color: var(--text-secondary);
+}
+
+#chat-model-settings:hover {
+  background: var(--surface);
+  color: var(--text);
 }

@@ -882,63 +882,88 @@ fn model_entry(model_name: &str, caps: &config::ModelCapabilities) -> Value {
     Value::Object(model)
 }
 
-fn provider_config(
+/// Builds one provider block per configured gateway. Every model is declared
+/// up front, so switching a model or provider only changes the per-turn
+/// `providerID/modelID` payload and never restarts the engine.
+fn provider_configs(
     cfg: &config::UserConfig,
     secrets: &SecretStore,
     headers: &Value,
-) -> Result<(Value, String, String, Vec<(String, String)>)> {
-    let endpoint = cfg.llm_endpoint.clone().unwrap_or_default();
+) -> Result<(Value, Vec<(String, String)>)> {
+    let providers = cfg.llm_providers_effective();
     let mut envs: Vec<(String, String)> = Vec::new();
-    let model_name = cfg
-        .llm_model
-        .clone()
-        .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| "stub-model".to_string());
-
-    if endpoint.trim().is_empty() {
+    if providers.is_empty() {
         // Demo path: opencode's built-in free model.
-        let provider = json!({});
-        return Ok((
-            provider,
-            "opencode".to_string(),
-            "glm-5.3-flash-free".to_string(),
-            envs,
-        ));
+        return Ok((json!({}), envs));
     }
 
     // The engine is a Node process. A private CA/self-signed gateway can be
-    // accepted explicitly per profile; the default stays strict.
-    if cfg.llm_allow_invalid_certs {
+    // accepted explicitly per provider; the default stays strict.
+    if providers.iter().any(|provider| provider.allow_invalid_certs) {
         envs.push(("NODE_TLS_REJECT_UNAUTHORIZED".to_string(), "0".to_string()));
     }
 
-    // The key never goes to disk: opencode substitutes {env:...} at runtime.
-    let api_key = match secrets.load("llm_api_key")? {
-        Some(key) if !key.trim().is_empty() => {
-            envs.push(("ECO_LLM_KEY".to_string(), key));
-            "{env:ECO_LLM_KEY}".to_string()
+    let mut map = serde_json::Map::new();
+    let mut used_envs: Vec<String> = Vec::new();
+    for provider in &providers {
+        let mut env_name = format!(
+            "ECO_LLM_KEY_{}",
+            provider
+                .id
+                .to_ascii_uppercase()
+                .replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+        );
+        while used_envs.iter().any(|used| used == &env_name) {
+            env_name.push('_');
         }
-        _ => "none".to_string(),
-    };
+        used_envs.push(env_name.clone());
 
-    let provider = json!({
-        "gw": {
-            "npm": "@ai-sdk/openai-compatible",
-            "name": "LLM Gateway",
-            "options": {
-                "baseURL": endpoint,
-                "apiKey": api_key,
-                // Agent identity markers for every model call. The raw token
-                // stays in the engine env; the config only references it.
-                "headers": headers
-            },
-            "models": {
-                (model_name.clone()): model_entry(&model_name, &cfg.llm_capabilities)
+        // The key never goes to disk: opencode substitutes {env:...} at
+        // runtime. A profile saved before provider support keeps using the
+        // single legacy key for the implicit `gw` provider.
+        let mut key = secrets.load(&format!("llm.{}", provider.id))?;
+        if key.as_deref().map(str::trim).unwrap_or("").is_empty() && provider.id == "gw" {
+            key = secrets.load("llm_api_key")?;
+        }
+        let api_key = match key {
+            Some(key) if !key.trim().is_empty() => {
+                envs.push((env_name.clone(), key));
+                format!("{{env:{env_name}}}")
             }
-        }
-    });
+            _ => "none".to_string(),
+        };
 
-    Ok((provider, "gw".to_string(), model_name, envs))
+        let mut models = serde_json::Map::new();
+        for model in &provider.models {
+            let mut entry = model_entry(&model.id, &model.capabilities);
+            if let Some(name) = model.name.as_deref().filter(|name| !name.trim().is_empty()) {
+                entry["name"] = json!(name);
+            }
+            models.insert(model.id.clone(), entry);
+        }
+
+        map.insert(
+            provider.id.clone(),
+            json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": provider
+                    .name
+                    .clone()
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| provider.id.clone()),
+                "options": {
+                    "baseURL": provider.endpoint,
+                    "apiKey": api_key,
+                    // Agent identity markers for every model call. The raw
+                    // token stays in the engine env; config references it.
+                    "headers": headers
+                },
+                "models": models
+            }),
+        );
+    }
+
+    Ok((Value::Object(map), envs))
 }
 
 /// Everything the gateway process needs. Paths are absolute because opencode
@@ -970,7 +995,11 @@ fn build_config(
         "X-Agent-Token-Id": token.token_id,
         "X-Agent-Token-Expires": token.expires_at.to_string()
     });
-    let (provider, provider_id, model_id, envs) = provider_config(cfg, secrets, &headers)?;
+    let (provider, envs) = provider_configs(cfg, secrets, &headers)?;
+    let (provider_id, model_id) = cfg
+        .selected_model(&app.app_id)
+        .map(|selection| (selection.provider_id, selection.model_id))
+        .unwrap_or_else(|| ("opencode".to_string(), "glm-5.3-flash-free".to_string()));
 
     let names = proxy::gateway_tool_names(app, package_dir);
     let policy = policy_override
@@ -1912,17 +1941,31 @@ impl ChatSession {
     ) -> Result<()> {
         let started = Instant::now();
         let request_id = identity::new_request_id();
+        // The model can change between turns: the engine config declares every
+        // provider/model up front, so only the payload changes here.
+        let selection = crate::config::load(&self.home).selected_model(&self.app_id);
+        let provider_id = selection
+            .as_ref()
+            .map(|selection| selection.provider_id.clone())
+            .unwrap_or_else(|| self.provider_id.clone());
+        let model_id = selection
+            .as_ref()
+            .map(|selection| selection.model_id.clone())
+            .unwrap_or_else(|| self.model_id.clone());
         self.begin_turn();
-        let result = self.prompt_raw(text, variant, attachments);
+        let result = self.prompt_raw(text, variant, attachments, &provider_id, &model_id);
         let took_ms = started.elapsed().as_millis() as u64;
         match &result {
-            Ok(response) => self.audit_llm(&request_id, variant, took_ms, response, None),
+            Ok(response) => {
+                self.audit_llm(&request_id, variant, took_ms, response, None, &provider_id)
+            }
             Err(e) => self.audit_llm(
                 &request_id,
                 variant,
                 took_ms,
                 &Value::Null,
                 Some(&e.to_string()),
+                &provider_id,
             ),
         }
         result.map(|_| ())
@@ -1948,10 +1991,12 @@ impl ChatSession {
         text: &str,
         variant: Option<&str>,
         attachments: &[AttachmentInput],
+        provider_id: &str,
+        model_id: &str,
     ) -> Result<Value> {
         let agent = turn_agent();
         let mut payload = json!({
-            "model": { "providerID": self.provider_id, "modelID": self.model_id },
+            "model": { "providerID": provider_id, "modelID": model_id },
             "system": self.system,
             "parts": build_parts(text, attachments)
         });
@@ -1979,6 +2024,7 @@ impl ChatSession {
         took_ms: u64,
         response: &Value,
         problem: Option<&str>,
+        provider_id: &str,
     ) {
         let info = response.get("info").unwrap_or(response);
         let tokens = info.get("tokens");
@@ -1986,6 +2032,12 @@ impl ChatSession {
             .get("modelID")
             .and_then(Value::as_str)
             .unwrap_or(self.model_id.as_str());
+        // Trust the engine's report when it names the provider; fall back to
+        // the selection resolved for this turn.
+        let provider = info
+            .get("providerID")
+            .and_then(Value::as_str)
+            .unwrap_or(provider_id);
         crate::commands::audit(
             &self.home,
             &self.app_id,
@@ -1998,7 +2050,7 @@ impl ChatSession {
                 "request_id": request_id,
                 "token_id": self.token_id,
                 "session": self.session_id,
-                "provider_id": self.provider_id,
+                "provider_id": provider,
                 "model_id": model,
                 "variant": variant,
                 "tokens_in": tokens.and_then(|t| t.get("input")).and_then(Value::as_u64),
