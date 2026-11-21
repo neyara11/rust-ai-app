@@ -1617,6 +1617,7 @@ function chatItemKey(item) {
     item.ms ?? "",
     item.tok_s ?? "",
     item.model || "",
+    item.provider || "",
     item.message_id || "",
   ].join("\u0001");
 }
@@ -1627,6 +1628,8 @@ const ICON_COPY =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
 const ICON_REGENERATE =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
+const ICON_REASONING =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V18h8v-3.3A7 7 0 0 0 12 2z"/></svg>';
 
 function iconButton(html, label) {
   const button = document.createElement("button");
@@ -1739,16 +1742,33 @@ function buildChatNode(item, streaming, items, index) {
   if (item.role === "assistant") {
     const footer = document.createElement("div");
     footer.className = "msg-foot";
-    const stats = [];
-    if (item.tokens_in != null) stats.push(`↑${fmtNum(item.tokens_in)}`);
-    if (item.tokens_out != null) stats.push(`↓${fmtNum(item.tokens_out)}`);
-    if (item.reasoning_tokens) stats.push(`reasoning ${fmtNum(item.reasoning_tokens)}`);
-    if (item.tok_s) stats.push(`${Math.round(item.tok_s)} tok/s`);
-    if (item.ms) stats.push(`${(item.ms / 1000).toFixed(1)} с`);
-    if (item.model) stats.push(item.model);
     const meta = document.createElement("span");
     meta.className = "muted small mono";
-    meta.textContent = stats.join(" · ");
+    const add = (text) => {
+      if (meta.childNodes.length) meta.append(" · ");
+      meta.append(document.createTextNode(text));
+    };
+    const addReasoning = (value) => {
+      if (meta.childNodes.length) meta.append(" · ");
+      const wrap = document.createElement("span");
+      wrap.className = "stat-with-icon";
+      wrap.title = "Токены рассуждений";
+      wrap.setAttribute("aria-label", `Токены рассуждений: ${fmtNum(value)}`);
+      wrap.innerHTML = `${ICON_REASONING}<span>${fmtNum(value)}</span>`;
+      meta.appendChild(wrap);
+    };
+    if (item.tokens_in != null) add(`↑${fmtNum(item.tokens_in)}`);
+    const outputTokens =
+      (Number(item.tokens_out) || 0) + (Number(item.reasoning_tokens) || 0);
+    if (item.tokens_out != null || item.reasoning_tokens) {
+      add(`↓${fmtNum(outputTokens)}`);
+    }
+    if (item.reasoning_tokens) addReasoning(item.reasoning_tokens);
+    if (item.tok_s) add(`${Math.round(item.tok_s)} tok/s`);
+    if (item.ms) add(`${(item.ms / 1000).toFixed(1)} с`);
+    if (item.model) add(displayModelName(item));
+    const cost = itemCost(item);
+    if (cost) add(`≈${fmtCost(cost.amount, cost.currency)}`);
     const copy = iconButton(ICON_COPY, "Копировать ответ");
     copy.dataset.copy = "1";
     copy.dataset.text = item.text;
@@ -1855,6 +1875,91 @@ function renderChat(items) {
 // of those tokens came from the provider cache, and (in the tooltip) the cache
 // hit rate. The prompt usage comes from the assistant message; the window size
 // comes from the model capabilities configured for the gateway.
+function modelForItem(item) {
+  if (!item || !item.model) return null;
+  const providers = effectiveProviders();
+  let provider = item.provider
+    ? providers.find((candidate) => candidate.id === item.provider)
+    : null;
+  if (!provider) {
+    const owners = providers.filter((candidate) =>
+      candidate.models.some((model) => model.id === item.model),
+    );
+    if (owners.length === 1) provider = owners[0];
+  }
+  return provider ? provider.models.find((model) => model.id === item.model) : null;
+}
+
+function displayModelName(item) {
+  const model = modelForItem(item);
+  return (model && model.name) || (item && item.model) || "";
+}
+
+function pricingForItem(item) {
+  const model = modelForItem(item);
+  return model ? model.pricing : null;
+}
+
+function itemCost(item) {
+  const pricing = pricingForItem(item);
+  if (!pricing) return null;
+  // Both directions are needed for a meaningful estimate: a missing output
+  // price would silently make every answer free. Cache prices may be omitted;
+  // cached tokens are then charged at the input rate (conservative).
+  if (pricing.input_per_mtok == null || pricing.output_per_mtok == null) {
+    return null;
+  }
+  const input = Number(pricing.input_per_mtok) || 0;
+  const output = Number(pricing.output_per_mtok) || 0;
+  const cacheRead =
+    pricing.cache_read_per_mtok == null
+      ? input
+      : Number(pricing.cache_read_per_mtok) || 0;
+  const cacheWrite =
+    pricing.cache_write_per_mtok == null
+      ? input
+      : Number(pricing.cache_write_per_mtok) || 0;
+  // Providers bill reasoning as output; the engine reports it separately.
+  const outputTokens =
+    (Number(item.tokens_out) || 0) + (Number(item.reasoning_tokens) || 0);
+  const amount =
+    ((Number(item.tokens_in) || 0) * input +
+      outputTokens * output +
+      (Number(item.cache_read) || 0) * cacheRead +
+      (Number(item.cache_write) || 0) * cacheWrite) /
+    1_000_000;
+  return { amount, currency: pricing.currency || "USD" };
+}
+
+function fmtCost(amount, currency) {
+  if (amount == null) return "—";
+  const abs = Math.abs(amount);
+  const digits = abs >= 1 ? 2 : abs >= 0.01 ? 4 : 6;
+  return `${amount.toFixed(digits)} ${currency || "USD"}`;
+}
+
+function sessionUsage(items) {
+  const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  let cost = 0;
+  let currency = "";
+  let priced = false;
+  for (const item of items || []) {
+    if (item.role !== "assistant") continue;
+    totals.input += Number(item.tokens_in) || 0;
+    totals.output +=
+      (Number(item.tokens_out) || 0) + (Number(item.reasoning_tokens) || 0);
+    totals.cacheRead += Number(item.cache_read) || 0;
+    totals.cacheWrite += Number(item.cache_write) || 0;
+    const itemPrice = itemCost(item);
+    if (itemPrice) {
+      cost += itemPrice.amount;
+      currency = itemPrice.currency || currency;
+      priced = true;
+    }
+  }
+  return { totals, cost: priced ? cost : null, currency: currency || "USD" };
+}
+
 function updateContextMeter(items) {
   const chip = $("chat-context");
   const text = $("chat-context-text");
@@ -1872,6 +1977,7 @@ function updateContextMeter(items) {
     closeContextPopover();
     return;
   }
+  ctx.meterItems = items || [];
   const info = selectedModelInfo();
   const cap = Number((info && info.model.capabilities.context_tokens) || 0);
   ctx.contextUsage = usage;
@@ -1959,7 +2065,19 @@ function renderContextPopover() {
   const body = $("chat-context-body");
   if (!pop || !body || !ctx.contextUsage) return;
   body.replaceChildren();
-  for (const [label, value] of contextRows(ctx.contextUsage, ctx.contextLimit || 0)) {
+  const rows = contextRows(ctx.contextUsage, ctx.contextLimit || 0);
+  const session = sessionUsage(ctx.meterItems || ctx.chatItems || []);
+  rows.push([
+    "Токены сессии",
+    `↑${fmtNum(session.totals.input)} ↓${fmtNum(session.totals.output)}`,
+  ]);
+  if (session.totals.cacheRead) {
+    rows.push(["Кэш за сессию", fmtNum(session.totals.cacheRead)]);
+  }
+  if (session.cost != null) {
+    rows.push(["Стоимость сессии (оценка)", fmtCost(session.cost, session.currency)]);
+  }
+  for (const [label, value] of rows) {
     const row = document.createElement("div");
     row.className = "context-row";
     const name = document.createElement("span");
@@ -3761,6 +3879,22 @@ function capabilitiesOrDefault(caps) {
   };
 }
 
+function pricingOrDefault(pricing) {
+  const value = pricing || {};
+  const num = (input) => {
+    if (input === null || input === undefined || input === "") return null;
+    const parsed = Number(input);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  return {
+    input_per_mtok: num(value.input_per_mtok),
+    output_per_mtok: num(value.output_per_mtok),
+    cache_read_per_mtok: num(value.cache_read_per_mtok),
+    cache_write_per_mtok: num(value.cache_write_per_mtok),
+    currency: String(value.currency || ""),
+  };
+}
+
 function providersFromConfig(cfg) {
   const config = cfg || {};
   if (Array.isArray(config.llm_providers) && config.llm_providers.length) {
@@ -3773,6 +3907,7 @@ function providersFromConfig(cfg) {
         id: String(model.id || ""),
         name: String(model.name || ""),
         capabilities: capabilitiesOrDefault(model.capabilities),
+        pricing: pricingOrDefault(model.pricing),
       })),
     }));
   }
@@ -3788,6 +3923,7 @@ function providersFromConfig(cfg) {
           id: String(config.llm_model || "stub-model"),
           name: "",
           capabilities: capabilitiesOrDefault(config.llm_capabilities),
+          pricing: pricingOrDefault({}),
         },
       ],
     },
@@ -4259,6 +4395,7 @@ function renderLlmModelRow(model, index) {
   row.className = "llm-model";
   row.dataset.modelIndex = String(index);
   const caps = model.capabilities || capabilitiesOrDefault({});
+  const price = pricingOrDefault(model.pricing);
   row.innerHTML = `
     <input data-llm-model="id" class="mono" value="${esc(model.id)}" placeholder="model id" />
     <input data-llm-model="name" value="${esc(model.name)}" placeholder="отображаемое имя" />
@@ -4267,6 +4404,11 @@ function renderLlmModelRow(model, index) {
     <input data-llm-model="efforts" value="${esc((caps.reasoning_efforts || []).join(","))}" placeholder="low,medium,high" />
     <input data-llm-model="context" type="number" min="0" value="${caps.context_tokens || ""}" placeholder="контекст" />
     <input data-llm-model="output" type="number" min="0" value="${caps.output_tokens || ""}" placeholder="вывод" />
+    <input data-llm-model="price_in" type="number" min="0" step="0.001" value="${price.input_per_mtok ?? ""}" placeholder="вход/1M" title="Цена входа за 1M токенов" />
+    <input data-llm-model="price_out" type="number" min="0" step="0.001" value="${price.output_per_mtok ?? ""}" placeholder="выход/1M" title="Цена выхода за 1M токенов" />
+    <input data-llm-model="price_cr" type="number" min="0" step="0.001" value="${price.cache_read_per_mtok ?? ""}" placeholder="кэш чт/1M" title="Цена чтения кэша за 1M токенов" />
+    <input data-llm-model="price_cw" type="number" min="0" step="0.001" value="${price.cache_write_per_mtok ?? ""}" placeholder="кэш зап/1M" title="Цена записи кэша за 1M токенов" />
+    <input data-llm-model="price_cur" value="${esc(price.currency || "")}" placeholder="валюта" title="Валюта цен (например USD или RUB)" />
     <button class="ghost small danger-hover" data-llm-remove-model type="button" title="Удалить модель" aria-label="Удалить модель">×</button>`;
   return row;
 }
@@ -4297,6 +4439,13 @@ function syncLlmDraft() {
           context_tokens: Number(read("context").value) || null,
           output_tokens: Number(read("output").value) || null,
         },
+        pricing: {
+          input_per_mtok: read("price_in").value === "" ? null : Number(read("price_in").value),
+          output_per_mtok: read("price_out").value === "" ? null : Number(read("price_out").value),
+          cache_read_per_mtok: read("price_cr").value === "" ? null : Number(read("price_cr").value),
+          cache_write_per_mtok: read("price_cw").value === "" ? null : Number(read("price_cw").value),
+          currency: read("price_cur").value.trim() || null,
+        },
       });
     });
     providers.push(provider);
@@ -4325,6 +4474,13 @@ function collectLlmProviders() {
               : ["low", "medium", "high"],
             context_tokens: model.capabilities.context_tokens || null,
             output_tokens: model.capabilities.output_tokens || null,
+          },
+          pricing: {
+            input_per_mtok: model.pricing.input_per_mtok ?? null,
+            output_per_mtok: model.pricing.output_per_mtok ?? null,
+            cache_read_per_mtok: model.pricing.cache_read_per_mtok ?? null,
+            cache_write_per_mtok: model.pricing.cache_write_per_mtok ?? null,
+            currency: model.pricing.currency || null,
           },
         })),
     }))
@@ -4689,6 +4845,7 @@ function bind() {
           id: "",
           name: "",
           capabilities: capabilitiesOrDefault({}),
+          pricing: pricingOrDefault({}),
         });
         renderLlmProviderCards();
         renderLlmDefaultOptions();
@@ -4729,7 +4886,7 @@ function bind() {
       name: "",
       endpoint: "",
       allow_invalid_certs: false,
-      models: [{ id: "", name: "", capabilities: capabilitiesOrDefault({}) }],
+      models: [{ id: "", name: "", capabilities: capabilitiesOrDefault({}), pricing: pricingOrDefault({}) }],
     });
     renderLlmProviderCards();
     renderLlmDefaultOptions();

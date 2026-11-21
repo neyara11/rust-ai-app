@@ -5358,3 +5358,15 @@ html[data-theme="light"] {
 #chat-compact:disabled:hover {
   background: transparent;
 }
+
+.stat-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  vertical-align: -2px;
+}
+
+.stat-with-icon svg {
+  width: 12px;
+  height: 12px;
+}

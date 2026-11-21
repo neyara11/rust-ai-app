@@ -221,6 +221,24 @@ pub struct LlmModel {
     pub name: Option<String>,
     #[serde(default)]
     pub capabilities: ModelCapabilities,
+    #[serde(default)]
+    pub pricing: ModelPricing,
+}
+
+/// Per-million-token prices for cost aggregation. Operators set them per model;
+/// gateways do not expose pricing, and currencies differ between contours.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelPricing {
+    #[serde(default)]
+    pub input_per_mtok: Option<f64>,
+    #[serde(default)]
+    pub output_per_mtok: Option<f64>,
+    #[serde(default)]
+    pub cache_read_per_mtok: Option<f64>,
+    #[serde(default)]
+    pub cache_write_per_mtok: Option<f64>,
+    #[serde(default)]
+    pub currency: Option<String>,
 }
 
 /// Fully resolved model choice for one turn.
@@ -502,6 +520,7 @@ impl UserConfig {
                 id: model_id,
                 name: None,
                 capabilities: self.llm_capabilities.clone(),
+                pricing: ModelPricing::default(),
             }],
         }]
     }
@@ -761,6 +780,7 @@ mod tests {
                             id: "~vendor/fast".to_string(),
                             name: None,
                             capabilities: ModelCapabilities::default(),
+                            pricing: ModelPricing::default(),
                         },
                         LlmModel {
                             id: "~vendor/smart".to_string(),
@@ -769,6 +789,7 @@ mod tests {
                                 vision: true,
                                 ..ModelCapabilities::default()
                             },
+                            pricing: ModelPricing::default(),
                         },
                     ],
                 },
@@ -781,6 +802,7 @@ mod tests {
                         id: "llama".to_string(),
                         name: None,
                         capabilities: ModelCapabilities::default(),
+                        pricing: ModelPricing::default(),
                     }],
                 },
             ],

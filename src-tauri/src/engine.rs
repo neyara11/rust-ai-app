@@ -61,6 +61,10 @@ pub struct ChatItem {
     pub tok_s: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Provider of the model that produced this message; needed to look up the
+    /// operator's per-model pricing when a session switches providers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// Engine message id, used by `chat_revert` to replace an edited prompt and
     /// everything after it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,6 +239,7 @@ impl ChatItem {
             ms: None,
             tok_s: None,
             model: None,
+            provider: None,
             message_id: None,
         }
     }
@@ -264,6 +269,15 @@ struct StreamState {
     /// new message (for example after a tool call) would erase the reasoning
     /// and tool calls the user already saw.
     done: Vec<ChatItem>,
+    /// Live usage of the current assistant message: the context chip updates
+    /// while the turn is still running instead of only at the end.
+    tokens_in: Option<u64>,
+    tokens_out: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    cache_read: Option<u64>,
+    cache_write: Option<u64>,
+    provider: Option<String>,
+    model: Option<String>,
     changed: bool,
 }
 
@@ -404,7 +418,15 @@ impl StreamState {
             items.push(ChatItem::new("assistant", "reasoning", reasoning));
         }
         if !text.is_empty() {
-            items.push(ChatItem::new("assistant", "text", clean_text(text)));
+            let mut item = ChatItem::new("assistant", "text", clean_text(text));
+            item.tokens_in = self.tokens_in;
+            item.tokens_out = self.tokens_out;
+            item.reasoning_tokens = self.reasoning_tokens;
+            item.cache_read = self.cache_read;
+            item.cache_write = self.cache_write;
+            item.model = self.model.clone();
+            item.provider = self.provider.clone();
+            items.push(item);
         }
         for part in self.parts.iter().filter(|part| part.kind == "tool") {
             let status = if part.status.is_empty() {
@@ -500,7 +522,59 @@ fn apply_stream_event(state: &mut StreamState, event: &Value) -> bool {
                 if state.message_id.as_deref() != Some(id) {
                     state.flush();
                     state.message_id = Some(id.to_string());
+                    state.tokens_in = None;
+                    state.tokens_out = None;
+                    state.reasoning_tokens = None;
+                    state.cache_read = None;
+                    state.cache_write = None;
+                    state.provider = None;
+                    state.model = None;
                 }
+            }
+            let tokens = info.get("tokens");
+            let usage = (
+                tokens.and_then(|t| t.get("input")).and_then(Value::as_u64),
+                tokens.and_then(|t| t.get("output")).and_then(Value::as_u64),
+                tokens.and_then(|t| t.get("reasoning")).and_then(Value::as_u64),
+                tokens
+                    .and_then(|t| t.get("cache"))
+                    .and_then(|c| c.get("read"))
+                    .and_then(Value::as_u64),
+                tokens
+                    .and_then(|t| t.get("cache"))
+                    .and_then(|c| c.get("write"))
+                    .and_then(Value::as_u64),
+            );
+            let current = (
+                state.tokens_in,
+                state.tokens_out,
+                state.reasoning_tokens,
+                state.cache_read,
+                state.cache_write,
+            );
+            if usage != current {
+                state.tokens_in = usage.0;
+                state.tokens_out = usage.1;
+                state.reasoning_tokens = usage.2;
+                state.cache_read = usage.3;
+                state.cache_write = usage.4;
+                state.changed = true;
+            }
+            let provider = info
+                .get("providerID")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if state.provider != provider {
+                state.provider = provider;
+                state.changed = true;
+            }
+            let model = info
+                .get("modelID")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if state.model != model {
+                state.model = model;
+                state.changed = true;
             }
         }
         "message.part.updated" => {
@@ -2770,6 +2844,10 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
             .and_then(|i| i.get("modelID"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        let provider = info
+            .and_then(|i| i.get("providerID"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let message_id = info
             .and_then(|i| i.get("id"))
             .and_then(Value::as_str)
@@ -2806,6 +2884,7 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
             item.ms = ms;
             item.tok_s = tok_s;
             item.model = model;
+            item.provider = provider;
             item.message_id = message_id;
             items.push(item);
         }
