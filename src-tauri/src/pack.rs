@@ -473,7 +473,7 @@ fn import_impl(
     }
     for server in &detected_mcp {
         notes.push(format!(
-            "MCP {} ({}): добавлен как http-mcp; URL/токен — в Настройках → Реестр MCP-серверов, запись выключена",
+            "MCP {} ({}): добавлен как http-mcp; URL/токен — в Настройках → Реестр MCP-серверов, запись выключена. Инструменты сервера нужно объявить в tools[] как {{\"tool\": \"<имя из tools/list>\", \"stream\": \"read\"}} — из connections они не появляются автоматически",
             server.id, server.source
         ));
     }
@@ -748,7 +748,7 @@ fn set_mcp_impl(root: &Path, id: &str, write: bool) -> Result<PackRun> {
     Ok(PackRun {
         ok: true,
         output: format!(
-            "MCP '{id}': http-mcp, запись {}\nURL и токен задаются в Настройках → Реестр MCP-серверов; пересоберите и переподпишите пакет",
+            "MCP '{id}': http-mcp, запись {}\nURL и токен задаются в Настройках → Реестр MCP-серверов; пересоберите и переподпишите пакет\nИнструменты сервера объявите в tools[] как {{\"tool\": \"<имя из tools/list>\", \"stream\": \"read\"}} — без этих записей remote-инструменты не появятся (автоподхвата из connections нет)",
             if write { "разрешена" } else { "выключена" }
         ),
     })

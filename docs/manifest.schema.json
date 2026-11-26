@@ -68,6 +68,7 @@
     },
     "tools": {
       "type": "array",
+      "description": "Package tools declare bin. Remote MCP tools are entries with only tool/stream (no bin) and need an http-mcp connection id; each such entry is exposed as <connection>_<tool>. Server tools are not discovered automatically.",
       "items": {
         "type": "object",
         "additionalProperties": false,

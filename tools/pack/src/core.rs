@@ -484,15 +484,22 @@ pub fn validate(dir: &Path) -> Result<Report> {
 
     if let Some(tools) = manifest.get("tools").and_then(Value::as_array) {
         let mut seen_tools: Vec<String> = Vec::new();
-        let has_mcp = manifest
+        let mcp_ids: Vec<String> = manifest
             .get("connections")
             .and_then(Value::as_array)
             .map(|connections| {
-                connections.iter().any(|connection| {
-                    connection.get("type").and_then(Value::as_str) == Some("http-mcp")
-                })
+                connections
+                    .iter()
+                    .filter(|connection| {
+                        connection.get("type").and_then(Value::as_str) == Some("http-mcp")
+                    })
+                    .filter_map(|connection| connection.get("id").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect()
             })
-            .unwrap_or(false);
+            .unwrap_or_default();
+        let has_mcp = !mcp_ids.is_empty();
+        let mut remote_tools = 0usize;
         for (index, tool) in tools.iter().enumerate() {
             let path = format!("tools[{index}]");
             let name = tool.get("tool").and_then(Value::as_str).unwrap_or("");
@@ -510,6 +517,22 @@ pub fn validate(dir: &Path) -> Result<Report> {
                 report.errors.push(format!(
                     "{path}: no bin and no http-mcp connection; remote MCP tools need a connection"
                 ));
+            }
+            if !has_bin && has_mcp && !name.is_empty() {
+                remote_tools += 1;
+                if mcp_ids.iter().any(|id| id == name) {
+                    report.warnings.push(format!(
+                        "{path} ({name}): tool name equals the connection id; valid only if the server's tools/list exposes a tool with this exact name"
+                    ));
+                }
+                if tool.get("io").is_some()
+                    || tool.get("argv").is_some()
+                    || tool.get("secrets").is_some()
+                {
+                    report.warnings.push(format!(
+                        "{path} ({name}): io/argv/secrets are ignored for remote MCP tools"
+                    ));
+                }
             }
             if let Some(timeout) = tool.get("timeout_secs") {
                 match timeout.as_u64() {
@@ -589,6 +612,12 @@ pub fn validate(dir: &Path) -> Result<Report> {
                     }
                 }
             }
+        }
+        if has_mcp && remote_tools == 0 {
+            report.warnings.push(
+                "connections: http-mcp is declared but tools[] has no remote tool entries; server tools are not discovered automatically - add {tool, stream} per tool"
+                    .to_string(),
+            );
         }
     } else if manifest.get("tools").is_some() {
         report.errors.push("tools must be an array".to_string());
@@ -1096,6 +1125,75 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("tools[2]") && error.contains("no bin and no http-mcp connection")));
+        let _ = fs::remove_dir_all(app.parent().unwrap());
+    }
+
+    #[test]
+    fn tool_name_equal_to_connection_id_is_a_warning() {
+        let app = make_package("mcp-id-as-tool");
+        let mut manifest: Value =
+            serde_json::from_str(&fs::read_to_string(app.join("manifest.json")).unwrap()).unwrap();
+        manifest["connections"] = serde_json::json!([
+            { "id": "llm", "type": "llm" },
+            { "id": "doc_mcp", "type": "http-mcp" }
+        ]);
+        manifest["tools"] = serde_json::json!([{ "tool": "doc_mcp", "stream": "read" }]);
+        write_manifest_text(&app, &serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        recompute_hashes(&app).unwrap();
+
+        let report = validate(&app).unwrap();
+        assert!(report.ok(), "unexpected errors: {:?}", report.errors);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("tool name equals the connection id")));
+        let _ = fs::remove_dir_all(app.parent().unwrap());
+    }
+
+    #[test]
+    fn remote_mcp_tools_are_valid_without_bin() {
+        let app = make_package("mcp-tools");
+        let mut manifest: Value =
+            serde_json::from_str(&fs::read_to_string(app.join("manifest.json")).unwrap()).unwrap();
+        manifest["connections"] = serde_json::json!([
+            { "id": "llm", "type": "llm" },
+            { "id": "doc_mcp", "type": "http-mcp" }
+        ]);
+        manifest["tools"] = serde_json::json!([
+            { "tool": "query", "stream": "read" },
+            { "tool": "system", "stream": "read" }
+        ]);
+        write_manifest_text(&app, &serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        recompute_hashes(&app).unwrap();
+
+        let report = validate(&app).unwrap();
+        assert!(report.ok(), "unexpected errors: {:?}", report.errors);
+        assert!(!report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("no remote tool entries")));
+        let _ = fs::remove_dir_all(app.parent().unwrap());
+    }
+
+    #[test]
+    fn declared_mcp_without_tool_entries_warns() {
+        let app = make_package("mcp-without-tools");
+        let mut manifest: Value =
+            serde_json::from_str(&fs::read_to_string(app.join("manifest.json")).unwrap()).unwrap();
+        manifest["connections"] = serde_json::json!([
+            { "id": "llm", "type": "llm" },
+            { "id": "doc_mcp", "type": "http-mcp" }
+        ]);
+        manifest["tools"] = serde_json::json!([]);
+        write_manifest_text(&app, &serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        recompute_hashes(&app).unwrap();
+
+        let report = validate(&app).unwrap();
+        assert!(report.ok(), "unexpected errors: {:?}", report.errors);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("no remote tool entries")));
         let _ = fs::remove_dir_all(app.parent().unwrap());
     }
 
