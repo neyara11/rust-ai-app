@@ -3177,6 +3177,15 @@ function bindChatEvents() {
     }
     setBusy(false);
   });
+  listen("chat://retry", (event) => {
+    const payload = event.payload || {};
+    if (payload.app_id !== ctx.appId) return;
+    if (payload.session && payload.session !== ctx.chatId) return;
+    const seconds = Math.max(1, Math.round(Number(payload.delay_ms || 0) / 1000));
+    toast(
+      `Сбой шлюза/модели, повторяю ${payload.attempt}/${payload.max_attempts} через ${seconds} с…`,
+    );
+  });
 }
 
 /* ---------- mcp ---------- */

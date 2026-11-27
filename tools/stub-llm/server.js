@@ -2,6 +2,13 @@ const http = require("http");
 
 const PORT = Number(process.env.PORT || 4098);
 const MODEL = process.env.MODEL || "stub-model";
+// Failure injection for retry tests: the first N chat completions answer with
+// STUB_FAIL_STATUS (default 429). Set STUB_FAILS=0 to disable.
+const FAILS = Number(process.env.STUB_FAILS || 0);
+const FAIL_STATUS = Number(process.env.STUB_FAIL_STATUS || 429);
+const RETRY_AFTER = process.env.STUB_FAIL_RETRY_AFTER || "";
+let failuresLeft = FAILS;
+let requests = 0;
 
 function sse(res, obj) {
   res.write(`data: ${JSON.stringify(obj)}\n\n`);
@@ -48,6 +55,25 @@ const server = http.createServer((req, res) => {
   if (req.method !== "POST" || !req.url.startsWith("/v1/chat/completions")) {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: { message: "not found" } }));
+    return;
+  }
+
+  requests += 1;
+  console.log(`request ${requests}${failuresLeft > 0 ? ` (will fail: ${failuresLeft} left)` : ""}`);
+
+  if (failuresLeft > 0) {
+    failuresLeft -= 1;
+    const headers = { "Content-Type": "application/json" };
+    if (RETRY_AFTER) headers["Retry-After"] = String(RETRY_AFTER);
+    res.writeHead(FAIL_STATUS, headers);
+    res.end(
+      JSON.stringify({
+        error: {
+          message: `stub injected failure (${FAIL_STATUS})`,
+          type: FAIL_STATUS === 429 ? "rate_limit_error" : "server_error",
+        },
+      }),
+    );
     return;
   }
 

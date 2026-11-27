@@ -836,6 +836,144 @@ fn stream_agent() -> ureq::Agent {
 /// worker (and the chat busy flag) forever.
 const MAX_TURN_SECS: u64 = 4 * 60 * 60;
 
+/// Retry policy for one model turn. Only transient failures are retried, and a
+/// turn that already ran a tool is never replayed: re-sending could duplicate
+/// side effects. Delays grow because a 429 often means a per-minute window.
+#[derive(Debug, Clone)]
+struct RetryPolicy {
+    delays_ms: Vec<u64>,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            delays_ms: vec![3_000, 10_000, 30_000],
+        }
+    }
+}
+
+/// Emitted to the UI while a failed turn is being retried.
+#[derive(Debug, Clone, Serialize)]
+pub struct RetryNotice {
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub delay_ms: u64,
+    pub message: String,
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Parses `engine HTTP 500: ...`; transport errors have no status.
+fn http_status(message: &str) -> Option<u16> {
+    let rest = message.strip_prefix("engine http ")?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// Parses the `[retry-after: Ns]` suffix added by `http_request`.
+fn retry_after_secs(message: &str) -> Option<u64> {
+    let marker = "[retry-after:";
+    let idx = message.find(marker)?;
+    let rest = &message[idx + marker.len()..];
+    let digits: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// The engine answers `200 OK` even when the model call failed: the error is
+/// carried in the assistant message (`info.error`). Turn it into the same
+/// `engine HTTP <code>: ...` text the retry classifier understands.
+fn engine_turn_error(response: &Value) -> Option<String> {
+    let error = response.get("info")?.get("error")?;
+    let data = error.get("data");
+    let status = data
+        .and_then(|data| data.get("statusCode"))
+        .and_then(Value::as_u64);
+    let message = data
+        .and_then(|data| data.get("message"))
+        .and_then(Value::as_str)
+        .or_else(|| error.get("name").and_then(Value::as_str))
+        .unwrap_or("model request failed");
+    let retry_after = data
+        .and_then(|data| data.get("responseHeaders"))
+        .and_then(|headers| headers.get("retry-after"))
+        .and_then(Value::as_str)
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let mut text = match status {
+        Some(code) => format!("engine HTTP {code}: {message}"),
+        None => format!("model error: {message}"),
+    };
+    if let Some(secs) = retry_after {
+        text.push_str(&format!(" [retry-after: {secs}s]"));
+    }
+    Some(text)
+}
+
+/// Errors that must not be retried: credentials, model/config and billing.
+fn fatal_llm_error(lower: &str) -> bool {
+    [
+        "invalid api key",
+        "incorrect api key",
+        "unauthorized",
+        "forbidden",
+        "model not found",
+        "context length",
+        "context_length_exceeded",
+        "invalid request",
+        "insufficient quota",
+        "billing",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
+}
+
+/// Delay before the next attempt, or `None` when the failure is not retryable.
+fn retry_delay(message: &str, retry_index: usize, policy: &RetryPolicy) -> Option<u64> {
+    let lower = message.to_ascii_lowercase();
+    if fatal_llm_error(&lower) {
+        return None;
+    }
+    let retryable = match http_status(&lower) {
+        Some(code) => matches!(code, 408 | 425 | 429 | 500 | 502 | 503 | 504 | 529),
+        None => {
+            let transient = [
+                "rate limit",
+                "too many requests",
+                "overloaded",
+                "temporarily unavailable",
+                "service unavailable",
+                "bad gateway",
+                "gateway timeout",
+                "timed out",
+                "timeout",
+                "connection reset",
+                "os error 10054",
+                "os error 10060",
+            ];
+            transient.iter().any(|pattern| lower.contains(pattern))
+        }
+    };
+    if !retryable {
+        return None;
+    }
+    if let Some(secs) = retry_after_secs(&lower) {
+        return Some(secs.saturating_mul(1000).clamp(250, 60_000));
+    }
+    policy
+        .delays_ms
+        .get(retry_index)
+        .copied()
+        .map(|delay| delay.max(1))
+}
+
 fn turn_agent() -> ureq::Agent {
     let mut builder = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(5))
@@ -894,9 +1032,17 @@ fn http_request(
     match response {
         Ok(resp) => Ok(resp),
         Err(ureq::Error::Status(code, resp)) => {
+            // Keep Retry-After in the error text: the turn retry policy uses it
+            // instead of guessing a backoff for 429/503.
+            let retry_after = resp
+                .header("retry-after")
+                .and_then(|value| value.trim().parse::<u64>().ok());
             let body = resp.into_string().unwrap_or_default();
+            let hint = retry_after
+                .map(|secs| format!(" [retry-after: {secs}s]"))
+                .unwrap_or_default();
             msg(format!(
-                "engine HTTP {code}: {}",
+                "engine HTTP {code}: {}{hint}",
                 body.chars().take(400).collect::<String>()
             ))
         }
@@ -2071,8 +2217,41 @@ impl ChatSession {
         variant: Option<&str>,
         attachments: &[AttachmentInput],
     ) -> Result<()> {
-        let started = Instant::now();
-        let request_id = identity::new_request_id();
+        self.prompt_with_retry(text, variant, attachments, |_| {})
+    }
+
+    /// `prompt_with_attachments` with retries for transient provider failures.
+    /// The observer runs before each backoff sleep so the UI can show progress.
+    pub fn prompt_with_retry<F>(
+        &self,
+        text: &str,
+        variant: Option<&str>,
+        attachments: &[AttachmentInput],
+        mut on_retry: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&RetryNotice),
+    {
+        self.prompt_with_retry_policy(
+            text,
+            variant,
+            attachments,
+            &RetryPolicy::default(),
+            &mut on_retry,
+        )
+    }
+
+    fn prompt_with_retry_policy<F>(
+        &self,
+        text: &str,
+        variant: Option<&str>,
+        attachments: &[AttachmentInput],
+        policy: &RetryPolicy,
+        on_retry: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&RetryNotice),
+    {
         // The model can change between turns: the engine config declares every
         // provider/model up front, so only the payload changes here.
         let selection = crate::config::load(&self.home).selected_model(&self.app_id);
@@ -2084,23 +2263,135 @@ impl ChatSession {
             .as_ref()
             .map(|selection| selection.model_id.clone())
             .unwrap_or_else(|| self.model_id.clone());
-        self.begin_turn();
-        let result = self.prompt_raw(text, variant, attachments, &provider_id, &model_id);
-        let took_ms = started.elapsed().as_millis() as u64;
-        match &result {
-            Ok(response) => {
-                self.audit_llm(&request_id, variant, took_ms, response, None, &provider_id)
-            }
-            Err(e) => self.audit_llm(
+        let max_attempts = policy.delays_ms.len() as u32 + 1;
+        let mut attempt = 1u32;
+        loop {
+            let attempt_started_ms = now_millis();
+            self.begin_turn();
+            let started = Instant::now();
+            let request_id = identity::new_request_id();
+            let raw = self.prompt_raw(text, variant, attachments, &provider_id, &model_id);
+            let took_ms = started.elapsed().as_millis() as u64;
+            let failure = match &raw {
+                Ok(response) => {
+                    engine_turn_error(response).map(|reason| (reason, Some(response.clone())))
+                }
+                Err(e) => Some((e.to_string(), None)),
+            };
+            let Some((reason, audit_response)) = failure else {
+                let response = raw.expect("successful turn after error check");
+                self.audit_llm(&request_id, variant, took_ms, &response, None, &provider_id);
+                return Ok(());
+            };
+            let audit_value = audit_response.as_ref().unwrap_or(&Value::Null);
+            self.audit_llm(
                 &request_id,
                 variant,
                 took_ms,
-                &Value::Null,
-                Some(&e.to_string()),
+                audit_value,
+                Some(&reason),
                 &provider_id,
-            ),
+            );
+            let retry_index = (attempt - 1) as usize;
+            let delay = retry_delay(&reason, retry_index, policy);
+            let Some(delay_ms) = delay else {
+                return Err(Error::Msg(reason));
+            };
+            // A turn that already ran a tool must not be replayed: the
+            // retry would duplicate side effects. Unknown history is
+            // treated the same way (fail safe).
+            let history = match self.history_raw() {
+                Ok(raw) => raw,
+                Err(history_err) => {
+                    eprintln!("llm retry skipped: cannot read history: {history_err}");
+                    return Err(Error::Msg(reason));
+                }
+            };
+            if tool_calls_after(&history, attempt_started_ms) {
+                return Err(Error::Msg(reason));
+            }
+            // Remove the failed user message so the resend does not
+            // duplicate the prompt. If the engine never persisted one,
+            // there is nothing to clean up.
+            if let Err(revert_err) = self.revert_turn(attempt_started_ms) {
+                eprintln!("llm retry skipped: cannot revert failed turn: {revert_err}");
+                return Err(Error::Msg(reason));
+            }
+            self.audit_retry(&request_id, attempt, max_attempts, delay_ms, &reason);
+            on_retry(&RetryNotice {
+                attempt: attempt + 1,
+                max_attempts,
+                delay_ms,
+                message: reason.chars().take(300).collect(),
+            });
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            attempt += 1;
         }
-        result.map(|_| ())
+    }
+
+    /// Reverts the user message created for the failed attempt (and everything
+    /// after it), so re-sending does not duplicate the prompt. Returns false
+    /// when the engine never persisted a message for this attempt.
+    fn revert_turn(&self, since_ms: u64) -> Result<bool> {
+        let raw = self.history_raw()?;
+        let messages = raw
+            .as_array()
+            .ok_or_else(|| Error::Msg("history is not an array".to_string()))?;
+        let mut target: Option<String> = None;
+        for message in messages {
+            let Some(info) = message.get("info") else {
+                continue;
+            };
+            if info.get("role").and_then(Value::as_str) != Some("user") {
+                continue;
+            }
+            let created = info
+                .get("time")
+                .and_then(|time| time.get("created"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if created < since_ms {
+                continue;
+            }
+            if let Some(id) = info.get("id").and_then(Value::as_str) {
+                target = Some(id.to_string());
+            }
+        }
+        match target {
+            Some(id) => {
+                self.revert(&id)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    fn audit_retry(
+        &self,
+        request_id: &str,
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        reason: &str,
+    ) {
+        crate::commands::audit(
+            &self.home,
+            &self.app_id,
+            json!({
+                "ts": crate::artifacts::now_secs(),
+                "app_id": self.app_id,
+                "app_version": self.app_version,
+                "source": "agent",
+                "action": "llm_retry",
+                "request_id": request_id,
+                "token_id": self.token_id,
+                "session": self.session_id,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "delay_ms": delay_ms,
+                "reason": reason.chars().take(300).collect::<String>(),
+            }),
+        );
     }
 
     /// Marks a new turn for the tool gateway, which enforces
@@ -2605,6 +2896,45 @@ impl ChatSession {
                 .is_none(),
         }
     }
+}
+
+/// True when any assistant message created at or after `since_ms` contains a
+/// tool part. Retrying such a turn could repeat a write, so the caller must not
+/// replay it.
+pub fn tool_calls_after(raw: &Value, since_ms: u64) -> bool {
+    let Some(messages) = raw.as_array() else {
+        // Unknown shape: fail safe and let the caller keep the original error.
+        return true;
+    };
+    for message in messages {
+        let Some(info) = message.get("info") else {
+            continue;
+        };
+        if info.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let created = info
+            .get("time")
+            .and_then(|time| time.get("created"))
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::MAX);
+        if created < since_ms {
+            continue;
+        }
+        if message
+            .get("parts")
+            .and_then(Value::as_array)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .any(|part| part.get("type").and_then(Value::as_str) == Some("tool"))
+            })
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// True when the session already has an assistant message created after
@@ -3644,5 +3974,291 @@ mod tests {
         );
         assert_eq!(title_from_text("   \n"), "Новый диалог");
     }
-}
 
+    fn read_request(socket: &mut std::net::TcpStream) -> Option<(String, String)> {
+        use std::io::{BufRead, BufReader, Read};
+        let clone = socket.try_clone().ok()?;
+        let mut reader = BufReader::new(clone);
+        let mut line = String::new();
+        if reader.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        let mut parts = line.split_whitespace();
+        let method = parts.next()?.to_string();
+        let path = parts.next()?.to_string();
+        let mut length = 0usize;
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header).ok()? == 0 {
+                break;
+            }
+            if header == "\r\n" || header == "\n" {
+                break;
+            }
+            if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse().unwrap_or(0);
+            }
+        }
+        if length > 0 {
+            let mut body = vec![0u8; length];
+            let _ = reader.read_exact(&mut body);
+        }
+        Some((method, path))
+    }
+
+    fn http_response(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn test_home(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "eco-engine-{tag}-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_session(port: u16, home: PathBuf) -> ChatSession {
+        ChatSession {
+            base: format!("http://127.0.0.1:{port}"),
+            auth: "Basic eA==".to_string(),
+            provider_id: "gw".to_string(),
+            model_id: "m".to_string(),
+            session_id: "ses_test".to_string(),
+            system: "s".to_string(),
+            home,
+            app_id: "demo".to_string(),
+            app_name: "Demo".to_string(),
+            app_version: "0.1.0".to_string(),
+            token_id: "tok".to_string(),
+        }
+    }
+
+    #[test]
+    fn retry_delay_classifies_transient_and_fatal_errors() {
+        let policy = RetryPolicy {
+            delays_ms: vec![10, 20],
+        };
+        assert_eq!(
+            retry_delay("engine HTTP 429: rate limit", 0, &policy),
+            Some(10)
+        );
+        assert_eq!(
+            retry_delay("engine HTTP 503: service unavailable", 0, &policy),
+            Some(10)
+        );
+        assert_eq!(
+            retry_delay("engine transport error: connection reset", 0, &policy),
+            Some(10)
+        );
+        assert_eq!(
+            retry_delay("engine HTTP 429: rate limit [retry-after: 7s]", 0, &policy),
+            Some(7000)
+        );
+        assert_eq!(
+            retry_delay("engine HTTP 401: invalid api key", 0, &policy),
+            None
+        );
+        assert_eq!(
+            retry_delay("engine HTTP 404: model not found", 0, &policy),
+            None
+        );
+        assert_eq!(retry_delay("engine HTTP 500: boom", 2, &policy), None);
+    }
+
+    #[test]
+    fn engine_error_inside_a_200_response_is_detected() {
+        let raw = json!({
+            "info": {
+                "role": "assistant",
+                "error": {
+                    "name": "APIError",
+                    "data": {
+                        "message": "rate limit",
+                        "statusCode": 429,
+                        "responseHeaders": { "retry-after": "2" }
+                    }
+                }
+            },
+            "parts": []
+        });
+        let reason = engine_turn_error(&raw).expect("error must be detected");
+        assert!(reason.contains("engine HTTP 429"));
+        assert!(reason.contains("[retry-after: 2s]"));
+        assert!(engine_turn_error(&json!({ "info": { "role": "assistant" } })).is_none());
+    }
+
+    #[test]
+    fn tool_calls_after_detects_tool_parts() {
+        let raw = json!([
+            { "info": { "role": "user", "time": { "created": 1000 } }, "parts": [] },
+            {
+                "info": { "role": "assistant", "time": { "created": 1001 } },
+                "parts": [{ "type": "tool", "tool": "platform_write_file" }]
+            }
+        ]);
+        assert!(tool_calls_after(&raw, 1000));
+        assert!(!tool_calls_after(&raw, 1002));
+        assert!(tool_calls_after(&json!({}), 0));
+    }
+
+    #[test]
+    fn transient_failures_are_retried_and_failed_turns_reverted() {
+        use std::io::Write as _;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let message_calls = Arc::new(AtomicUsize::new(0));
+        let revert_calls = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let counter = message_calls.clone();
+        let reverts = revert_calls.clone();
+        let stop_thread = stop.clone();
+        let server = std::thread::spawn(move || {
+            while !stop_thread.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        let _ = socket.set_nonblocking(false);
+                        let Some((method, path)) = read_request(&mut socket) else {
+                            continue;
+                        };
+                        let response = if method == "POST" && path == "/session/ses_test/message" {
+                            let n = counter.fetch_add(1, Ordering::Relaxed);
+                            if n < 2 {
+                                http_response(
+                                    "200 OK",
+                                    "{\"info\":{\"error\":{\"name\":\"APIError\",\"data\":{\"message\":\"rate limit\",\"statusCode\":429}}}}",
+                                )
+                            } else {
+                                http_response("200 OK", "{\"info\":{\"role\":\"assistant\"}}")
+                            }
+                        } else if method == "GET" && path == "/session/ses_test/message" {
+                            let now = now_millis();
+                            let body = json!([
+                                {
+                                    "info": { "id": "msg_user", "role": "user", "time": { "created": now } },
+                                    "parts": []
+                                },
+                                {
+                                    "info": { "id": "msg_assistant", "role": "assistant", "time": { "created": now } },
+                                    "parts": []
+                                }
+                            ])
+                            .to_string();
+                            http_response("200 OK", &body)
+                        } else if method == "POST" && path == "/session/ses_test/revert" {
+                            reverts.fetch_add(1, Ordering::Relaxed);
+                            http_response("200 OK", "{}")
+                        } else {
+                            http_response("404 Not Found", "{}")
+                        };
+                        let _ = socket.write_all(response.as_bytes());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let session = test_session(port, test_home("retry-ok"));
+        let policy = RetryPolicy {
+            delays_ms: vec![1, 1],
+        };
+        let mut notices = Vec::new();
+        let result = session.prompt_with_retry_policy("hi", None, &[], &policy, &mut |notice| {
+            notices.push(notice.clone());
+        });
+        stop.store(true, Ordering::Relaxed);
+        let _ = server.join();
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(message_calls.load(Ordering::Relaxed), 3);
+        assert_eq!(revert_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0].attempt, 2);
+        assert_eq!(notices[0].max_attempts, 3);
+    }
+
+    #[test]
+    fn a_turn_that_ran_a_tool_is_not_retried() {
+        use std::io::Write as _;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let message_calls = Arc::new(AtomicUsize::new(0));
+        let revert_calls = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let counter = message_calls.clone();
+        let reverts = revert_calls.clone();
+        let stop_thread = stop.clone();
+        let server = std::thread::spawn(move || {
+            while !stop_thread.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        let _ = socket.set_nonblocking(false);
+                        let Some((method, path)) = read_request(&mut socket) else {
+                            continue;
+                        };
+                        let response = if method == "POST" && path == "/session/ses_test/message" {
+                            counter.fetch_add(1, Ordering::Relaxed);
+                            http_response(
+                                "429 Too Many Requests",
+                                "{\"error\":{\"message\":\"rate limit\"}}",
+                            )
+                        } else if method == "GET" && path == "/session/ses_test/message" {
+                            let now = now_millis();
+                            let body = json!([
+                                {
+                                    "info": { "id": "msg_user", "role": "user", "time": { "created": now } },
+                                    "parts": []
+                                },
+                                {
+                                    "info": { "id": "msg_assistant", "role": "assistant", "time": { "created": now } },
+                                    "parts": [{ "type": "tool", "tool": "platform_write_file" }]
+                                }
+                            ])
+                            .to_string();
+                            http_response("200 OK", &body)
+                        } else if method == "POST" && path == "/session/ses_test/revert" {
+                            reverts.fetch_add(1, Ordering::Relaxed);
+                            http_response("200 OK", "{}")
+                        } else {
+                            http_response("404 Not Found", "{}")
+                        };
+                        let _ = socket.write_all(response.as_bytes());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let session = test_session(port, test_home("retry-tool"));
+        let policy = RetryPolicy {
+            delays_ms: vec![1, 1],
+        };
+        let result = session.prompt_with_retry_policy("hi", None, &[], &policy, &mut |_| {});
+        stop.store(true, Ordering::Relaxed);
+        let _ = server.join();
+
+        assert!(result.is_err());
+        assert_eq!(message_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(revert_calls.load(Ordering::Relaxed), 0);
+    }
+}

@@ -1975,7 +1975,23 @@ pub fn chat_send(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as u64)
             .unwrap_or(0);
-        let result = session.prompt_with_attachments(&text, variant.as_deref(), &attachments);
+        let retry_app = app.clone();
+        let retry_app_id = app_id.clone();
+        let retry_session = session.session_id.clone();
+        let result =
+            session.prompt_with_retry(&text, variant.as_deref(), &attachments, move |notice| {
+                let _ = retry_app.emit(
+                    "chat://retry",
+                    serde_json::json!({
+                        "app_id": retry_app_id,
+                        "session": retry_session,
+                        "attempt": notice.attempt,
+                        "max_attempts": notice.max_attempts,
+                        "delay_ms": notice.delay_ms,
+                        "message": notice.message
+                    }),
+                );
+            });
         stop_stream.store(true, Ordering::Relaxed);
         let history = session.history_raw().ok();
         let finished = history
