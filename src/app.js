@@ -463,6 +463,7 @@ const ctx = {
   chatStart: null,
   reasoning: "",
   compacting: false,
+  memory: null,
 };
 
 const THEME_KEY = "theme";
@@ -3169,6 +3170,11 @@ function bindChatEvents() {
         (item) => item.session_id !== ctx.chatId,
       );
       renderPermissionPrompt();
+      if (ctx.memory && ctx.memory.pendingRestart) {
+        ctx.memory.pendingRestart = false;
+        // The backend restarted the engine after this turn.
+        ctx.chat = null;
+      }
       refreshChats();
       guard(maybeAutoCompact);
     }
@@ -3313,6 +3319,143 @@ async function refreshAppSettings() {
   await refreshPermissionGrants();
   const auditLines = await invoke("audit_tail", { app_id: appId, limit: 40 }).catch(() => []);
   renderPermissionAudit(auditLines);
+  await refreshAppMemory();
+}
+
+function formatMemoryBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} Б`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} КБ`;
+  return `${(value / (1024 * 1024)).toFixed(1)} МБ`;
+}
+
+function formatMemoryDate(ts) {
+  if (!ts) return "—";
+  try {
+    return new Date(Number(ts) * 1000).toLocaleString("ru-RU", {
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch (_) {
+    return "—";
+  }
+}
+
+async function refreshAppMemory() {
+  if (!ctx.appId) return;
+  const appId = ctx.appId;
+  const status = await invoke("memory_status", { app_id: appId }).catch(() => null);
+  if (!status || ctx.appId !== appId) return;
+  const previousQuery =
+    ctx.memory && ctx.memory.appId === appId ? ctx.memory.query || "" : "";
+  ctx.memory = {
+    ...status,
+    appId,
+    query: previousQuery,
+    facts: [],
+    offset: 0,
+    total: 0,
+    has_more: false,
+  };
+  const search = $("app-memory-search");
+  if (search) search.value = previousQuery;
+  await loadAppMemory(true);
+}
+
+async function loadAppMemory(reset) {
+  const memory = ctx.memory;
+  if (!memory || !ctx.appId) return;
+  if (reset) {
+    memory.facts = [];
+    memory.offset = 0;
+  }
+  const page = await invoke("memory_list", {
+    app_id: ctx.appId,
+    query: memory.query || "",
+    offset: memory.offset || 0,
+    limit: 50,
+  });
+  if (!ctx.memory || ctx.memory.appId !== ctx.appId) return;
+  ctx.memory.facts = reset
+    ? page.facts || []
+    : [...(ctx.memory.facts || []), ...(page.facts || [])];
+  ctx.memory.offset = Number(page.offset || 0) + (page.facts || []).length;
+  ctx.memory.total = page.total || 0;
+  ctx.memory.has_more = Boolean(page.has_more);
+  renderAppMemory();
+}
+
+function renderAppMemory() {
+  const memory = ctx.memory;
+  const list = $("app-memory-list");
+  if (!memory || !list) return;
+  const toggle = $("app-memory-toggle");
+  if (toggle) toggle.textContent = memory.enabled ? "Выключить" : "Включить";
+  const status = $("app-memory-status");
+  if (status) {
+    status.textContent = `${memory.enabled ? "включена" : "выключена"} · ${
+      memory.workspace || ""
+    } · ${memory.count || 0} фактов · ${formatMemoryBytes(memory.bytes)}`;
+  }
+  list.innerHTML = "";
+  const facts = memory.facts || [];
+  const empty = $("app-memory-empty");
+  if (empty) {
+    empty.hidden = facts.length > 0;
+    empty.textContent = memory.query
+      ? "По запросу ничего не найдено."
+      : memory.enabled
+        ? "Пока нет сохранённых фактов."
+        : "Память выключена: агент не видит инструменты памяти. Факты сохранены.";
+  }
+  const clear = $("app-memory-clear");
+  if (clear) clear.disabled = !(memory.count > 0);
+  const more = $("app-memory-more");
+  if (more) more.hidden = !memory.has_more;
+
+  for (const fact of facts) {
+    const card = document.createElement("div");
+    card.className = "app-setting-card memory-fact";
+    const head = document.createElement("div");
+    head.className = "memory-fact-head";
+    const date = document.createElement("span");
+    date.textContent = formatMemoryDate(fact.ts);
+    const id = document.createElement("span");
+    id.className = "mono";
+    id.textContent = fact.id;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "ghost small memory-fact-actions";
+    remove.textContent = "Удалить";
+    remove.addEventListener("click", () =>
+      guard(async () => {
+        const ok = await askConfirm({
+          title: "Удалить факт?",
+          message: fact.text,
+          confirmLabel: "Удалить",
+          danger: true,
+        });
+        if (!ok) return;
+        await invoke("memory_forget", { app_id: ctx.appId, id: fact.id });
+        toast("Факт удалён");
+        await refreshAppMemory();
+      }),
+    );
+    head.append(date, id, remove);
+    const text = document.createElement("div");
+    text.className = "memory-fact-text";
+    text.textContent = fact.text;
+    card.append(head, text);
+    if (fact.keywords && fact.keywords.length) {
+      const keywords = document.createElement("div");
+      keywords.className = "memory-fact-keywords";
+      keywords.textContent = fact.keywords.join(" · ");
+      card.append(keywords);
+    }
+    list.append(card);
+  }
 }
 
 function renderAppMcp() {
@@ -5193,6 +5336,59 @@ function bind() {
   });
 
   $("app-settings-refresh").addEventListener("click", () => guard(refreshAppSettings));
+  $("app-memory-toggle").addEventListener("click", () =>
+    guard(async () => {
+      if (!ctx.memory || !ctx.appId) return;
+      const enabled = !ctx.memory.enabled;
+      const result = await invoke("memory_set_enabled", {
+        app_id: ctx.appId,
+        enabled,
+      });
+      if (result.applied) {
+        if (result.restarted) {
+          // The engine was stopped to rebuild its tool list; the next turn
+          // starts a fresh one.
+          ctx.chat = null;
+        }
+        toast(
+          enabled
+            ? result.restarted
+              ? "Память включена, движок перезапущен"
+              : "Память включена"
+            : "Память выключена",
+        );
+      } else {
+        ctx.memory.pendingRestart = true;
+        toast("Память сохранена; применится после текущего хода");
+      }
+      await refreshAppMemory();
+    }),
+  );
+  $("app-memory-search").addEventListener("input", () => {
+    if (!ctx.memory) return;
+    ctx.memory.query = $("app-memory-search").value.trim();
+    clearTimeout(ctx.memorySearchTimer);
+    ctx.memorySearchTimer = setTimeout(
+      () => guard(() => loadAppMemory(true)),
+      250,
+    );
+  });
+  $("app-memory-more").addEventListener("click", () => guard(() => loadAppMemory(false)));
+  $("app-memory-clear").addEventListener("click", () =>
+    guard(async () => {
+      if (!ctx.memory || !ctx.appId) return;
+      const ok = await askConfirm({
+        title: "Очистить память?",
+        message: `Удалить ${ctx.memory.count || 0} фактов для этой рабочей папки? Действие необратимо.`,
+        confirmLabel: "Очистить",
+        danger: true,
+      });
+      if (!ok) return;
+      const removed = await invoke("memory_clear", { app_id: ctx.appId });
+      toast(`Удалено фактов: ${removed}`);
+      await refreshAppMemory();
+    }),
+  );
   $("app-perm-save").addEventListener("click", () => guard(() => saveAppPermissions(false)));
   $("app-perm-inherit").addEventListener("click", () => guard(() => saveAppPermissions(true)));
   document.addEventListener("click", (e) => {
@@ -5359,7 +5555,6 @@ async function init() {
     await refreshLlmKeyStatuses();
     await refreshApps();
     await refreshArtifacts();
-    await refreshPackTool(true);
     await refreshSecrets();
     await refreshMcpServers();
   });

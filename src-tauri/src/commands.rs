@@ -1174,6 +1174,111 @@ pub fn cleanup_artifacts(
     artifacts::sweep(&root, &policy)
 }
 
+#[tauri::command(rename_all = "snake_case")]
+pub fn memory_status(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+) -> Result<serde_json::Value> {
+    manifest::parse_id(&app_id, "app")?;
+    let workspace = config::workspace(&state.home, &app_id);
+    let stats = crate::memory::stats(&state.home, &app_id, &workspace)?;
+    Ok(serde_json::json!({
+        "enabled": config::memory_enabled(&state.home, &app_id),
+        "workspace": workspace.display().to_string(),
+        "count": stats.count,
+        "bytes": stats.bytes,
+        "latest_ts": stats.latest_ts,
+        "limit": crate::memory::MAX_FACTS
+    }))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn memory_set_enabled(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    enabled: bool,
+) -> Result<serde_json::Value> {
+    manifest::parse_id(&app_id, "app")?;
+    config::set_memory_enabled(&state.home, &app_id, enabled)?;
+    let busy = state
+        .busy
+        .lock()
+        .map(|set| set.contains(&app_id))
+        .unwrap_or(false);
+    let mut applied = true;
+    let mut restarted = false;
+    if busy {
+        // The running engine keeps its old tool list; restart it when the turn
+        // finishes instead of killing an active turn.
+        applied = false;
+        if let Ok(mut pending) = state.pending_restart.lock() {
+            pending.insert(app_id.clone());
+        }
+    } else {
+        if let Ok(mut pending) = state.pending_restart.lock() {
+            pending.remove(&app_id);
+        }
+        if let Ok(mut engines) = state.engines.lock() {
+            restarted = engines.remove(&app_id).is_some();
+        }
+    }
+    Ok(serde_json::json!({
+        "enabled": enabled,
+        "applied": applied,
+        "restarted": restarted
+    }))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn memory_list(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    query: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<serde_json::Value> {
+    manifest::parse_id(&app_id, "app")?;
+    let workspace = config::workspace(&state.home, &app_id);
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(50).clamp(1, 200);
+    let (facts, total) = crate::memory::list(
+        &state.home,
+        &app_id,
+        &workspace,
+        query.as_deref().unwrap_or(""),
+        offset,
+        limit,
+    )?;
+    Ok(serde_json::json!({
+        "facts": facts,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset.saturating_add(facts.len()) < total
+    }))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn memory_forget(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+    id: String,
+) -> Result<bool> {
+    manifest::parse_id(&app_id, "app")?;
+    let workspace = config::workspace(&state.home, &app_id);
+    crate::memory::forget(&state.home, &app_id, &workspace, &id)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn memory_clear(
+    state: tauri::State<'_, AppState>,
+    app_id: String,
+) -> Result<usize> {
+    manifest::parse_id(&app_id, "app")?;
+    let workspace = config::workspace(&state.home, &app_id);
+    crate::memory::clear(&state.home, &app_id, &workspace)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1979,7 +2084,31 @@ pub fn chat_send(
         // Every attachment is also copied into the workspace inbox, so package
         // tools (presentations, docs) can use the same file the model sees.
         let workspace = config::workspace(&home, &app_id);
-        let prompt_text = match crate::engine::stage_attachments(&workspace, &attachments) {
+        let mut prompt_text = text.clone();
+        if config::memory_enabled(&home, &app_id) {
+            let mut facts = crate::memory::search(
+                &home,
+                &app_id,
+                &workspace,
+                &text,
+                5,
+            )
+            .unwrap_or_default();
+            if facts.is_empty() && crate::memory::wants_recall(&text) {
+                // Vague identity questions ("ты кто", "кто я", typos) should
+                // still see recent facts even without a keyword match.
+                facts = crate::memory::list(&home, &app_id, &workspace, "", 0, 3)
+                    .map(|(facts, _)| facts)
+                    .unwrap_or_default();
+            }
+            if let Some(block) = crate::memory::context_block(&facts) {
+                if !prompt_text.trim().is_empty() {
+                    prompt_text.push_str("\n\n");
+                }
+                prompt_text.push_str(&block);
+            }
+        }
+        match crate::engine::stage_attachments(&workspace, &attachments) {
             Ok(staged) => {
                 let hint = crate::engine::inbox_hint(&staged);
                 if !staged.is_empty() {
@@ -1997,10 +2126,11 @@ pub fn chat_send(
                         }),
                     );
                 }
-                match hint {
-                    Some(hint) if text.trim().is_empty() => hint,
-                    Some(hint) => format!("{text}\n\n{hint}"),
-                    None => text.clone(),
+                if let Some(hint) = hint {
+                    if !prompt_text.trim().is_empty() {
+                        prompt_text.push_str("\n\n");
+                    }
+                    prompt_text.push_str(&hint);
                 }
             }
             Err(e) => {
@@ -2020,9 +2150,8 @@ pub fn chat_send(
                         "problem": e.to_string(),
                     }),
                 );
-                text.clone()
             }
-        };
+        }
         let retry_app = app.clone();
         let retry_app_id = app_id.clone();
         let retry_session = session.session_id.clone();
@@ -2085,6 +2214,19 @@ pub fn chat_send(
         clear_pending_for_session(&app, &app_id, &session.session_id);
         if let Ok(mut busy) = app.state::<AppState>().busy.lock() {
             busy.remove(&busy_key);
+        }
+        // A memory toggle during an active turn is applied here, when the
+        // engine is idle again.
+        let restart = app
+            .state::<AppState>()
+            .pending_restart
+            .lock()
+            .map(|mut pending| pending.remove(&app_id))
+            .unwrap_or(false);
+        if restart {
+            if let Ok(mut engines) = app.state::<AppState>().engines.lock() {
+                engines.remove(&app_id);
+            }
         }
         let _ = app.emit(
             "chat://busy",

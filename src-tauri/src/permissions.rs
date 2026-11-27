@@ -170,7 +170,10 @@ impl PermissionContext {
             workspace,
             mode: cfg.environment.as_str().to_string(),
             policy: policy_for(cfg, &app.app_id),
-            tools: tool_map(app),
+            tools: tool_map_with_memory(
+                app,
+                cfg.memory_apps.iter().any(|id| id == &app.app_id),
+            ),
         }
     }
 
@@ -228,6 +231,10 @@ fn insert_tool(map: &mut BTreeMap<String, ToolInfo>, info: ToolInfo) {
 /// Permission actions exposed by the platform MCP proxy. Mirrors
 /// `proxy::gateway_tool_names`, with the effect class attached.
 pub fn tool_map(app: &Manifest) -> BTreeMap<String, ToolInfo> {
+    tool_map_with_memory(app, false)
+}
+
+pub fn tool_map_with_memory(app: &Manifest, memory_enabled: bool) -> BTreeMap<String, ToolInfo> {
     let mut map = BTreeMap::new();
 
     for (name, stream) in [
@@ -246,6 +253,27 @@ pub fn tool_map(app: &Manifest) -> BTreeMap<String, ToolInfo> {
                 bin_sha256: None,
             },
         );
+    }
+
+    if memory_enabled {
+        for (name, stream) in [
+            ("memory_save", "write"),
+            ("memory_search", "read"),
+            ("memory_recent", "read"),
+            ("memory_forget", "write"),
+        ] {
+            insert_tool(
+                &mut map,
+                ToolInfo {
+                    action: format!("platform_{name}"),
+                    tool: name.to_string(),
+                    stream: stream.to_string(),
+                    package_exec: false,
+                    bin: None,
+                    bin_sha256: None,
+                },
+            );
+        }
     }
 
     if app

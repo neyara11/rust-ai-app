@@ -184,6 +184,10 @@ pub struct UserConfig {
     pub compaction_threshold_percent: u8,
     #[serde(default)]
     pub enabled_apps: Vec<String>,
+    /// Apps with the platform memory tools enabled. Off by default: memory is
+    /// facts the agent keeps between dialogs, scoped to app + workspace.
+    #[serde(default)]
+    pub memory_apps: Vec<String>,
     /// User-chosen working folder per app. The agent's file tools are confined
     /// to this directory.
     #[serde(default)]
@@ -376,6 +380,7 @@ impl Default for UserConfig {
             llm_models: BTreeMap::new(),
             enabled_apps: Vec::new(),
             workspaces: BTreeMap::new(),
+            memory_apps: Vec::new(),
             session_quota_mb: default_session_mb(),
             global_quota_mb: default_global_mb(),
             ttl_hours: default_ttl_hours(),
@@ -405,6 +410,25 @@ pub fn set_workspace(home: &Path, app_id: &str, path: &Path) -> Result<()> {
     save(home, &cfg)
 }
 
+pub fn memory_enabled(home: &Path, app_id: &str) -> bool {
+    load(home)
+        .memory_apps
+        .iter()
+        .any(|enabled| enabled == app_id)
+}
+
+pub fn set_memory_enabled(home: &Path, app_id: &str, enabled: bool) -> Result<()> {
+    let mut cfg = load(home);
+    if enabled {
+        if !cfg.memory_apps.iter().any(|id| id == app_id) {
+            cfg.memory_apps.push(app_id.to_string());
+        }
+    } else {
+        cfg.memory_apps.retain(|id| id != app_id);
+    }
+    save(home, &cfg)
+}
+
 /// Applies a settings snapshot from the UI. Fields that are owned by their own
 /// commands are kept from disk: the settings form sends whatever it loaded at
 /// start-up, so trusting it would roll back a workspace chosen or an approval
@@ -412,6 +436,7 @@ pub fn set_workspace(home: &Path, app_id: &str, path: &Path) -> Result<()> {
 pub fn merge_settings(existing: UserConfig, mut incoming: UserConfig) -> UserConfig {
     incoming.workspaces = existing.workspaces;
     incoming.enabled_apps = existing.enabled_apps;
+    incoming.memory_apps = existing.memory_apps;
     incoming.permissions.grants = existing.permissions.grants;
     incoming
 }

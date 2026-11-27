@@ -9,6 +9,18 @@ use std::process::Command;
 const MAX_TEXT_BYTES: u64 = 256 * 1024;
 const MAX_FILES: usize = 300;
 
+/// `eco-pack` is a console binary; spawning it from the GUI must not flash a
+/// console window. Other sidecars already use the same flag.
+fn pack_command(path: &Path) -> Command {
+    let mut command = Command::new(path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
+}
+
 #[derive(Debug, Serialize)]
 pub struct PackToolInfo {
     pub available: bool,
@@ -101,7 +113,7 @@ fn run(home: &Path, args: &[String]) -> Result<PackRun> {
                 .to_string(),
         )
     })?;
-    let output = Command::new(&bin)
+    let output = pack_command(&bin)
         .args(args)
         .output()
         .map_err(|e| Error::Msg(format!("cannot run eco-pack: {e}")))?;
@@ -626,7 +638,7 @@ fn default_dev_key(home: &Path) -> Option<PathBuf> {
 fn tool_info(home: &Path) -> PackToolInfo {
     let bin = pack_bin(home);
     let version = bin.as_ref().and_then(|path| {
-        Command::new(path)
+        pack_command(path)
             .arg("--version")
             .output()
             .ok()

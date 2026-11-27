@@ -45,6 +45,13 @@ const FILE_TOOLS: &[&str] = &["list_files", "read_file", "write_file", "append_f
 /// agent can read a truncated tool result instead of asking the user to grep
 /// the Artifacts panel by hand.
 const ARTIFACT_TOOLS: &[&str] = &["artifact_list", "artifact_search", "artifact_read"];
+/// Platform-owned fact memory, enabled per app. Scope is bound by the gateway.
+const MEMORY_TOOLS: &[&str] = &[
+    "memory_save",
+    "memory_search",
+    "memory_recent",
+    "memory_forget",
+];
 
 const INSTRUCTIONS: &str = "Р’СЃРµ РёРЅСЃС‚СЂСѓРјРµРЅС‚С‹ РїСЂРѕС…РѕРґСЏС‚ С‡РµСЂРµР· С€Р»СЋР· РїР»Р°С‚С„РѕСЂРјС‹: РІРЅРµ allow-list \
 РїСЂРёР»РѕР¶РµРЅРёСЏ РІС‹Р·РѕРІ РЅРµРІРѕР·РјРѕР¶РµРЅ. Р¤Р°Р№Р»РѕРІС‹Рµ РёРЅСЃС‚СЂСѓРјРµРЅС‚С‹ СЂР°Р±РѕС‚Р°СЋС‚ С‚РѕР»СЊРєРѕ РІ СЂР°Р±РѕС‡РµР№ РїР°РїРєРµ \
@@ -588,7 +595,11 @@ pub fn has_skills(package_dir: &Path) -> bool {
 
 /// Names (without the `platform_` prefix) that the gateway exposes for an app.
 /// Shared by the engine config (permission entries) and the proxy.
-pub fn gateway_tool_names(app: &Manifest, package_dir: &Path) -> Vec<String> {
+pub fn gateway_tool_names(
+    app: &Manifest,
+    package_dir: &Path,
+    memory_enabled: bool,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
     if has_skills(package_dir) {
@@ -625,6 +636,12 @@ pub fn gateway_tool_names(app: &Manifest, package_dir: &Path) -> Vec<String> {
         out.push((*name).to_string());
     }
 
+    if memory_enabled {
+        for name in MEMORY_TOOLS {
+            out.push((*name).to_string());
+        }
+    }
+
     for tool in &app.tools {
         if tool.bin.is_some() {
             out.push(normalize_tool_name(&tool.tool));
@@ -640,6 +657,7 @@ pub fn gateway_tool_names(app: &Manifest, package_dir: &Path) -> Vec<String> {
 enum Route {
     Files,
     Artifacts,
+    Memory,
     /// Platform-owned skill loader: reads `skills/<name>/SKILL.md` from the
     /// signed package. Exposed only when the package ships skills.
     Skill,
@@ -836,6 +854,15 @@ impl Proxy {
                 self.routes.insert((*name).to_string(), Route::Files);
             }
             tools.extend(file_specs());
+        }
+
+        // Fact memory is per app and per workspace; the scope is never a
+        // tool argument.
+        if crate::config::memory_enabled(&self.home, &self.app.app_id) {
+            for name in MEMORY_TOOLS {
+                self.routes.insert((*name).to_string(), Route::Memory);
+            }
+            tools.extend(memory_specs());
         }
 
         // Artifact dumps are always available: they hold this app's own tool
@@ -1374,7 +1401,46 @@ impl Proxy {
     /// Returns the MCP `tools/call` result object and the audit metadata.
     fn call(&mut self, name: &str, arguments: Value) -> Result<(Value, usize, bool)> {
         // Long-lived gateway: a token revoked or expired after start must not
-        // keep working. Re-check the raw token on every tool call.
+        // keep working. Expiry is renewable (the engine got one token at start);
+        // revocation is not.
+        match crate::identity::renew_if_expired(&self.home, &self.identity.raw) {
+            Ok(Some(issued)) => {
+                let previous = std::mem::replace(&mut self.identity.token_id, issued.token_id);
+                self.identity.raw = issued.token;
+                crate::commands::audit(
+                    &self.home,
+                    &self.app.app_id,
+                    json!({
+                        "ts": crate::artifacts::now_secs(),
+                        "app_id": self.app.app_id,
+                        "app_version": self.app.version,
+                        "source": "platform",
+                        "action": "token_renew",
+                        "previous_token_id": previous,
+                        "token_id": self.identity.token_id,
+                        "expires_at": issued.expires_at
+                    }),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                crate::commands::audit(
+                    &self.home,
+                    &self.app.app_id,
+                    json!({
+                        "ts": crate::artifacts::now_secs(),
+                        "app_id": self.app.app_id,
+                        "app_version": self.app.version,
+                        "source": "agent",
+                        "action": "tool_denied",
+                        "token_id": self.identity.token_id,
+                        "reason": e.to_string()
+                    }),
+                );
+                return Err(e);
+            }
+        }
+        // Re-check the (possibly renewed) raw token on every tool call.
         if let Err(e) = crate::identity::validate(&self.home, &self.identity.raw) {
             crate::commands::audit(
                 &self.home,
@@ -1458,7 +1524,7 @@ impl Proxy {
         }
         let started = Instant::now();
         let result_limit = match &route {
-            Route::Files | Route::Skill | Route::Artifacts => {
+            Route::Files | Route::Skill | Route::Artifacts | Route::Memory => {
                 MAX_READ_BYTES + RESULT_ENVELOPE_MARGIN
             }
             _ => mcp::MAX_RESPONSE_BYTES,
@@ -1466,6 +1532,9 @@ impl Proxy {
         let raw = match &route {
             Route::Files => file_call(&self.workspace, name, &arguments),
             Route::Artifacts => self.artifact_call(name, &arguments),
+            Route::Memory => {
+                crate::memory::call(&self.home, &self.app.app_id, &self.workspace, name, &arguments)
+            }
             Route::Skill => skill_call(&self.package_dir, &arguments),
             Route::Remote { server, tool } => {
                 self.remote_call(server, tool, arguments.clone(), &request_id)
@@ -1575,6 +1644,7 @@ impl Proxy {
         }
         let (source, tool) = match route {
             Route::Files => ("files".to_string(), name.to_string()),
+            Route::Memory => ("memory".to_string(), name.to_string()),
             Route::Skill => ("skills".to_string(), name.to_string()),
             Route::Artifacts => ("artifacts".to_string(), name.to_string()),
             Route::Package { tool, .. } => ("package".to_string(), tool.clone()),
@@ -1615,6 +1685,7 @@ impl Proxy {
     ) {
         let (server, tool) = match route {
             Route::Files => ("files".to_string(), name.to_string()),
+            Route::Memory => ("memory".to_string(), name.to_string()),
             Route::Skill => ("skills".to_string(), name.to_string()),
             Route::Artifacts => ("artifacts".to_string(), name.to_string()),
             Route::Package { tool, .. } => ("package".to_string(), tool.clone()),
@@ -1858,6 +1929,62 @@ fn text_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| Error::Msg(format!("missing string argument {key}")))
+}
+
+fn memory_specs() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "memory_save",
+            "description": "Сохранить один durable-факт (предпочтение, цель, решение, договорённость, параметр проекта) для этого приложения и рабочей папки. Не сохраняй временные детали и саммари. Если факт исправлен, сначала удали старый через memory_forget.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "Формулировка факта" },
+                    "keywords": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "2–5 ключевых слов для поиска"
+                    }
+                },
+                "required": ["text"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "memory_search",
+            "description": "Найти сохранённые факты по теме. Вызывай в начале разговора, когда тема понятна, и перед ответом, если факты могут повлиять на решение.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "memory_recent",
+            "description": "Последние сохранённые факты.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "memory_forget",
+            "description": "Удалить факт по id (id можно найти через memory_search/memory_recent). Вызывай по просьбе пользователя или при замене устаревшего факта.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"],
+                "additionalProperties": false
+            }
+        }),
+    ]
 }
 
 fn file_specs() -> Vec<Value> {
@@ -2541,7 +2668,7 @@ mod tests {
 
         let empty = std::env::temp_dir().join(format!("eco-proxy-empty-{}", std::process::id()));
         let _ = fs::remove_dir_all(&empty);
-        let names = gateway_tool_names(&test_manifest(), &empty);
+        let names = gateway_tool_names(&test_manifest(), &empty, false);
         assert!(names.contains(&"ctx_search".to_string()));
         assert!(!names.contains(&"ctx_dump".to_string()));
         assert!(names.contains(&"read_file".to_string()));
@@ -2551,10 +2678,23 @@ mod tests {
 
         let mut app = test_manifest();
         app.capabilities.file_scopes.clear();
-        let names = gateway_tool_names(&app, &empty);
+        let names = gateway_tool_names(&app, &empty, false);
         assert!(!names.contains(&"read_file".to_string()));
         // Dumps are the app's own output, so they stay available without files.
         assert!(names.contains(&"artifact_read".to_string()));
+        let _ = fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn memory_tools_are_optional_platform_tools() {
+        let empty = std::env::temp_dir().join(format!("eco-proxy-mem-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&empty);
+        let disabled = gateway_tool_names(&test_manifest(), &empty, false);
+        assert!(!disabled.contains(&"memory_save".to_string()));
+        let enabled = gateway_tool_names(&test_manifest(), &empty, true);
+        for name in ["memory_save", "memory_search", "memory_recent", "memory_forget"] {
+            assert!(enabled.contains(&name.to_string()), "{name} missing");
+        }
         let _ = fs::remove_dir_all(&empty);
     }
 
@@ -2571,7 +2711,7 @@ mod tests {
         .unwrap();
         fs::write(dir.join("skills/beta/SKILL.md"), "# Beta\nBeta body\n").unwrap();
 
-        let names = gateway_tool_names(&test_manifest(), &dir);
+        let names = gateway_tool_names(&test_manifest(), &dir, false);
         assert!(names.contains(&"skill".to_string()));
 
         let listed = skill_call(&dir, &json!({ "action": "list" })).unwrap();
@@ -2595,7 +2735,7 @@ mod tests {
             "bin": "bin/docx-export.exe"
         }))
         .unwrap());
-        let names = gateway_tool_names(&app, &std::env::temp_dir());
+        let names = gateway_tool_names(&app, &std::env::temp_dir(), false);
         assert!(names.contains(&"docx_export".to_string()));
     }
 

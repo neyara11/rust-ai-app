@@ -1464,10 +1464,11 @@ fn build_config(
         .map(|selection| (selection.provider_id, selection.model_id))
         .unwrap_or_else(|| ("opencode".to_string(), "glm-5.3-flash-free".to_string()));
 
-    let names = proxy::gateway_tool_names(app, package_dir);
+    let memory_enabled = cfg.memory_apps.iter().any(|id| id == &app.app_id);
+    let names = proxy::gateway_tool_names(app, package_dir, memory_enabled);
     let policy = policy_override
         .unwrap_or_else(|| crate::permissions::policy_for(cfg, &app.app_id));
-    let tool_map = crate::permissions::tool_map(app);
+    let tool_map = crate::permissions::tool_map_with_memory(app, memory_enabled);
     let mut permissions = serde_json::Map::new();
     permissions.insert("*".to_string(), json!("deny"));
     for name in &names {
@@ -1606,6 +1607,7 @@ fn read_system_prompt(package_dir: &Path, app: &manifest::Manifest) -> Result<St
 pub fn compose_system_prompt(
     package_dir: &Path,
     app: &manifest::Manifest,
+    memory_enabled: bool,
 ) -> Result<String> {
     let mut system = read_system_prompt(package_dir, app)?;
     let skills = skill_texts(package_dir);
@@ -1650,14 +1652,18 @@ pub fn compose_system_prompt(
             "\n\n---\n\n## Ограничения среды\n\nУ пакета нет собственных инструментов: доступны только платформенные (артефакты и скилы). Если задача требует файлов или команд, объясни ограничение и попроси включить нужные возможности в манифесте (file_scopes, tools, http-mcp).\n",
         );
     }
-    system.push_str(&platform_tools_prompt(app, package_dir));
+    system.push_str(&platform_tools_prompt(app, package_dir, memory_enabled));
     Ok(system)
 }
 
 /// Platform-owned part of the system prompt: the tool list and usage rules are
 /// generated from the manifest, so packages do not have to describe platform
 /// tools by hand (and cannot drift from what the proxy actually exposes).
-fn platform_tools_prompt(app: &manifest::Manifest, package_dir: &Path) -> String {
+fn platform_tools_prompt(
+    app: &manifest::Manifest,
+    package_dir: &Path,
+    memory_enabled: bool,
+) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push("\n\n---\n\n## Инструменты платформы\n".to_string());
     lines.push(
@@ -1677,6 +1683,27 @@ fn platform_tools_prompt(app: &manifest::Manifest, package_dir: &Path) -> String
              постранично: `sheet`, `offset`, `limit`, дочитывай пока `eof` не станет true), \
              `platform_write_file`, `platform_append_file` — рабочая папка приложения; \
              пути только относительные, выход за папку запрещён."
+                .to_string(),
+        );
+    }
+    if memory_enabled {
+        lines.push(
+            "- `platform_memory_save`, `platform_memory_search`, `platform_memory_recent`, \
+             `platform_memory_forget` — долговременная память фактов для этого приложения и \
+             рабочей папки. Скоуп задаёт платформа: не пытайся указать пользователя, папку \
+             или ключ. Платформа может сама добавить в сообщение блок \
+             `[platform-memory: ...]` — учитывай его. В начале разговора, когда тема понятна, \
+             вызови `platform_memory_search` \
+             по теме (или `platform_memory_recent`) и учитывай найденное. Перед ответом на \
+             вопрос о пользователе (имя, роль, предпочтения), прошлых решениях или \
+             договорённостях обязательно проверь память: `platform_memory_search`, а если он \
+             пуст — `platform_memory_recent`. Не говори, что не знаешь, пока не проверил. \
+             Сохраняй только \
+             устойчивые факты: предпочтения, цели, решения, договорённости, важные параметры \
+             проекта — по одному факту на вызов; мелочи текущей задачи и саммари не сохраняй. \
+             Если пользователь исправил или отозвал факт, найди старый id через \
+             `platform_memory_search`, удали его `platform_memory_forget` и сохрани новое. \
+             Если просит забыть — удаляй без лишних уточнений; инструменту нужен id."
                 .to_string(),
         );
     }
@@ -2217,7 +2244,11 @@ impl Engine {
             None => create_session(&agent, &base, &auth, &app.name)?,
         };
 
-        let system = compose_system_prompt(&package_dir, &app)?;
+        let system = compose_system_prompt(
+            &package_dir,
+            &app,
+            cfg.memory_apps.iter().any(|id| id == &app.app_id),
+        )?;
 
         artifact_guard.armed = false;
         let child = child_guard
@@ -3199,14 +3230,17 @@ fn inlined_attachment_name(text: &str) -> Option<&str> {
     }
 }
 
-/// The inbox hint is for the model only: the UI must not show an internal
-/// `[inbox: ...]` line in the user's message.
+/// The inbox hint and injected memory are for the model only: the UI must not
+/// show platform bookkeeping in the user's message.
 fn strip_inbox_hint(text: &str) -> &str {
-    const MARKER: &str = "[inbox: ";
-    match text.find(MARKER) {
-        Some(idx) if idx == 0 || text[..idx].ends_with("\n\n") => text[..idx].trim_end(),
-        _ => text,
+    for marker in ["[inbox: ", "[platform-memory: "] {
+        if let Some(idx) = text.find(marker) {
+            if idx == 0 || text[..idx].ends_with("\n\n") {
+                return text[..idx].trim_end();
+            }
+        }
     }
+    text
 }
 
 /// `data:image/png;base64,AAAA` -> `AAAA`. Non-base64 or non-data URLs yield
@@ -3910,7 +3944,7 @@ mod tests {
             timeout_secs: None,
             stream: "write".to_string(),
         });
-        let prompt = platform_tools_prompt(&app, &dir);
+        let prompt = platform_tools_prompt(&app, &dir, false);
         assert!(prompt.contains("platform_read_file"));
         assert!(prompt.contains("platform_artifact_read"));
         assert!(prompt.contains("truncated"));
@@ -3918,10 +3952,15 @@ mod tests {
         assert!(prompt.contains("--input/--output"));
 
         app.capabilities.file_scopes.clear();
-        let prompt = platform_tools_prompt(&app, &dir);
+        let prompt = platform_tools_prompt(&app, &dir, false);
         assert!(!prompt.contains("platform_read_file"));
         // Dumps stay available without a workspace scope.
         assert!(prompt.contains("platform_artifact_search"));
+
+        let prompt = platform_tools_prompt(&app, &dir, true);
+        assert!(prompt.contains("platform_memory_save"));
+        assert!(prompt.contains("по одному факту"));
+        assert!(prompt.contains("platform_memory_forget"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4005,6 +4044,20 @@ mod tests {
             filename: name.to_string(),
             data: base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04stub-docx"),
         }
+    }
+
+    #[test]
+    fn platform_memory_block_is_hidden_from_history() {
+        let raw = json!([{
+            "info": { "role": "user" },
+            "parts": [{
+                "type": "text",
+                "text": "ты кто?\n\n[platform-memory: факты для этого приложения и рабочей папки.\n- Пользователя зовут Денис.\n- Ассистента зовут Джарвис.]"
+            }]
+        }]);
+        let items = parse_history(&raw);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "ты кто?");
     }
 
     #[test]

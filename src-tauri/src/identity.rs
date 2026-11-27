@@ -316,6 +316,41 @@ pub fn validate(home: &Path, raw: &str) -> Result<TokenRecord> {
     Ok(record)
 }
 
+/// Renews an expired but otherwise valid token. Expiry alone must not brick a
+/// long-running engine (the token is issued once at engine start); a revoked
+/// token or app still fails closed. Returns `None` while the token is valid.
+pub fn renew_if_expired(home: &Path, raw: &str) -> Result<Option<IssuedToken>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return msg("agent token is empty");
+    }
+    let hash = hash_token(raw);
+    let now = now_secs();
+    let store = load(home)?;
+    let record = store
+        .tokens
+        .iter()
+        .find(|record| record.token_sha256 == hash)
+        .ok_or_else(|| Error::Msg("agent token is not recognized".to_string()))?;
+    if store.revoked_apps.contains_key(&record.app_id) {
+        return msg(format!("app {} is revoked", record.app_id));
+    }
+    if record.revoked_at.is_some() {
+        return msg(format!("agent token {} is revoked", record.token_id));
+    }
+    if record.expires_at > now {
+        return Ok(None);
+    }
+    issue(
+        home,
+        &record.app_id,
+        &record.app_version,
+        DEFAULT_TTL_SECS,
+        "renewal",
+    )
+    .map(Some)
+}
+
 /// Revokes one specific token. Returns the records that changed; an unknown or
 /// already revoked token yields an empty list.
 pub fn revoke_token(home: &Path, token_id: &str) -> Result<Vec<TokenRecord>> {
@@ -637,6 +672,31 @@ mod tests {
         for token in tokens {
             validate(&home, &token).unwrap();
         }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn expired_but_unrevoked_token_is_renewed() {
+        let home = temp("renew");
+        let issued = issue(&home, "demo", "0.1.0", 120, "test").unwrap();
+        let mut store = load(&home).unwrap();
+        for record in &mut store.tokens {
+            if record.token_id == issued.token_id {
+                record.expires_at = now_secs().saturating_sub(1);
+            }
+        }
+        save(&home, &store).unwrap();
+        assert!(validate(&home, &issued.token).is_err());
+
+        let renewed = renew_if_expired(&home, &issued.token)
+            .unwrap()
+            .expect("expired token must be renewed");
+        assert_ne!(renewed.token, issued.token);
+        validate(&home, &renewed.token).unwrap();
+
+        // Revocation is not bypassed by renewal.
+        revoke_token(&home, &renewed.token_id).unwrap();
+        assert!(renew_if_expired(&home, &renewed.token).is_err());
         let _ = fs::remove_dir_all(home);
     }
 

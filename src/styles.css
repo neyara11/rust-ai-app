@@ -3343,6 +3343,45 @@ button:focus-visible,
   gap: 10px;
 }
 
+.memory-status {
+  margin: 10px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.memory-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 4px;
+}
+
+.memory-toolbar input {
+  flex: 1;
+}
+
+.memory-fact .memory-fact-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.memory-fact .memory-fact-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.memory-fact .memory-fact-actions {
+  margin-left: auto;
+}
+
+.memory-fact .memory-fact-keywords {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .app-setting-head {
   display: flex;
   align-items: center;

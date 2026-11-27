@@ -316,6 +316,32 @@
             </div>
 
             <div class="app-settings-grid">
+              <div class="panel" id="app-memory-panel" style="grid-column:1/-1">
+                <div class="panel-icon-head">
+                  <div class="panel-badge-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 5a3 3 0 0 0-3 3v1a3 3 0 0 0-3 3v2a3 3 0 0 0 3 3h1a2 2 0 0 0 4 0h1a3 3 0 0 0 3-3v-2a3 3 0 0 0-3-3V8a3 3 0 0 0-3-3Z" />
+                      <path d="M9 9v6M15 9v6" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h2>Память агента</h2>
+                    <p class="panel-desc">Факты между диалогами этого приложения и текущей рабочей папки. Сохраняются только durable-факты; саммари диалогов не пишутся. При выключении инструменты памяти скрыты от модели, факты остаются.</p>
+                  </div>
+                  <button class="ghost small" id="app-memory-toggle" type="button" style="margin-left:auto">Включить</button>
+                </div>
+                <div id="app-memory-status" class="muted small memory-status"></div>
+                <div class="memory-toolbar">
+                  <input id="app-memory-search" placeholder="Поиск по фактам" autocomplete="off" />
+                  <button class="ghost small" id="app-memory-clear" type="button">Очистить всё</button>
+                </div>
+                <div id="app-memory-list" class="app-settings-list"></div>
+                <div id="app-memory-empty" class="muted small" hidden></div>
+                <div class="row-actions" style="margin-top:8px">
+                  <button class="ghost small" id="app-memory-more" type="button" hidden>Показать ещё</button>
+                </div>
+              </div>
+
               <div class="panel">
                 <div class="panel-icon-head">
                   <div class="panel-badge-icon">

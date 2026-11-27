@@ -7,6 +7,7 @@ pub mod error;
 pub mod identity;
 pub mod manifest;
 pub mod mcp;
+pub mod memory;
 pub mod pack;
 pub mod permissions;
 pub mod proxy;
@@ -123,6 +124,11 @@ pub fn run() {
             commands::artifact_grep,
             commands::export_artifacts,
             commands::cleanup_artifacts,
+            commands::memory_status,
+            commands::memory_set_enabled,
+            commands::memory_list,
+            commands::memory_forget,
+            commands::memory_clear,
             pack::pack_tool_info,
             pack::pack_scan,
             pack::pack_import,
@@ -1171,7 +1177,11 @@ pub fn cli_system_prompt(app_id: Option<&String>) -> i32 {
     let result = (|| -> error::Result<()> {
         let app = registry::verified_manifest(&home, app_id)?;
         let dir = registry::apps_dir(&home).join(app_id);
-        let prompt = engine::compose_system_prompt(&dir, &app)?;
+        let prompt = engine::compose_system_prompt(
+            &dir,
+            &app,
+            config::memory_enabled(&home, app_id),
+        )?;
         println!("{prompt}");
         Ok(())
     })();
