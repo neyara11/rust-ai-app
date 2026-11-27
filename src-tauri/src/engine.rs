@@ -1673,7 +1673,8 @@ fn platform_tools_prompt(app: &manifest::Manifest, package_dir: &Path) -> String
         .any(|scope| scope == "workspace");
     if file_scope {
         lines.push(
-            "- `platform_list_files`, `platform_read_file` (текст и `.docx`), \
+            "- `platform_list_files`, `platform_read_file` (текст, `.docx`; `.xlsx` — \
+             постранично: `sheet`, `offset`, `limit`, дочитывай пока `eof` не станет true), \
              `platform_write_file`, `platform_append_file` — рабочая папка приложения; \
              пути только относительные, выход за папку запрещён."
                 .to_string(),

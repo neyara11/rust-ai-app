@@ -1146,18 +1146,36 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   эту строку, поэтому в чате её не видно. UI: чипы вложений; для документов —
   text-part `[attachment: name]`, тело не отправляется.
 - Vision и inline-текст сохранены как раньше; документы читаются инструментами:
-  `platform_read_file` теперь извлекает текст из `.docx` (zip + `word/document.xml`,
-  cap 256 КиБ, zip-bomb guard 8 МиБ). `.xlsx` читает `office-kit read` в
-  `office-writer`; PDF пока только сохраняется.
+  `platform_read_file` извлекает текст из `.docx` и отдаёт `.xlsx` постранично
+  (`sheet`, `offset`, `limit`; `next_offset`/`eof`). `.xls` не поддержан; PDF пока
+  только сохраняется.
 - Лимиты: image 4 МиБ, text 256 КиБ, документ 25 МиБ, 50 МиБ на ход; magic-check для
   image/PDF/ZIP; `application/octet-stream` определяется по расширению.
 - Fail-open: read-only workspace не ломает ход — вложения остаются inline/в кэше,
   ошибка пишется в `eprintln` и аудит (`attachment_inbox`, `ok:false`).
 - Аудит успеха: `attachment_inbox` с именем, относительным путём и размером.
 - UI: `accept` и лимиты расширены на PDF/docx/xlsx/pptx/odt/ods/odp.
-- Проверено: `cargo test` — 142 теста (включая `documents_are_accepted_without_vision_and_staged_in_inbox`,
-  `document_type_falls_back_to_extension_and_checks_magic`, `read_file_extracts_docx_text`),
+- Проверено: `cargo test` — 144 теста (включая `documents_are_accepted_without_vision_and_staged_in_inbox`,
+  `document_type_falls_back_to_extension_and_checks_magic`, `read_file_extracts_docx_text`,
+  `read_file_pages_xlsx_rows_and_sheets`, `read_file_pages_a_1500_row_sheet`),
   `node tools/ui-smoke/smoke.mjs` — ok.
+
+### P19. Постраничное чтение `.xlsx` на платформе — сделано (2026-11-27)
+
+- `platform_read_file` для `.xlsx` принимает `sheet`, `offset` (0-based строка данных,
+  заголовок не считается), `limit` (1…500, по умолчанию 200) и возвращает
+  `next_offset` / `eof` / `total_rows` / `total_cols`; заголовок повторяется на каждой
+  странице, строки идут TSV с номером строки Excel.
+- Парсинг в платформе (`proxy.rs`): `workbook.xml` + rels, `sharedStrings.xml`,
+  worksheet XML; формулы берутся как кэшированные значения, даты остаются серийными
+  числами (форматы ячеек не разворачиваются). Колонок не больше 100, ячейка до 4000
+  символов, лист до 100 000 строк, XML-энтри до 16 МиБ.
+- Вывод ограничен `MAX_READ_BYTES` (256 КиБ): если страница не влезла, `truncated` +
+  корректный `next_offset`, чтобы модель продолжила без пропусков.
+- Платформенный промпт обновлён: `.xlsx` читается постранично, дочитывать пока `eof`
+  не станет true. MCP-описание `read_file` тоже перечисляет `sheet/offset/limit`.
+- Проверено: `cargo test` — 144 теста, включая страницы/листы и лист на 1500 строк;
+  старый `.xls` даёт явную ошибку с советом сохранить в `.xlsx`/`.csv`.
 
 ### С чего начать
 

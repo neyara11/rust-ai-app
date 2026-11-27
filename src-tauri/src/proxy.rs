@@ -85,6 +85,19 @@ fn is_docx_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_xlsx_path(path: &Path) -> bool {
+    path.extension()
+        .map(|ext| ext.eq_ignore_ascii_case("xlsx"))
+        .unwrap_or(false)
+}
+
+const XLSX_PAGE_ROWS: usize = 200;
+const XLSX_MAX_PAGE_ROWS: usize = 500;
+const MAX_XLSX_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
+const XLSX_MAX_COLS: usize = 100;
+const XLSX_MAX_ROWS: usize = 100_000;
+const XLSX_CELL_CHARS: usize = 4000;
+
 fn truncate_utf8(mut value: String, cap: usize) -> (String, bool) {
     if value.len() <= cap {
         return (value, false);
@@ -157,6 +170,367 @@ fn docx_text(path: &Path) -> Result<(String, bool)> {
     }
     let (text, cut) = truncate_utf8(out, MAX_READ_BYTES);
     Ok((text, truncated || cut))
+}
+
+fn zip_text(
+    archive: &mut zip::ZipArchive<fs::File>,
+    name: &str,
+) -> Result<Option<String>> {
+    let entry = match archive.by_name(name) {
+        Ok(entry) => entry,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(e) => return Err(Error::Zip(e)),
+    };
+    if entry.size() > MAX_XLSX_ENTRY_BYTES {
+        return msg(format!("{name} is too large to read"));
+    }
+    let mut xml = Vec::new();
+    entry
+        .take(MAX_XLSX_ENTRY_BYTES + 1)
+        .read_to_end(&mut xml)?;
+    if xml.len() as u64 > MAX_XLSX_ENTRY_BYTES {
+        return msg(format!("{name} is too large to read"));
+    }
+    String::from_utf8(xml)
+        .map(Some)
+        .map_err(|_| Error::Msg(format!("{name} is not UTF-8")))
+}
+
+fn zip_target(target: &str) -> String {
+    let target = target.trim_start_matches('/');
+    if target.starts_with("xl/") {
+        target.to_string()
+    } else {
+        format!("xl/{target}")
+    }
+}
+
+#[derive(Debug, Clone)]
+struct XlsxSheet {
+    name: String,
+    path: String,
+}
+
+fn xlsx_sheets(archive: &mut zip::ZipArchive<fs::File>) -> Result<Vec<XlsxSheet>> {
+    let Some(workbook) = zip_text(archive, "xl/workbook.xml")? else {
+        return msg("not an .xlsx: missing xl/workbook.xml");
+    };
+    let rels = zip_text(archive, "xl/_rels/workbook.xml.rels")?
+        .map(|xml| {
+            let mut map = std::collections::HashMap::new();
+            let mut reader = quick_xml::Reader::from_str(&xml);
+            loop {
+                match reader.read_event() {
+                    Ok(Event::Start(event)) | Ok(Event::Empty(event))
+                        if event.name().as_ref() == "Relationship" =>
+                    {
+                        let mut id = None;
+                        let mut target = None;
+                        for attr in event.attributes().flatten() {
+                            let key = attr.key.as_ref();
+                            let value = attr.normalized_value(XmlVersion::Implicit1_0).unwrap_or_default().into_owned();
+                            match key {
+                                "Id" => id = Some(value),
+                                "Target" => target = Some(value),
+                                _ => {}
+                            }
+                        }
+                        if let (Some(id), Some(target)) = (id, target) {
+                            map.insert(id, target);
+                        }
+                    }
+                    Ok(Event::Eof) => break,
+                    Err(_) => break,
+                    _ => {}
+                }
+            }
+            map
+        })
+        .unwrap_or_default();
+
+    let mut sheets = Vec::new();
+    let mut reader = quick_xml::Reader::from_str(&workbook);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(event)) | Ok(Event::Empty(event))
+                if event.name().as_ref() == "sheet" =>
+            {
+                let mut name = None;
+                let mut rel_id = None;
+                for attr in event.attributes().flatten() {
+                    let key = attr.key.as_ref();
+                    let value = attr.normalized_value(XmlVersion::Implicit1_0).unwrap_or_default().into_owned();
+                    match key {
+                        "name" => name = Some(value),
+                        "r:id" | "id" => rel_id = Some(value),
+                        _ => {}
+                    }
+                }
+                if let Some(name) = name {
+                    let path = rel_id
+                        .and_then(|id| rels.get(&id).cloned())
+                        .map(|target| zip_target(&target))
+                        .unwrap_or_else(|| {
+                            format!("xl/worksheets/sheet{}.xml", sheets.len() + 1)
+                        });
+                    sheets.push(XlsxSheet { name, path });
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return msg(format!(".xlsx workbook XML is invalid: {e}")),
+            _ => {}
+        }
+    }
+    if sheets.is_empty() {
+        return msg(".xlsx has no sheets");
+    }
+    Ok(sheets)
+}
+
+fn xlsx_shared_strings(archive: &mut zip::ZipArchive<fs::File>) -> Result<Vec<String>> {
+    let Some(xml) = zip_text(archive, "xl/sharedStrings.xml")? else {
+        return Ok(Vec::new());
+    };
+    let mut strings = Vec::new();
+    let mut reader = quick_xml::Reader::from_str(&xml);
+    let mut current: Option<String> = None;
+    let mut in_text = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(event)) => match event.name().as_ref() {
+                "si" => current = Some(String::new()),
+                "t" => in_text = true,
+                _ => {}
+            },
+            Ok(Event::End(event)) => match event.name().as_ref() {
+                "si" => strings.push(current.take().unwrap_or_default()),
+                "t" => in_text = false,
+                _ => {}
+            },
+            Ok(Event::Text(text)) if in_text && current.is_some() => {
+                if let Some(current) = current.as_mut() {
+                    current.push_str(&text.xml_content(XmlVersion::Implicit1_0));
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return msg(format!(".xlsx shared strings are invalid: {e}")),
+            _ => {}
+        }
+    }
+    Ok(strings)
+}
+
+fn column_index(reference: &str) -> Option<usize> {
+    let mut value = 0usize;
+    let mut seen = false;
+    for ch in reference.chars() {
+        if ch.is_ascii_alphabetic() {
+            seen = true;
+            value = value * 26 + (ch.to_ascii_uppercase() as u8 - b'A' + 1) as usize;
+        } else {
+            break;
+        }
+    }
+    seen.then(|| value.saturating_sub(1))
+}
+
+/// Parses one worksheet into a dense grid of string cells. Formulas keep their
+/// cached values (Excel does not recalculate them here).
+fn xlsx_rows(
+    archive: &mut zip::ZipArchive<fs::File>,
+    sheet: &XlsxSheet,
+    shared: &[String],
+) -> Result<Vec<Vec<String>>> {
+    let xml = zip_text(archive, &sheet.path)?
+        .ok_or_else(|| Error::Msg(format!("missing worksheet {}", sheet.path)))?;
+    let mut rows: std::collections::BTreeMap<usize, std::collections::BTreeMap<usize, String>> =
+        std::collections::BTreeMap::new();
+    let mut reader = quick_xml::Reader::from_str(&xml);
+    let mut row_number = 0usize;
+    let mut row: std::collections::BTreeMap<usize, String> = std::collections::BTreeMap::new();
+    let mut in_row = false;
+    let mut cell_col = 0usize;
+    let mut cell_type = String::new();
+    let mut cell_value = String::new();
+    let mut in_value = false;
+    let mut in_text = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(event)) => match event.name().as_ref() {
+                "row" => {
+                    in_row = true;
+                    row_number = event
+                        .attributes()
+                        .flatten()
+                        .find(|attr| attr.key.as_ref() == "r")
+                        .and_then(|attr| {
+                            attr.normalized_value(XmlVersion::Implicit1_0)
+                                .ok()
+                                .and_then(|value| value.parse::<usize>().ok())
+                        })
+                        .map(|value| value.saturating_sub(1))
+                        .unwrap_or(row_number);
+                    row = std::collections::BTreeMap::new();
+                }
+                "c" => {
+                    cell_col = event
+                        .attributes()
+                        .flatten()
+                        .find(|attr| attr.key.as_ref() == "r")
+                        .and_then(|attr| attr.normalized_value(XmlVersion::Implicit1_0).ok())
+                        .and_then(|value| column_index(&value))
+                        .unwrap_or(cell_col);
+                    cell_type = event
+                        .attributes()
+                        .flatten()
+                        .find(|attr| attr.key.as_ref() == "t")
+                        .and_then(|attr| attr.normalized_value(XmlVersion::Implicit1_0).ok())
+                        .map(|value| value.into_owned())
+                        .unwrap_or_default();
+                    cell_value.clear();
+                }
+                "v" => in_value = true,
+                "t" => in_text = true,
+                _ => {}
+            },
+            Ok(Event::End(event)) => match event.name().as_ref() {
+                "row" => {
+                    if rows.len() >= XLSX_MAX_ROWS {
+                        return msg(".xlsx has too many rows to read");
+                    }
+                    rows.insert(row_number, std::mem::take(&mut row));
+                    row_number = row_number.saturating_add(1);
+                    in_row = false;
+                }
+                "c" => {
+                    let value = match cell_type.as_str() {
+                        "s" => cell_value
+                            .trim()
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|index| shared.get(index).cloned())
+                            .unwrap_or_default(),
+                        "b" => {
+                            if cell_value.trim() == "1" {
+                                "true".to_string()
+                            } else {
+                                "false".to_string()
+                            }
+                        }
+                        _ => cell_value.clone(),
+                    };
+                    let value: String = value
+                        .chars()
+                        .map(|ch| if ch == '\t' || ch == '\r' || ch == '\n' { ' ' } else { ch })
+                        .take(XLSX_CELL_CHARS)
+                        .collect();
+                    if in_row {
+                        row.insert(cell_col, value);
+                    }
+                    cell_col = cell_col.saturating_add(1);
+                }
+                "v" => in_value = false,
+                "t" => in_text = false,
+                _ => {}
+            },
+            Ok(Event::Text(text)) if in_value || in_text => {
+                cell_value.push_str(&text.xml_content(XmlVersion::Implicit1_0));
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return msg(format!(".xlsx sheet XML is invalid: {e}")),
+            _ => {}
+        }
+    }
+
+    let Some(max_row) = rows.keys().next_back().copied() else {
+        return Ok(Vec::new());
+    };
+    let mut max_col = 0usize;
+    for cells in rows.values() {
+        if let Some(col) = cells.keys().next_back() {
+            max_col = max_col.max(*col);
+        }
+    }
+    let max_col = max_col.min(XLSX_MAX_COLS.saturating_sub(1));
+    let mut grid = Vec::with_capacity(max_row + 1);
+    for index in 0..=max_row {
+        let cells = rows.remove(&index).unwrap_or_default();
+        let mut line = vec![String::new(); max_col + 1];
+        for (col, value) in cells {
+            if col <= max_col {
+                line[col] = value;
+            }
+        }
+        grid.push(line);
+    }
+    Ok(grid)
+}
+
+fn xlsx_page(
+    raw: &str,
+    sheet: &str,
+    sheets: &[XlsxSheet],
+    rows: &[Vec<String>],
+    args: &Value,
+) -> Value {
+    let offset = args
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(XLSX_PAGE_ROWS as u64)
+        .clamp(1, XLSX_MAX_PAGE_ROWS as u64) as usize;
+
+    let headers = rows.first().cloned().unwrap_or_default();
+    let data = if rows.len() > 1 { &rows[1..] } else { &[] };
+    let total_rows = data.len();
+    let total_cols = rows.iter().map(|row| row.len()).max().unwrap_or(0);
+    let offset = offset.min(total_rows);
+    let mut header_cells = headers;
+    header_cells.resize(total_cols, String::new());
+    let mut text = format!(
+        "#\t{}",
+        header_cells
+            .iter()
+            .map(|value| value.replace('\t', " "))
+            .collect::<Vec<_>>()
+            .join("\t")
+    );
+    let mut emitted = 0usize;
+    let mut truncated = false;
+    for (index, row) in data.iter().skip(offset).take(limit).enumerate() {
+        let excel_row = offset + index + 2;
+        let mut line = format!("\n{excel_row}");
+        for value in row {
+            line.push('\t');
+            line.push_str(&value.replace('\t', " "));
+        }
+        if !text.is_empty() && text.len() + line.len() > MAX_READ_BYTES {
+            truncated = true;
+            break;
+        }
+        text.push_str(&line);
+        emitted += 1;
+    }
+    let (text, cut) = truncate_utf8(text, MAX_READ_BYTES);
+    truncated = truncated || cut;
+    let next_offset = offset + emitted;
+    json!({
+        "path": raw,
+        "format": "xlsx",
+        "sheet": sheet,
+        "sheets": sheets.iter().map(|sheet| sheet.name.clone()).collect::<Vec<_>>(),
+        "offset": offset,
+        "limit": limit,
+        "next_offset": next_offset,
+        "eof": next_offset >= total_rows,
+        "total_rows": total_rows,
+        "total_cols": total_cols,
+        "truncated": truncated,
+        "text": text
+    })
 }
 
 /// Decodes at most `cap` bytes of UTF-8 text. A cut inside a multi-byte
@@ -1499,10 +1873,15 @@ fn file_specs() -> Vec<Value> {
         }),
         json!({
             "name": "read_file",
-            "description": "РџСЂРѕС‡РёС‚Р°С‚СЊ С‚РµРєСЃС‚РѕРІС‹Р№ С„Р°Р№Р» РёР· СЂР°Р±РѕС‡РµР№ РїР°РїРєРё. РђР±СЃРѕР»СЋС‚РЅС‹Рµ РїСѓС‚Рё Рё РІС‹С…РѕРґ Р·Р° РїР°РїРєСѓ Р·Р°РїСЂРµС‰РµРЅС‹.",
+            "description": "Read a text file, a .docx, or one page of a .xlsx from the workspace. For .xlsx pass sheet/offset/limit and continue while eof is false.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "path": { "type": "string" } },
+                "properties": {
+                    "path": { "type": "string" },
+                    "sheet": { "type": "string", "description": ".xlsx sheet name; the first sheet by default" },
+                    "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Zero-based data row offset (the header row is not counted)" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 200, "description": "Rows per page for .xlsx" }
+                },
                 "required": ["path"],
                 "additionalProperties": false
             }
@@ -1888,6 +2267,38 @@ fn file_call(workspace: &Path, name: &str, args: &Value) -> Result<Value> {
                     "format": "docx"
                 }));
             }
+            if is_xlsx_path(&path) {
+                let file = fs::File::open(&path)?;
+                let mut archive = zip::ZipArchive::new(file)?;
+                let sheets = xlsx_sheets(&mut archive)?;
+                let wanted = args.get("sheet").and_then(Value::as_str);
+                let index = match wanted {
+                    Some(name) => sheets
+                        .iter()
+                        .position(|sheet| sheet.name == name)
+                        .ok_or_else(|| {
+                            Error::Msg(format!(
+                                "sheet '{name}' not found; available: {}",
+                                sheets
+                                    .iter()
+                                    .map(|sheet| sheet.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ))
+                        })?,
+                    None => 0,
+                };
+                let shared = xlsx_shared_strings(&mut archive)?;
+                let rows = xlsx_rows(&mut archive, &sheets[index], &shared)?;
+                return Ok(xlsx_page(raw, &sheets[index].name, &sheets, &rows, args));
+            }
+            if path
+                .extension()
+                .map(|ext| ext.eq_ignore_ascii_case("xls"))
+                .unwrap_or(false)
+            {
+                return msg("legacy .xls is not supported; save it as .xlsx or .csv");
+            }
             let (bytes, total) = read_capped_file(&path)?;
             let truncated = bytes.len() > MAX_READ_BYTES;
             let text = utf8_prefix(&bytes, MAX_READ_BYTES)?;
@@ -2229,6 +2640,170 @@ mod tests {
         assert_eq!(value["format"], "docx");
         assert_eq!(value["text"], "Привет мир\nВторой абзац\n");
         assert_eq!(value["truncated"], false);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_file_pages_xlsx_rows_and_sheets() {
+        use std::io::Write as _;
+        let root = temp_workspace("xlsx");
+        let file = fs::File::create(root.join("data.xlsx")).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        let mut add = |name: &str, body: &str| {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        };
+        add(
+            "xl/workbook.xml",
+            r#"<workbook><sheets>
+                <sheet name="Data" r:id="rId1"/>
+                <sheet name="Other" r:id="rId2"/>
+            </sheets></workbook>"#,
+        );
+        add(
+            "xl/_rels/workbook.xml.rels",
+            r#"<Relationships>
+                <Relationship Id="rId1" Target="worksheets/sheet1.xml"/>
+                <Relationship Id="rId2" Target="worksheets/sheet2.xml"/>
+            </Relationships>"#,
+        );
+        add(
+            "xl/sharedStrings.xml",
+            r#"<sst>
+                <si><t>Name</t></si><si><t>Value</t></si>
+                <si><t>Alpha</t></si><si><t>Beta</t></si><si><t>Gamma</t></si>
+                <si><t>X</t></si><si><t>Y</t></si>
+            </sst>"#,
+        );
+        add(
+            "xl/worksheets/sheet1.xml",
+            r#"<worksheet><sheetData>
+                <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>
+                <row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2"><v>10</v></c></row>
+                <row r="3"><c r="A3" t="s"><v>3</v></c><c r="B3"><v>20</v></c></row>
+                <row r="4"><c r="A4" t="s"><v>4</v></c><c r="B4"><v>30</v></c></row>
+            </sheetData></worksheet>"#,
+        );
+        add(
+            "xl/worksheets/sheet2.xml",
+            r#"<worksheet><sheetData>
+                <row r="1"><c r="A1" t="s"><v>5</v></c><c r="B1" t="s"><v>6</v></c></row>
+            </sheetData></worksheet>"#,
+        );
+        zip.finish().unwrap();
+
+        let all = file_call(&root, "read_file", &json!({ "path": "data.xlsx" })).unwrap();
+        assert_eq!(all["format"], "xlsx");
+        assert_eq!(all["sheet"], "Data");
+        assert_eq!(all["total_rows"], 3);
+        assert_eq!(all["total_cols"], 2);
+        assert_eq!(all["next_offset"], 3);
+        assert_eq!(all["eof"], true);
+        let text = all["text"].as_str().unwrap();
+        assert!(text.starts_with("#\tName\tValue"));
+        assert!(text.contains("\n2\tAlpha\t10"));
+        assert!(text.contains("\n4\tGamma\t30"));
+
+        let first = file_call(
+            &root,
+            "read_file",
+            &json!({ "path": "data.xlsx", "limit": 1 }),
+        )
+        .unwrap();
+        assert_eq!(first["next_offset"], 1);
+        assert_eq!(first["eof"], false);
+        assert!(first["text"].as_str().unwrap().contains("Alpha"));
+        assert!(!first["text"].as_str().unwrap().contains("Gamma"));
+
+        let last = file_call(
+            &root,
+            "read_file",
+            &json!({ "path": "data.xlsx", "offset": 2, "limit": 1 }),
+        )
+        .unwrap();
+        assert_eq!(last["next_offset"], 3);
+        assert_eq!(last["eof"], true);
+        assert!(last["text"].as_str().unwrap().contains("Gamma"));
+
+        let other = file_call(
+            &root,
+            "read_file",
+            &json!({ "path": "data.xlsx", "sheet": "Other" }),
+        )
+        .unwrap();
+        assert_eq!(other["sheet"], "Other");
+        assert_eq!(other["total_rows"], 0);
+        assert!(other["text"].as_str().unwrap().contains("#\tX\tY"));
+        assert!(file_call(
+            &root,
+            "read_file",
+            &json!({ "path": "data.xlsx", "sheet": "Nope" })
+        )
+        .is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_file_pages_a_1500_row_sheet() {
+        use std::io::Write as _;
+        let root = temp_workspace("xlsx-1500");
+        let file = fs::File::create(root.join("big.xlsx")).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        let mut add = |name: &str, body: &str| {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        };
+        add(
+            "xl/workbook.xml",
+            r#"<workbook><sheets><sheet name="Data" r:id="rId1"/></sheets></workbook>"#,
+        );
+        add(
+            "xl/_rels/workbook.xml.rels",
+            r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#,
+        );
+        add(
+            "xl/sharedStrings.xml",
+            r#"<sst><si><t>N</t></si></sst>"#,
+        );
+        let mut sheet = String::from(
+            r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>N</t></is></c></row>"#,
+        );
+        for row in 2..=1501usize {
+            sheet.push_str(&format!(
+                r#"<row r="{row}"><c r="A{row}"><v>{}</v></c></row>"#,
+                row - 1
+            ));
+        }
+        sheet.push_str("</sheetData></worksheet>");
+        add("xl/worksheets/sheet1.xml", &sheet);
+        zip.finish().unwrap();
+
+        let page = file_call(
+            &root,
+            "read_file",
+            &json!({ "path": "big.xlsx", "limit": 200 }),
+        )
+        .unwrap();
+        assert_eq!(page["total_rows"], 1500);
+        assert_eq!(page["next_offset"], 200);
+        assert_eq!(page["eof"], false);
+        let text = page["text"].as_str().unwrap();
+        assert!(text.contains("\n2\t1"));
+        assert!(text.contains("\n201\t200"));
+        assert!(!text.contains("\n202\t201"));
+
+        let tail = file_call(
+            &root,
+            "read_file",
+            &json!({ "path": "big.xlsx", "offset": 1400, "limit": 200 }),
+        )
+        .unwrap();
+        assert_eq!(tail["next_offset"], 1500);
+        assert_eq!(tail["eof"], true);
+        let text = tail["text"].as_str().unwrap();
+        assert!(text.contains("\n1501\t1500"));
         let _ = fs::remove_dir_all(root);
     }
 
