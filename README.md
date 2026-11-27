@@ -302,7 +302,7 @@ powershell -File tools\build-installer.ps1 -Trust   # сборка + dev-под�
 - Для офлайн-сборки нужны кеши Tauri `%LOCALAPPDATA%\tauri\{NSIS,WixTools314}`
   (WebView2 туда больше не скачивается). Альтернатива для корпоративного
   контура — `fixedRuntime` с локальной папкой рантайма.
-- Результат: NSIS-установщик `ECO AIOps_0.5.0_x64-setup.exe` ~150 МБ в
+- Результат: NSIS-установщик `ECO AIOps_0.6.0_x64-setup.exe` ~150 МБ в
   `src-tauri/target/release/bundle/nsis/`. `bundle.targets` — `["nsis"]`;
   MSI в релиз не собирается.
 - Подпись Authenticode для dev-сборки:
