@@ -3,6 +3,7 @@ use crate::manifest::{self, Manifest, ToolDef};
 use crate::mcp::{self, McpSession};
 use crate::registry;
 use crate::secrets::SecretStore;
+use quick_xml::{events::Event, XmlVersion};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -72,6 +73,90 @@ fn read_capped_file(path: &Path) -> Result<(Vec<u8>, u64)> {
     let mut bytes = Vec::new();
     file.take(MAX_READ_BYTES as u64 + 1).read_to_end(&mut bytes)?;
     Ok((bytes, total))
+}
+
+/// Guards against zip bombs and huge Word documents: `word/document.xml` is
+/// parsed in memory before the text cap applies.
+const MAX_DOCX_XML_BYTES: u64 = 8 * 1024 * 1024;
+
+fn is_docx_path(path: &Path) -> bool {
+    path.extension()
+        .map(|ext| ext.eq_ignore_ascii_case("docx"))
+        .unwrap_or(false)
+}
+
+fn truncate_utf8(mut value: String, cap: usize) -> (String, bool) {
+    if value.len() <= cap {
+        return (value, false);
+    }
+    let mut end = cap;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    (value, true)
+}
+
+/// Extracts plain text from `.docx`: paragraphs become newlines, `<w:tab/>`
+/// becomes a tab. Other Office formats are left to package tools.
+fn docx_text(path: &Path) -> Result<(String, bool)> {
+    let file = fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    let entry = archive
+        .by_name("word/document.xml")
+        .map_err(|_| Error::Msg("not a .docx: missing word/document.xml".to_string()))?;
+    if entry.size() > MAX_DOCX_XML_BYTES {
+        return msg(".docx is too large to read");
+    }
+    let mut xml = Vec::new();
+    entry
+        .take(MAX_DOCX_XML_BYTES + 1)
+        .read_to_end(&mut xml)?;
+    if xml.len() as u64 > MAX_DOCX_XML_BYTES {
+        return msg(".docx is too large to read");
+    }
+    let xml = String::from_utf8(xml)
+        .map_err(|_| Error::Msg(".docx text is not UTF-8".to_string()))?;
+
+    let mut reader = quick_xml::Reader::from_str(&xml);
+    let mut out = String::new();
+    let mut text_depth = 0usize;
+    let mut truncated = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(event)) => {
+                if event.name().as_ref() == "w:t" {
+                    text_depth += 1;
+                }
+            }
+            Ok(Event::End(event)) => {
+                if event.name().as_ref() == "w:t" {
+                    text_depth = text_depth.saturating_sub(1);
+                }
+                if event.name().as_ref() == "w:p" {
+                    out.push('\n');
+                }
+            }
+            Ok(Event::Empty(event)) => match event.name().as_ref() {
+                "w:tab" => out.push('\t'),
+                "w:br" | "w:cr" => out.push('\n'),
+                _ => {}
+            },
+            Ok(Event::Text(text)) if text_depth > 0 => {
+                let value = text.xml_content(XmlVersion::Implicit1_0);
+                out.push_str(&value);
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return msg(format!(".docx text is not valid XML: {e}")),
+            _ => {}
+        }
+        if out.len() > MAX_READ_BYTES {
+            truncated = true;
+            break;
+        }
+    }
+    let (text, cut) = truncate_utf8(out, MAX_READ_BYTES);
+    Ok((text, truncated || cut))
 }
 
 /// Decodes at most `cap` bytes of UTF-8 text. A cut inside a multi-byte
@@ -1792,6 +1877,17 @@ fn file_call(workspace: &Path, name: &str, args: &Value) -> Result<Value> {
             if !path.is_file() {
                 return msg(format!("not a file: {}", path.display()));
             }
+            if is_docx_path(&path) {
+                let total = fs::metadata(&path)?.len();
+                let (text, truncated) = docx_text(&path)?;
+                return Ok(json!({
+                    "path": raw,
+                    "text": text,
+                    "truncated": truncated,
+                    "bytes": total,
+                    "format": "docx"
+                }));
+            }
             let (bytes, total) = read_capped_file(&path)?;
             let truncated = bytes.len() > MAX_READ_BYTES;
             let text = utf8_prefix(&bytes, MAX_READ_BYTES)?;
@@ -2104,6 +2200,36 @@ mod tests {
         let spec = package_spec(&tool);
         assert_eq!(spec["inputSchema"]["required"], json!(["input", "output"]));
         assert_eq!(spec["name"], "convert");
+    }
+
+    #[test]
+    fn read_file_extracts_docx_text() {
+        use std::io::Write as _;
+        let root = temp_workspace("docx");
+        let path = root.join("offer.docx");
+        let file = fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file(
+            "word/document.xml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <w:document><w:body>
+              <w:p><w:r><w:t>Привет</w:t></w:r><w:r><w:t xml:space="preserve"> мир</w:t></w:r></w:p>
+              <w:p><w:r><w:t>Второй абзац</w:t></w:r></w:p>
+            </w:body></w:document>"#
+                .as_bytes(),
+        )
+        .unwrap();
+        zip.finish().unwrap();
+
+        let value = file_call(&root, "read_file", &json!({ "path": "offer.docx" })).unwrap();
+        assert_eq!(value["format"], "docx");
+        assert_eq!(value["text"], "Привет мир\nВторой абзац\n");
+        assert_eq!(value["truncated"], false);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

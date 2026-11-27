@@ -1827,6 +1827,7 @@ pub fn chat_send(
     };
 
     let attachments = attachments.unwrap_or_default();
+    let home = state.home.clone();
     let cfg = config::load(&state.home);
     let caps = cfg
         .selected_model(&app_id)
@@ -1975,11 +1976,58 @@ pub fn chat_send(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as u64)
             .unwrap_or(0);
+        // Every attachment is also copied into the workspace inbox, so package
+        // tools (presentations, docs) can use the same file the model sees.
+        let workspace = config::workspace(&home, &app_id);
+        let prompt_text = match crate::engine::stage_attachments(&workspace, &attachments) {
+            Ok(staged) => {
+                let hint = crate::engine::inbox_hint(&staged);
+                if !staged.is_empty() {
+                    audit(
+                        &home,
+                        &app_id,
+                        serde_json::json!({
+                            "ts": crate::artifacts::now_secs(),
+                            "app_id": app_id,
+                            "app_version": session.app_version,
+                            "source": "platform",
+                            "action": "attachment_inbox",
+                            "ok": true,
+                            "files": staged,
+                        }),
+                    );
+                }
+                match hint {
+                    Some(hint) if text.trim().is_empty() => hint,
+                    Some(hint) => format!("{text}\n\n{hint}"),
+                    None => text.clone(),
+                }
+            }
+            Err(e) => {
+                // A read-only workspace must not break the turn: the model
+                // still gets inline text/images, it just cannot use the file.
+                eprintln!("attachment inbox failed: {e}");
+                audit(
+                    &home,
+                    &app_id,
+                    serde_json::json!({
+                        "ts": crate::artifacts::now_secs(),
+                        "app_id": app_id,
+                        "app_version": session.app_version,
+                        "source": "platform",
+                        "action": "attachment_inbox",
+                        "ok": false,
+                        "problem": e.to_string(),
+                    }),
+                );
+                text.clone()
+            }
+        };
         let retry_app = app.clone();
         let retry_app_id = app_id.clone();
         let retry_session = session.session_id.clone();
         let result =
-            session.prompt_with_retry(&text, variant.as_deref(), &attachments, move |notice| {
+            session.prompt_with_retry(&prompt_text, variant.as_deref(), &attachments, move |notice| {
                 let _ = retry_app.emit(
                     "chat://retry",
                     serde_json::json!({

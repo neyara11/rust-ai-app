@@ -254,8 +254,9 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
   doughnut/radar/scatter, bar+line mix, area (`line`+`fill`), горизонтальные
   столбцы (`indexAxis:"y"`), stack и вторая ось через `options.scales`.
 - Пиксельного паритета с превью чата нет: экспорт рендерит тот же исходник
-  нативными движками. Вложения Office в чате не поддержаны — файл должен лежать
-  в рабочей папке.
+  нативными движками. Документы Office/PDF из чата теперь копируются в
+  `<workspace>/inbox` (P18), поэтому `read_office` может их читать; отдельного
+  PDF-экстрактора нет.
 - Сборка: `tools/office-kit/build.ps1`, `tools/diagram-render/build.ps1`;
   `tools/package.ps1` теперь сам вызывает оба скрипта по `tools[].bin`.
   Офлайн-проверка — `tools/e2e-office.ps1` (`-Agent` добавляет `--chat-async`).
@@ -346,12 +347,14 @@ Allowlist (prod): `%ProgramData%\EcoAIOps\allowlist.json` + `allowlist.sig`,
 - Вложения в промпт: до 3 файлов. Изображения (`png/jpeg/webp/gif`, ≤4 МиБ,
   проверка магических байтов) уходят `file`-part'ом с data URL и требуют
   `vision` у выбранной модели; текстовые файлы (`text/*`, json/yaml/toml/xml/js,
-  ≤256 КиБ, UTF-8) вставляются text-part'ом с маркером `[attachment: name]` и
-  работают с любой моделью. UI: кнопка выбора файла, drag&drop, чипы с удалением;
-  история показывает вложения чипами, тело текстового файла в чат не выводится.
+  ≤256 КиБ, UTF-8) вставляются text-part'ом с маркером `[attachment: name]`;
+  документы (PDF/docx/xlsx/pptx/odt/ods/odp, ≤25 МиБ, ≤50 МиБ на ход) не
+  отправляются телом, а копируются в `<workspace>/inbox` и доступны инструментам
+  (P18). UI: кнопка выбора файла, drag&drop, чипы с удалением; история показывает
+  вложения чипами, тело текстового файла и путь inbox в чат не выводятся.
 - Чаты: список, создание, переключение, удаление; заголовок из первого сообщения;
   сессии сохраняются между запусками (проверено 11 → 12 при создании нового).
-- Прогресс: SSE `/global/event`, события `chat://stream|update|busy|error` с id сессии.
+- Прогресс: SSE `/global/event`, события `chat://stream|update|busy|error|retry` с id сессии.
   Стрим показывает reasoning и текст по мере генерации (троттлинг 80 мс), финальная
   история приходит из `GET /session/{id}/message` после завершения хода.
   «Занят» — на уровне сессии, можно работать в другом чате параллельно.
@@ -1076,19 +1079,6 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
 
 ### P15. Продуктовые решения 2026-11-27 — запланировано, не делать без отдельной задачи
 
-- **Все входящие вложения → `<workspace>/inbox` (уточнение 2026-11-27).** Сейчас
-  скрин из буфера и загруженная картинка видны модели (vision), но лежат только в
-  кэше `<home>/apps/<app_id>/attachments`, а текст вставляется прямо в промпт —
-  файлов в рабочей папке нет, поэтому пакетные инструменты (презентации, docx) их не
-  видят; пользователь копирует вручную. Решение: при любом вложении (paste/upload:
-  image, PDF/docx, текст) писать копию в `<workspace>/inbox/`, а в текст хода
-  добавлять путь. Vision и кэш для истории остаются; текст можно оставить inline.
-  Нужно: безопасное имя (сантайз, без перезаписи, короткий hash/дедуп), лимиты
-  (`MAX_ATTACHMENTS=3`, image 4 МиБ, text 256 КиБ; документы — 25 МиБ на файл и
-  50 МиБ на ход, настраиваемо), fail-open при read-only workspace, событие в аудит,
-  подсказка модели про inbox. `engine.rs:145` сейчас отклоняет не-image/не-text MIME.
-  PDF пока только сохраняется: читать нечем (`office-kit read` умеет `.docx`/`.xlsx`);
-  для чтения PDF нужен экстрактор или нативная поддержка PDF моделью.
 - **Память фактов — основной вариант (2026-11-27).** Локально, без Dify: платформенные
   инструменты `memory_save/search/forget/recent` (резервируются как `skill`/файлы/
   `artifact_*`, в манифесте приложения их нет), включаются per-app. Модель не получает
@@ -1145,6 +1135,29 @@ allowlist (версии/revoked/TTL/две подписи) и ротация anc
   тосты о повторе, затем ответ; в истории одно user-сообщение; в `audit/<app>.jsonl`
   есть `llm_retry`. opencode сам ретраит часть ошибок — чтобы увидеть именно
   платформенный ретрай, увеличьте `STUB_FAILS` (например, до 6).
+
+### P18. Вложения → `<workspace>/inbox` — сделано (2026-11-27)
+
+- `engine.rs`: все вложения (paste/upload; image, text, PDF/docx/xlsx/pptx/odt/ods/odp)
+  копируются в `<workspace>/inbox` при отправке хода. Имя content-addressed:
+  `<stem>-<sha8>.<ext>` (сантайз, без `..`/разделителей, reserved-имена Windows);
+  одинаковые байты переиспользуют один файл.
+- Модель получает путь в хвосте `[inbox: inbox/a.png, …]`; `parse_history` вырезает
+  эту строку, поэтому в чате её не видно. UI: чипы вложений; для документов —
+  text-part `[attachment: name]`, тело не отправляется.
+- Vision и inline-текст сохранены как раньше; документы читаются инструментами:
+  `platform_read_file` теперь извлекает текст из `.docx` (zip + `word/document.xml`,
+  cap 256 КиБ, zip-bomb guard 8 МиБ). `.xlsx` читает `office-kit read` в
+  `office-writer`; PDF пока только сохраняется.
+- Лимиты: image 4 МиБ, text 256 КиБ, документ 25 МиБ, 50 МиБ на ход; magic-check для
+  image/PDF/ZIP; `application/octet-stream` определяется по расширению.
+- Fail-open: read-only workspace не ломает ход — вложения остаются inline/в кэше,
+  ошибка пишется в `eprintln` и аудит (`attachment_inbox`, `ok:false`).
+- Аудит успеха: `attachment_inbox` с именем, относительным путём и размером.
+- UI: `accept` и лимиты расширены на PDF/docx/xlsx/pptx/odt/ods/odp.
+- Проверено: `cargo test` — 142 теста (включая `documents_are_accepted_without_vision_and_staged_in_inbox`,
+  `document_type_falls_back_to_extension_and_checks_magic`, `read_file_extracts_docx_text`),
+  `node tools/ui-smoke/smoke.mjs` — ok.
 
 ### С чего начать
 

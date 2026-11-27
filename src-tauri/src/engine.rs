@@ -86,6 +86,10 @@ pub const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 /// Inline text attachments follow the file-read cap: 256 KiB is a sensible
 /// single-message share of a 256k-token context window.
 pub const MAX_TEXT_BYTES: usize = 256 * 1024;
+/// Documents are written to `<workspace>/inbox` and never inlined, so the cap
+/// protects IPC/disk rather than the model context.
+pub const MAX_DOCUMENT_BYTES: usize = 25 * 1024 * 1024;
+pub const MAX_TOTAL_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 
 fn normalized_mime(raw: &str) -> String {
     let mime = raw.trim().to_lowercase();
@@ -108,6 +112,78 @@ fn is_text_mime(mime: &str) -> bool {
                 | "application/javascript"
                 | "application/x-sh"
         )
+}
+
+fn is_document_mime(mime: &str) -> bool {
+    matches!(
+        mime,
+        "application/pdf"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            | "application/vnd.oasis.opendocument.text"
+            | "application/vnd.oasis.opendocument.spreadsheet"
+            | "application/vnd.oasis.opendocument.presentation"
+    )
+}
+
+fn document_mime_for_name(name: &str) -> Option<&'static str> {
+    let ext = name.rsplit('.').next()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "pdf" => Some("application/pdf"),
+        "docx" => Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        "xlsx" => Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "pptx" => Some(
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ),
+        "odt" => Some("application/vnd.oasis.opendocument.text"),
+        "ods" => Some("application/vnd.oasis.opendocument.spreadsheet"),
+        "odp" => Some("application/vnd.oasis.opendocument.presentation"),
+        _ => None,
+    }
+}
+
+/// Clients sometimes report an empty MIME or `application/octet-stream` for
+/// office files; fall back to the extension before rejecting the attachment.
+fn resolved_mime(attachment: &AttachmentInput) -> String {
+    let mime = normalized_mime(&attachment.mime);
+    if mime.is_empty() || mime == "application/octet-stream" {
+        if let Some(by_name) = document_mime_for_name(&attachment.filename) {
+            return by_name.to_string();
+        }
+    }
+    mime
+}
+
+fn document_magic_matches(mime: &str, bytes: &[u8]) -> bool {
+    match mime {
+        "application/pdf" => bytes.starts_with(b"%PDF-"),
+        // OOXML and ODF are both ZIP containers.
+        _ => bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06"),
+    }
+}
+
+fn extension_for_mime(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "application/pdf" => "pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "application/vnd.oasis.opendocument.text" => "odt",
+        "application/vnd.oasis.opendocument.spreadsheet" => "ods",
+        "application/vnd.oasis.opendocument.presentation" => "odp",
+        "application/json" => "json",
+        "application/xml" => "xml",
+        "application/x-yaml" | "application/yaml" => "yaml",
+        "application/toml" => "toml",
+        "application/javascript" => "js",
+        _ if mime.starts_with("text/") => "txt",
+        _ => "bin",
+    }
 }
 
 fn image_magic_matches(mime: &str, bytes: &[u8]) -> bool {
@@ -140,8 +216,58 @@ fn safe_filename(raw: &str, mime: &str) -> String {
     }
 }
 
-/// Validates uploaded content before any engine call. Images require `vision`;
-/// text files are inlined as text parts and work with any model.
+/// Filesystem-safe stem: no separators or Windows-reserved characters, no
+/// leading/trailing dots, and a bounded length.
+fn safe_stem(raw: &str) -> String {
+    let name = safe_filename(raw, "application/octet-stream");
+    let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(&name);
+    let cleaned: String = stem
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+            {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .take(80)
+        .collect();
+    let cleaned = cleaned.trim_matches(|c| c == '.' || c == ' ');
+    if cleaned.is_empty() {
+        return "attachment".to_string();
+    }
+    // Windows device names cannot be used as file names.
+    let upper = cleaned.to_ascii_uppercase();
+    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper[3..].chars().all(|c| c.is_ascii_digit()));
+    if reserved {
+        format!("_{cleaned}")
+    } else {
+        cleaned.to_string()
+    }
+}
+
+/// Content-addressed name inside `inbox`: same bytes map to the same file, so
+/// repeated screenshots do not create duplicates.
+fn inbox_filename(attachment: &AttachmentInput, mime: &str, bytes: &[u8]) -> String {
+    let stem = safe_stem(&attachment.filename);
+    let hash = hex::encode(Sha256::digest(bytes));
+    let ext = attachment
+        .filename
+        .rsplit_once('.')
+        .map(|(_, ext)| ext)
+        .filter(|ext| !ext.is_empty() && ext.len() <= 8 && ext.chars().all(|c| c.is_ascii_alphanumeric()))
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_else(|| extension_for_mime(mime).to_string());
+    format!("{stem}-{}.{ext}", &hash[..8])
+}
+
+/// Validates uploaded content before any engine call. Images require `vision`
+/// and are sent inline; text is inlined; documents go to `<workspace>/inbox`
+/// and are read by the agent through tools.
 pub fn validate_attachments(attachments: &[AttachmentInput], vision: bool) -> Result<()> {
     if attachments.len() > MAX_ATTACHMENTS {
         return msg(format!(
@@ -149,11 +275,18 @@ pub fn validate_attachments(attachments: &[AttachmentInput], vision: bool) -> Re
             attachments.len()
         ));
     }
+    let mut total_bytes = 0usize;
     for attachment in attachments {
-        let mime = normalized_mime(&attachment.mime);
+        let mime = resolved_mime(attachment);
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(attachment.data.trim())
-            .map_err(|_| Error::Msg(format!("attachment '{}' is not valid base64", attachment.filename)))?;
+            .map_err(|_| {
+                Error::Msg(format!(
+                    "attachment '{}' is not valid base64",
+                    attachment.filename
+                ))
+            })?;
+        total_bytes = total_bytes.saturating_add(bytes.len());
         if is_text_mime(&mime) {
             if bytes.len() > MAX_TEXT_BYTES {
                 return msg(format!(
@@ -183,12 +316,30 @@ pub fn validate_attachments(attachments: &[AttachmentInput], vision: bool) -> Re
                     attachment.filename
                 ));
             }
+        } else if is_document_mime(&mime) {
+            if bytes.len() > MAX_DOCUMENT_BYTES {
+                return msg(format!(
+                    "attachment '{}' exceeds {MAX_DOCUMENT_BYTES} bytes",
+                    attachment.filename
+                ));
+            }
+            if !document_magic_matches(&mime, &bytes) {
+                return msg(format!(
+                    "attachment '{}' does not match declared type {mime}",
+                    attachment.filename
+                ));
+            }
         } else {
             return msg(format!(
                 "attachment '{}' has unsupported type {mime}",
                 attachment.filename
             ));
         }
+    }
+    if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES {
+        return msg(format!(
+            "attachments exceed {MAX_TOTAL_ATTACHMENT_BYTES} bytes in total"
+        ));
     }
     Ok(())
 }
@@ -199,7 +350,7 @@ fn build_parts(text: &str, attachments: &[AttachmentInput]) -> Vec<Value> {
         parts.push(json!({ "type": "text", "text": text }));
     }
     for attachment in attachments {
-        let mime = normalized_mime(&attachment.mime);
+        let mime = resolved_mime(attachment);
         let name = safe_filename(&attachment.filename, &mime);
         if is_text_mime(&mime) {
             let decoded = base64::engine::general_purpose::STANDARD
@@ -211,16 +362,80 @@ fn build_parts(text: &str, attachments: &[AttachmentInput]) -> Vec<Value> {
                 "type": "text",
                 "text": format!("[attachment: {name}]\n\n{decoded}")
             }));
-        } else {
+        } else if mime.starts_with("image/") {
             parts.push(json!({
                 "type": "file",
                 "mime": mime,
                 "url": format!("data:{mime};base64,{}", attachment.data.trim()),
                 "filename": name
             }));
+        } else {
+            // Documents are staged into the workspace inbox; the model gets a
+            // chip-like text part plus the inbox path appended by the caller.
+            parts.push(json!({
+                "type": "text",
+                "text": format!("[attachment: {name}]")
+            }));
         }
     }
     parts
+}
+
+/// A file copied from the chat into `<workspace>/inbox`.
+#[derive(Debug, Clone, Serialize)]
+pub struct StagedAttachment {
+    pub filename: String,
+    pub relative: String,
+    pub bytes: usize,
+}
+
+/// Model-facing suffix that hides the internal inbox paths from the UI.
+pub fn inbox_hint(staged: &[StagedAttachment]) -> Option<String> {
+    if staged.is_empty() {
+        return None;
+    }
+    let paths = staged
+        .iter()
+        .map(|file| file.relative.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("[inbox: {paths}]"))
+}
+
+/// Copies every incoming attachment into `<workspace>/inbox` so package tools
+/// can use it. Content-addressed names deduplicate repeated screenshots.
+pub fn stage_attachments(
+    workspace: &Path,
+    attachments: &[AttachmentInput],
+) -> Result<Vec<StagedAttachment>> {
+    if attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let inbox = workspace.join("inbox");
+    std::fs::create_dir_all(&inbox)?;
+    let mut staged = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let mime = resolved_mime(attachment);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(attachment.data.trim())
+            .map_err(|_| {
+                Error::Msg(format!(
+                    "attachment '{}' is not valid base64",
+                    attachment.filename
+                ))
+            })?;
+        let name = inbox_filename(attachment, &mime, &bytes);
+        let path = inbox.join(&name);
+        if !path.exists() {
+            std::fs::write(&path, &bytes)?;
+        }
+        staged.push(StagedAttachment {
+            filename: safe_filename(&attachment.filename, &mime),
+            relative: format!("inbox/{name}"),
+            bytes: bytes.len(),
+        });
+    }
+    Ok(staged)
 }
 
 impl ChatItem {
@@ -1458,9 +1673,9 @@ fn platform_tools_prompt(app: &manifest::Manifest, package_dir: &Path) -> String
         .any(|scope| scope == "workspace");
     if file_scope {
         lines.push(
-            "- `platform_list_files`, `platform_read_file`, `platform_write_file`, \
-             `platform_append_file` — рабочая папка приложения; пути только \
-             относительные, выход за папку запрещён."
+            "- `platform_list_files`, `platform_read_file` (текст и `.docx`), \
+             `platform_write_file`, `platform_append_file` — рабочая папка приложения; \
+             пути только относительные, выход за папку запрещён."
                 .to_string(),
         );
     }
@@ -2983,6 +3198,16 @@ fn inlined_attachment_name(text: &str) -> Option<&str> {
     }
 }
 
+/// The inbox hint is for the model only: the UI must not show an internal
+/// `[inbox: ...]` line in the user's message.
+fn strip_inbox_hint(text: &str) -> &str {
+    const MARKER: &str = "[inbox: ";
+    match text.find(MARKER) {
+        Some(idx) if idx == 0 || text[..idx].ends_with("\n\n") => text[..idx].trim_end(),
+        _ => text,
+    }
+}
+
 /// `data:image/png;base64,AAAA` -> `AAAA`. Non-base64 or non-data URLs yield
 /// `None`: the UI must not receive arbitrary remote references.
 fn data_uri_base64(url: &str) -> Option<&str> {
@@ -3098,14 +3323,18 @@ pub fn parse_history(raw: &Value) -> Vec<ChatItem> {
                 match part.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         if let Some(t) = part.get("text").and_then(Value::as_str) {
-                            if let Some(name) = inlined_attachment_name(t) {
+                            let visible = strip_inbox_hint(t);
+                            if visible.is_empty() {
+                                continue;
+                            }
+                            if let Some(name) = inlined_attachment_name(visible) {
                                 files.push((name.to_string(), "text/plain".to_string(), None));
                                 continue;
                             }
                             if !text.is_empty() {
                                 text.push('\n');
                             }
-                            text.push_str(t);
+                            text.push_str(visible);
                         }
                     }
                     Some("file") => {
@@ -3765,6 +3994,75 @@ mod tests {
         assert!(validate_attachments(&[make(200 * 1024)], false).is_ok());
         assert!(validate_attachments(&[make(MAX_TEXT_BYTES)], false).is_ok());
         assert!(validate_attachments(&[make(MAX_TEXT_BYTES + 1)], false).is_err());
+    }
+
+    fn docx_attachment(name: &str) -> AttachmentInput {
+        use base64::Engine as _;
+        AttachmentInput {
+            mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                .to_string(),
+            filename: name.to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04stub-docx"),
+        }
+    }
+
+    #[test]
+    fn documents_are_accepted_without_vision_and_staged_in_inbox() {
+        let home = test_home("inbox-stage");
+        let workspace = home.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let input = docx_attachment("..\\..\\План 2026.docx");
+
+        assert!(validate_attachments(std::slice::from_ref(&input), false).is_ok());
+        let parts = build_parts("", std::slice::from_ref(&input));
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "text");
+        assert!(parts[0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("[attachment: План 2026.docx]"));
+
+        let staged = stage_attachments(&workspace, std::slice::from_ref(&input)).unwrap();
+        assert_eq!(staged.len(), 1);
+        assert!(staged[0].relative.starts_with("inbox/"));
+        assert!(!staged[0].relative.contains(".."));
+        let copied = workspace.join(&staged[0].relative);
+        assert!(copied.exists());
+        assert_eq!(std::fs::read(&copied).unwrap(), b"PK\x03\x04stub-docx");
+
+        // Same bytes -> same content-addressed file, not a second copy.
+        let again = stage_attachments(&workspace, std::slice::from_ref(&input)).unwrap();
+        assert_eq!(again[0].relative, staged[0].relative);
+        assert_eq!(std::fs::read_dir(workspace.join("inbox")).unwrap().count(), 1);
+
+        let hint = inbox_hint(&staged).unwrap();
+        assert!(hint.contains(&staged[0].relative));
+        let raw = json!([{
+            "info": { "role": "user" },
+            "parts": [{ "type": "text", "text": format!("вопрос\n\n{hint}") }]
+        }]);
+        let items = parse_history(&raw);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "вопрос");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn document_type_falls_back_to_extension_and_checks_magic() {
+        use base64::Engine as _;
+        let pdf = AttachmentInput {
+            mime: "application/octet-stream".to_string(),
+            filename: "report.pdf".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\nbody"),
+        };
+        assert!(validate_attachments(std::slice::from_ref(&pdf), false).is_ok());
+
+        let fake = AttachmentInput {
+            mime: "application/pdf".to_string(),
+            filename: "fake.pdf".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"not a pdf"),
+        };
+        assert!(validate_attachments(std::slice::from_ref(&fake), false).is_err());
     }
 
     #[test]

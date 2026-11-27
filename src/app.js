@@ -2662,6 +2662,8 @@ const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 // Must match the backend magic check: anything else is rejected on send.
 const ATTACHMENT_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_TEXT_BYTES = 256 * 1024;
+const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 const ATTACHMENT_TEXT_MIMES = new Set([
   "application/json",
   "application/xml",
@@ -2669,6 +2671,15 @@ const ATTACHMENT_TEXT_MIMES = new Set([
   "application/yaml",
   "application/toml",
   "application/javascript",
+]);
+const ATTACHMENT_DOC_MIMES = new Set([
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/vnd.oasis.opendocument.text",
+  "application/vnd.oasis.opendocument.spreadsheet",
+  "application/vnd.oasis.opendocument.presentation",
 ]);
 const ATTACHMENT_EXT_MIME = {
   png: "image/png",
@@ -2692,11 +2703,20 @@ const ATTACHMENT_EXT_MIME = {
   py: "text/plain",
   toml: "application/toml",
   ini: "text/plain",
+  pdf: "application/pdf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  odp: "application/vnd.oasis.opendocument.presentation",
 };
 
 function attachmentMime(file) {
   const declared = String(file.type || "").toLowerCase();
-  if (declared) return declared === "image/jpg" ? "image/jpeg" : declared;
+  if (declared && declared !== "application/octet-stream") {
+    return declared === "image/jpg" ? "image/jpeg" : declared;
+  }
   const ext = String(file.name || "").split(".").pop().toLowerCase();
   return ATTACHMENT_EXT_MIME[ext] || "";
 }
@@ -2747,6 +2767,10 @@ async function addAttachments(fileList) {
   if (!files.length) return;
   const selected = selectedModelInfo();
   const caps = (selected && selected.model.capabilities) || {};
+  let totalBytes = ctx.attachments.reduce(
+    (sum, attachment) => sum + Number(attachment.size || 0),
+    0,
+  );
   for (const file of files) {
     if (ctx.attachments.length >= MAX_ATTACHMENTS) {
       toast(`Не больше ${MAX_ATTACHMENTS} вложений в сообщении`, true);
@@ -2755,11 +2779,12 @@ async function addAttachments(fileList) {
     const mime = attachmentMime(file);
     const isImage = mime.startsWith("image/");
     const isText = mime.startsWith("text/") || ATTACHMENT_TEXT_MIMES.has(mime);
+    const isDocument = ATTACHMENT_DOC_MIMES.has(mime);
     if (isImage && !ATTACHMENT_IMAGE_MIMES.has(mime)) {
       toast(`Формат изображения не поддерживается: ${file.name}`, true);
       continue;
     }
-    if (!isImage && !isText) {
+    if (!isImage && !isText && !isDocument) {
       toast(`Тип файла не поддерживается: ${file.name}`, true);
       continue;
     }
@@ -2775,9 +2800,26 @@ async function addAttachments(fileList) {
       toast(`Текстовый файл больше ${Math.round(MAX_TEXT_BYTES / 1024)} КиБ`, true);
       continue;
     }
+    if (isDocument && file.size > MAX_DOCUMENT_BYTES) {
+      toast(`Документ больше ${Math.round(MAX_DOCUMENT_BYTES / (1024 * 1024))} МиБ`, true);
+      continue;
+    }
+    if (totalBytes + file.size > MAX_TOTAL_ATTACHMENT_BYTES) {
+      toast(
+        `Вложения больше ${Math.round(MAX_TOTAL_ATTACHMENT_BYTES / (1024 * 1024))} МиБ в сумме`,
+        true,
+      );
+      break;
+    }
     try {
       const data = await readFileBase64(file);
-      ctx.attachments.push({ mime, filename: file.name || "attachment", data });
+      ctx.attachments.push({
+        mime,
+        filename: file.name || "attachment",
+        data,
+        size: file.size,
+      });
+      totalBytes += file.size;
     } catch (e) {
       toast(String(e), true);
     }
